@@ -17,7 +17,7 @@ def parse_cells(rows, category, row):
             raise SourceError('Unknown seat number')
         number,status=cells[:2]
         if status not in ('Available','Available Best Seat','Booked','Booked Best Seat','Unavailable'):
-            raise SourceError('Unknown seat status')
+            raise SourceError('Unknown seat status: '+repr(status[:80]))
         if status.startswith('Available'):
             available[f'{category}/{row}/{number}']={'row':row,'seat':number}
     return available

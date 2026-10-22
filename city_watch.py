@@ -69,14 +69,16 @@ def seed(db):
 
 
 class Runtime:
-    def __init__(self, db_path, dry_run=False):
+    def __init__(self, db_path, dry_run=False, local_setup=False):
         self.db_path = db_path
         self.dry_run = dry_run
+        self.local_setup = local_setup
         self.stop = threading.Event()
         self.rate = threading.Lock()
         self.last_request = 0
         db = connect(db_path)
         self.cooldown = float(meta(db,'source_cooldown','0'))
+        setmeta(db,'notifications_mode','disabled' if dry_run else 'waiting for local setup' if local_setup else 'enabled')
         seed(db)
         db.close()
 
@@ -199,7 +201,13 @@ class Runtime:
                 setmeta(db,'city_heartbeat',time.time())
                 setmeta(db,'city_state','cooldown' if self.cooldown>time.time() else 'running')
                 db.commit()
-                if not self.dry_run:drain(db)
+                ready=not self.dry_run
+                if ready and self.local_setup:
+                    from local_credentials import load
+                    ready=load()
+                setmeta(db,'notifications_mode','enabled' if ready else 'disabled' if self.dry_run else 'waiting for local setup')
+                db.commit()
+                if ready:drain(db)
                 self.stop.wait(1)
         finally:
             self.stop.set()
@@ -212,15 +220,16 @@ def main():
     parser.add_argument('--db',default=os.environ.get('BMS_DB',DEFAULT_DB))
     parser.add_argument('--seconds',type=int,default=0)
     parser.add_argument('--dry-run',action='store_true',help='Suppress Telegram; still writes the selected database')
+    parser.add_argument('--allow-local-setup',action='store_true',help='Wait for credentials entered through the private local setup page')
     args=parser.parse_args()
     Path(args.db).parent.mkdir(parents=True,exist_ok=True)
     lock=open(args.db+'.lock','a')
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:raise SystemExit('A monitor already owns this database')
-    if not args.dry_run and not all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')):
+    if not args.dry_run and not args.allow_local_setup and not all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')):
         raise SystemExit('Configure Telegram credentials securely before starting')
     logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
-    runtime=Runtime(args.db,args.dry_run)
+    runtime=Runtime(args.db,args.dry_run,args.allow_local_setup)
     for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:runtime.stop.set())
     runtime.run(args.seconds)
 

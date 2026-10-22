@@ -2,7 +2,31 @@
 
 No paid resources were activated and no secrets were requested in chat.
 
+## Latest: browser-free replacement active
+
+The browser-based supervisor and its workers were stopped at the user's request. The replacement is `api_watch.py`, supervised with `supervise.py --api`, launched using `deploy/run-api.sh`. It uses `runtime/api.sqlite3`, a separate durable database, and the saved local credentials outside Git. No browser windows are used by the replacement.
+
+Verified: direct HTTP catalogue fallback and showtime API reads, 31 passing tests, a fresh heartbeat with Telegram enabled, an accepted labelled readiness test through the durable outbox, and automatic restart of the worker with snapshots retained. Last observed partial inventory: 28 movies, 85 cinemas, 3,183 future screenings; 88 of 195 queued showtime pages had been checked. Counts grow as discovery proceeds. No current source errors were present at this check. An actual future source transition is not manufactured as a test.
+
+The dashboard at http://localhost:8000 now has a responsive layout, movie/show search, date filtering, recent delivery activity, and explicit Telegram/source status. Desktop and 390px mobile checks passed with no horizontal overflow or JavaScript errors.
+
+The source-owned CDN catalogue cache is used because the website's discovery endpoint returned HTTP 500 to normal direct reads. This is the same public fallback referenced by its client; it may lag live catalogue updates. Show and category availability are supported; individual seats/rows/maps are not included in this simplified replacement. Railway deployment remains inactive. The existing Dockerfile still runs the older browser worker and must be deliberately updated and tested before deploying the API replacement there.
+
+Stop: `wsl -d Ubuntu -u root -- bash '/mnt/d/bms tracking bot/bmschatgptbot-pc-handoff/deploy/run-api.sh' stop`.
+
+Older sections below are historical and superseded by this update.
+
 ## Update after Windows restart
+
+### Local preview running
+
+Started `deploy/local-preview.sh` in Ubuntu. A notification-free monitor and loopback dashboard run against `runtime/preview.sqlite3`; logs and PID files remain in ignored `runtime/`. The dashboard is accessible from Windows at http://localhost:8000. A fresh heartbeat was verified, but the catalogue request returned HTTP 403 and entered the persisted five-minute cooldown. No movies/shows were successfully scanned and no Telegram delivery was attempted. Keep the PC awake for this local process; there is no boot-start service configured.
+
+Start: `wsl -d Ubuntu -u root -- bash '/mnt/d/bms tracking bot/bmschatgptbot-pc-handoff/deploy/local-preview.sh'`
+
+Stop: `wsl -d Ubuntu -u root -- bash '/mnt/d/bms tracking bot/bmschatgptbot-pc-handoff/deploy/local-preview.sh' stop`
+
+The Windows sandbox/browser-control problem was traced to `.git` ownership by CodexSandboxOffline. The user repaired ownership and browser controls now work. Railway shows a verified trial with no payment method; deployment creation was blocked by “Deploys have been paused due to an upstream issue.”
 
 - WSL 3.0.3 starts successfully with kernel 6.18.54.1. Firmware virtualization is enabled and the Windows restart flag is clear.
 - Installed Ubuntu 26.04.1 LTS using the official WSL web-download option in an interactive terminal. Noninteractive installation attempts stalled and were stopped before retrying.

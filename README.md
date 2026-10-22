@@ -1,5 +1,21 @@
 # Hyderabad booking watch
 
+## Current PC version: Screenwatch
+
+The preferred local version now uses direct HTTP reads, with **no Chrome windows**. Open http://localhost:8000 for the redesigned dashboard. It automatically discovers Hyderabad movies through the public catalogue fallback used by BookMyShow's website, then checks source-offered dates and show/category availability. Catalogue cache updates may lag the live site. Individual seats, rows and native map images belong to the older browser implementation and are not included in this simpler version.
+
+Start from PowerShell:
+
+```powershell
+wsl -d Ubuntu -u root -- bash '/mnt/d/bms tracking bot/bmschatgptbot-pc-handoff/deploy/run-api.sh'
+```
+
+Stop with the same command followed by `stop`. The supervisor restarts the API monitor and dashboard after a failure. State/outbox are in ignored `runtime/api.sqlite3`, logs in `runtime/api-service.log`. The first observations are silent. Configure Telegram only at http://localhost:8000/setup; saved owner-only credentials stay outside this repository. Keep the PC awake and connected. No boot/logon service has been installed.
+
+Validated on this PC: 31 tests passed; live catalogue and showtime reads succeeded; a labelled Telegram test was accepted; worker restart retained state and resumed scanning. This is polling and does not prove complete city coverage or instant detection. The API response parser was informed by [aviiciii/bms-ticket-notifier](https://github.com/aviiciii/bms-ticket-notifier); its MIT notice and reference source are retained under `third_party/bms_ticket_notifier/`.
+
+The Railway Dockerfile now runs the API worker and password-protected mobile dashboard. See deploy/RAILWAY.md for secure setup and current deployment blockers. The image has not yet been built on Railway. The sections below describe the historical browser implementation.
+
 For Railway deployment, use the root Dockerfile and railway.toml with a persistent volume. See [Railway instructions](deploy/RAILWAY.md). Railway's ongoing usage may cost money; these files do not activate a deployment.
 
 Telegram notifications and a private dashboard for automatically discovered Hyderabad BookMyShow movies, cinemas, language/format variants, source-offered dates and screening seat maps. New-show notifications include the cinema, movie, language, format, date, times and booking link. Seat notifications include rows, seat numbers and a current native map image.

@@ -5,5 +5,6 @@
 **/*.pyc
 **/*.sqlite3*
 runtime
+transfer
 *.log
 *.tar.gz

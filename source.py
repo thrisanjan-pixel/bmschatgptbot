@@ -47,7 +47,7 @@ class Browser:
         proxy = os.environ.get('HTTPS_PROXY')
         self.browser = self.runtime.chromium.launch(
             executable_path=os.environ.get('CHROMIUM_PATH', '/usr/bin/chromium'),
-            headless=True, args=['--no-sandbox'],
+            headless=os.environ.get('BMS_HEADLESS','1')!='0', args=['--no-sandbox'],
             proxy={'server': proxy} if proxy else None)
         self.page = self.browser.new_page(viewport={'width': 1280, 'height': 1000})
         self.last = 0
