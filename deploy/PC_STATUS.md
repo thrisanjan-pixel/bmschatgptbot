@@ -2,6 +2,19 @@
 
 No paid resources were activated and no secrets were requested in chat.
 
+## Update after Windows restart
+
+- WSL 3.0.3 starts successfully with kernel 6.18.54.1. Firmware virtualization is enabled and the Windows restart flag is clear.
+- Installed Ubuntu 26.04.1 LTS using the official WSL web-download option in an interactive terminal. Noninteractive installation attempts stalled and were stopped before retrying.
+- Initial Ubuntu filesystem reported approximately 1.3 GB used before adding dependencies. This is disk use, not a measured download size.
+- Installed Python virtual-environment support, pinned Playwright 1.62.0, Chromium and browser system dependencies. The environment is `/root/.local/share/bms-verify/venv` in Ubuntu.
+- All 21 behavioral tests passed under Ubuntu Python 3.14.4.
+- A bounded, notification-free diagnostic used `/tmp/tmp.ZopclZrC0H/state.sqlite3`. Chromium reached BookMyShow, which returned HTTP 403. The worker logged a 300-second cooldown; successful live catalogue coverage is not established.
+- `deploy/verify-wsl.sh` reproduces local dependency setup, tests and a 60-second diagnostic with a separate temporary database. Install `python3-venv` first; browser system dependency installation requires root/sudo.
+- Railway deployment remains inactive. Limited Trial outbound restrictions, image validation and a sustainable zero-payment operating budget remain unresolved. No Telegram credentials are configured by this validation script.
+
+The earlier observations below describe the initial inspection before the restart; the update above supersedes their WSL/test blockers.
+
 ## Verified
 
 - Windows reports build 26200, release 25H2.
