@@ -1,0 +1,28 @@
+[Unit]
+Description=Hyderabad BookMyShow Telegram monitor
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=bmswatch
+Group=bmswatch
+WorkingDirectory=/opt/bmschatgptbot
+EnvironmentFile=/etc/bms-watch.env
+Environment=BMS_DB=/var/lib/bmschatgptbot/state.sqlite3
+Environment=HOME=/var/lib/bmschatgptbot
+ExecStart=/opt/bmschatgptbot/.venv/bin/python -u /opt/bmschatgptbot/city_watch.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=90
+StateDirectory=bmschatgptbot
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/bmschatgptbot
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,46 @@
+"""Restart development services while this machine remains active.
+
+This does not turn an ephemeral cloud workspace into a 24/7 host.
+"""
+import fcntl
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+
+def main():
+    root=Path(__file__).resolve().parent
+    db=Path(os.environ.get('BMS_DB','/workspace/booking-tracker/state.sqlite3'))
+    db.parent.mkdir(parents=True,exist_ok=True)
+    lock=open(str(db)+'.supervisor.lock','a')
+    try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except BlockingIOError:raise SystemExit('Development supervisor already running')
+    stop=threading.Event()
+    for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:stop.set())
+    processes={}
+    next_start={name:0 for name in ('city_watch.py','dashboard.py')}
+    try:
+        while not stop.is_set():
+            for name in next_start:
+                process=processes.get(name)
+                if process and process.poll() is not None:
+                    print(f'{name} exited ({process.returncode}); restarting in 10 seconds',flush=True)
+                    processes.pop(name);next_start[name]=time.monotonic()+10
+                if name not in processes and time.monotonic()>=next_start[name]:
+                    processes[name]=subprocess.Popen([sys.executable,'-u',str(root/name)],cwd=root)
+                    print(f'Started {name}, PID {processes[name].pid}',flush=True)
+            stop.wait(1)
+    finally:
+        for process in processes.values():
+            if process.poll() is None:process.terminate()
+        deadline=time.monotonic()+90
+        for process in processes.values():
+            try:process.wait(timeout=max(1,deadline-time.monotonic()))
+            except subprocess.TimeoutExpired:process.kill();process.wait()
+
+
+if __name__=='__main__':main()

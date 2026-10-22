@@ -1,0 +1,24 @@
+[Unit]
+Description=Private Hyderabad booking dashboard
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=bmswatch
+Group=bmswatch
+WorkingDirectory=/opt/bmschatgptbot
+Environment=BMS_DB=/var/lib/bmschatgptbot/state.sqlite3
+ExecStart=/opt/bmschatgptbot/.venv/bin/python /opt/bmschatgptbot/dashboard.py
+Restart=always
+RestartSec=10
+StateDirectory=bmschatgptbot
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/bmschatgptbot
+
+[Install]
+WantedBy=multi-user.target
