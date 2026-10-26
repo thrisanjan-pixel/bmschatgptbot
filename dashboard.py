@@ -24,6 +24,8 @@ def status(path):
         state=meta(db,'city_state','stopped')
         if time.time()-heartbeat>90:state='stale'
         return {'state':state,'heartbeat':heartbeat,'cooldown_until':float(meta(db,'source_cooldown','0')),
+                'hosted':os.environ.get('BMS_PUBLIC')=='1',
+                'telegram_configured':all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')),
                 'mode':meta(db,'monitor_mode','browser'),
                 'last_success':float(meta(db,'api_last_success',meta(db,'catalog_last_success','0'))),
                 'recent_alerts':[dict(r) for r in db.execute('SELECT text,created,delivered,attempts FROM outbox ORDER BY created DESC LIMIT 12')],
