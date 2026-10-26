@@ -8,6 +8,7 @@ import html
 import re
 import secrets
 import threading
+from http.cookies import SimpleCookie, CookieError
 from urllib.parse import parse_qs,urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,17 +41,31 @@ def status(path):
 def handler(path, public=False):
     csrf=secrets.token_urlsafe(32)
     setup_lock=threading.Lock()
+    sessions={}
+    login_failures=[]
+    auth_lock=threading.Lock()
     class Handler(BaseHTTPRequestHandler):
-        def authorized(self):
+        def authenticated(self):
             if not public:return True
             password=os.environ.get('DASHBOARD_PASSWORD','')
             expected='Basic '+base64.b64encode(('screenwatch:'+password).encode()).decode()
             if password and hmac.compare_digest(self.headers.get('Authorization',''),expected):return True
+            try:
+                cookies=SimpleCookie(self.headers.get('Cookie',''))
+                token=cookies['screenwatch_session'].value if 'screenwatch_session' in cookies else ''
+            except CookieError:return False
+            with auth_lock:return bool(password and sessions.get(token,0)>time.time())
+        def authorized(self):
+            if self.authenticated():return True
             self.send_response(401)
             self.send_header('WWW-Authenticate','Basic realm="Screenwatch", charset="UTF-8"')
             self.send_header('Cache-Control','no-store')
             self.end_headers()
             return False
+        def login_page(self,error='',code=200):
+            self.reply('''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · Screenwatch</title>
+<style>body{margin:0;background:#f4f6fb;color:#17233b;font:16px system-ui;display:grid;place-items:center;min-height:100vh}main{width:min(360px,80vw);padding:32px;background:white;border:1px solid #dce2ef;border-radius:20px;box-shadow:0 12px 40px #17233b0a}small{color:#d85b29;font-weight:700;letter-spacing:.12em}h1{font-size:30px;margin-bottom:8px}p{color:#65718a;line-height:1.5}label{display:block;margin:24px 0 8px}input,button{box-sizing:border-box;width:100%;padding:14px;border-radius:10px;font:inherit}input{border:1px solid #cbd3e2}button{margin-top:18px;background:#e76b35;color:white;border:0;font-weight:700;cursor:pointer}.error{color:#a42d24}</style>
+<main><small>SCREENWATCH</small><h1>Your next show.</h1><p>Sign in to manage your personal movie alerts.</p><p class="error">'''+html.escape(error)+'''</p><form action="/login" method="post"><input type="hidden" name="csrf" value="'''+csrf+'''"><label for="password">Website password</label><input id="password" type="password" name="password" required autocomplete="current-password" autofocus><button>Sign in</button></form></main></html>''',code)
         def reply(self,body,code=200):
             body=body.encode()
             self.send_response(code)
@@ -63,6 +78,29 @@ def handler(path, public=False):
         def local_host(self):
             return self.headers.get('Host','') in (f'localhost:{self.server.server_port}',f'127.0.0.1:{self.server.server_port}')
         def do_POST(self):
+            if public and self.path=='/login':
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<=4096:raise ValueError()
+                    data=parse_qs(self.rfile.read(length).decode())
+                    if not hmac.compare_digest(data.get('csrf',[''])[0],csrf):raise ValueError()
+                except (ValueError,UnicodeError):self.reply('Reload the sign-in page and try again.',403);return
+                with auth_lock:
+                    now=time.time()
+                    login_failures[:]=[t for t in login_failures if t>now-60]
+                    if len(login_failures)>=10:self.login_page('Too many attempts. Try again in one minute.',429);return
+                    password=os.environ.get('DASHBOARD_PASSWORD','')
+                    if not password or not hmac.compare_digest(data.get('password',[''])[0].encode(),password.encode()):
+                        login_failures.append(now);self.login_page('Password incorrect. Try again.',401);return
+                    for key in list(sessions):
+                        if sessions[key]<=now:del sessions[key]
+                    if len(sessions)>=100:sessions.pop(next(iter(sessions)))
+                    session=secrets.token_urlsafe(32);sessions[session]=now+28800
+                self.send_response(303)
+                self.send_header('Location','/')
+                self.send_header('Set-Cookie','screenwatch_session='+session+'; Path=/; Max-Age=28800; HttpOnly; Secure; SameSite=Strict')
+                self.send_header('Cache-Control','no-store')
+                self.end_headers();return
             if self.path=='/api/rows':
                 if not self.authorized():return
                 if os.environ.get('BMS_ROWS_ENABLED')!='1':self.reply('Row reader is unavailable on this host.',503);return
@@ -135,6 +173,8 @@ def handler(path, public=False):
         def do_GET(self):
             if self.path=='/healthz':
                 self.reply('ok');return
+            if public and self.path in ('/','/login') and not self.authenticated():
+                self.login_page();return
             if not self.authorized():return
             if self.path=='/setup':
                 if public:self.reply('Manage Telegram in Railway service variables.',403);return
