@@ -18,6 +18,11 @@ class ReadError(RuntimeError):
 
 def today():return dt.datetime.now(IST).strftime('%Y%m%d')
 def end_day(day):return (dt.datetime.strptime(day,'%Y%m%d').replace(tzinfo=IST)+dt.timedelta(days=1)).timestamp()
+def seat_layout_url(show):
+    event=str(show.get('event',''));venue=str(show.get('venue_code',''));session=str(show.get('session',''));day=str(show.get('date',''))
+    if not re.fullmatch(r'ET[A-Z0-9]{6,}',event) or not re.fullmatch(r'[A-Z0-9]+',venue) or not re.fullmatch(r'[A-Za-z0-9]+',session) or not re.fullmatch(r'\d{8}',day):
+        raise ReadError('Invalid showtime link identity')
+    return f'{BASE}/movies/hyderabad/seat-layout/{event}/{venue}/{session}/{day}'
 def nodes(value):
     if isinstance(value,dict):
         yield value

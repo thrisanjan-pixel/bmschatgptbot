@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from api_source import IST,ReadError,parse,show_url
+from api_source import IST,ReadError,parse,seat_layout_url,show_url
 from api_watch import ingest
 from store import connect,coverage,setmeta
 from watch_preferences import defaults
@@ -46,8 +46,9 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(messages),2)
         for code,name in [('PVR','PVR Cinema'),('ART','ART Cinemas')]:
             message=next(m for m in messages if name in m)
-            self.assertIn(f'/buytickets/{code}/{DAY}',message)
-            self.assertNotIn('/buytickets/TEST/',message)
+            session='2' if code=='PVR' else '1'
+            self.assertIn(f'/movies/hyderabad/seat-layout/{EVENT}/{code}/{session}/{DAY}',message)
+            self.assertNotIn('/buytickets/',message)
             self.assertIn(dt.datetime.strptime(DAY,'%Y%m%d').strftime('%d %b %Y'),message)
         ingest(self.db,self.job,changed)
         self.assertEqual(coverage(self.db)['pending_alerts'],2)
@@ -69,6 +70,10 @@ class ApiTests(unittest.TestCase):
     def test_wrong_city_rejected(self):
         bad=response();bad['data']['showtimeWidgets'][0]['data'][0]['data'][0]['header']['redirectionUrl']='https://in.bookmyshow.com/cinemas/mumbai/test/buytickets/TEST/'+DAY
         with self.assertRaises(ReadError):parse(bad,EVENT,DAY)
+    def test_seat_layout_url_targets_exact_showtime(self):
+        self.assertEqual(seat_layout_url({'event':EVENT,'venue_code':'TEST','session':'6249','date':DAY}),
+            f'https://in.bookmyshow.com/movies/hyderabad/seat-layout/{EVENT}/TEST/6249/{DAY}')
+        with self.assertRaises(ReadError):seat_layout_url({'event':EVENT,'venue_code':'TEST','session':'x/evil','date':DAY})
     def test_missing_categories_preserve_last_snapshot(self):
         ingest(self.db,self.job,response())
         bad=response();bad['data']['showtimeWidgets'][0]['data'][0]['data'][0]['showtimes'][0]['additionalData']['categories']=[]

@@ -1,13 +1,14 @@
 """Read one public seat map on an isolated virtual display. Never select seats."""
 import json,os,re,sys
 from playwright.sync_api import sync_playwright
+from api_source import seat_layout_url
 
 def read(show):
     with sync_playwright() as runtime:
         browser=runtime.chromium.launch(headless=False)
         try:
             page=browser.new_page()
-            url=f"https://in.bookmyshow.com/movies/hyd/seat-layout/{show['event']}/{show['venue_code']}/{show['session']}/{show['date']}"
+            url=seat_layout_url(show)
             response=page.goto(url,wait_until='domcontentloaded',timeout=45000)
             if not response or response.status!=200:raise ValueError('Seat page unavailable (HTTP '+str(response.status if response else 0)+')')
             if page.url.split('?')[0]!=url:raise ValueError('Seat page redirected')

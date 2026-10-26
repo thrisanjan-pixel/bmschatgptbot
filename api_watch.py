@@ -9,7 +9,7 @@ from pathlib import Path
 import signal
 import threading
 import time
-from api_source import CATALOG,ReadError,end_day,get_json,movies,parse,show_url,today
+from api_source import CATALOG,ReadError,end_day,get_json,movies,parse,seat_layout_url,show_url,today
 from local_credentials import load
 from store import connect,coverage,emit,enqueue,meta,setmeta
 from telegram import drain,send
@@ -44,7 +44,7 @@ def ingest(db,job,data):
                 if opened:change='Category now available · '+show['time']+' · '+', '.join(opened)
             if change:
                 group=changes.setdefault(show['venue_code'],{'show':show,'lines':[]})
-                group['lines'].append(change)
+                group['lines'].append((change,seat_layout_url(show)))
     if previous!=current:
         revision=int(meta(db,'revision:'+key,'0'))+1;setmeta(db,'revision:'+key,revision)
         if changes:
@@ -52,16 +52,17 @@ def ingest(db,job,data):
             for venue,group in changes.items():
                 show=group['show']
                 heading=f"🎬 {title}\n{show['language']}\n📅 {date}\n📍 {show['venue']}\n\n"
-                # Split at line boundaries and retain the matching venue link on every part.
+                # Put a direct seat-selection link next to every matching showtime.
                 chunks=['']
-                for line in group['lines']:
-                    if len(chunks[-1])+len(line)>2800:chunks.append('')
-                    chunks[-1]+=line+'\n'
+                for line,url in group['lines']:
+                    block=line+'\n'+url+'\n'
+                    if len(chunks[-1])+len(block)>2800:chunks.append('')
+                    chunks[-1]+=block
                 for index,chunk in enumerate(chunks):
                     now=time.time()
                     pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 LIMIT 1').fetchone()
                     if now-float(meta(db,'watch_last_alert','0'))>=prefs['interval_minutes']*60 and (not pending or prefs['interval_minutes']==0):
-                        emit(db,f'{key}:{revision}:{venue}:{index}',heading+chunk+'\n'+show['url'])
+                        emit(db,f'{key}:{revision}:{venue}:{index}',heading+chunk)
                         setmeta(db,'watch_last_alert',now)
                     else:setmeta(db,'watch_skipped',int(meta(db,'watch_skipped','0'))+1)
     db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',(key,json.dumps(current)))
