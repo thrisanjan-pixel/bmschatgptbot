@@ -18,6 +18,19 @@ def get(db,show_id):
     schema(db);row=db.execute('SELECT * FROM row_layouts WHERE show_id=?',(show_id,)).fetchone()
     return {**dict(row),'data':json.loads(row['payload'])} if row else {'show_id':show_id,'checked':0,'error':'','data':{}}
 
+def run_reader(show,timeout=75):
+    command=['xvfb-run','-a',sys.executable,str(Path(__file__).with_name('row_reader.py'))]
+    process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
+    try:
+        stdout,stderr=process.communicate(json.dumps(show),timeout=timeout)
+        return subprocess.CompletedProcess(command,process.returncode,stdout,stderr)
+    except subprocess.TimeoutExpired:
+        # Killing xvfb-run alone leaves its browser/display children alive.
+        try:os.killpg(process.pid,signal.SIGKILL)
+        except ProcessLookupError:pass
+        process.communicate()
+        raise ValueError('Seat layout timed out. Try loading it again later.') from None
+
 def ingest(db,show,result):
     schema(db);old=get(db,show['id']);previous=old['data'];p=prefs.read(db)
     known={r['id']:r for r in previous.get('rows',[])};known.update({r['id']:r for r in result['rows']});result['rows']=list(known.values())
@@ -49,7 +62,7 @@ def main():
             db.execute("UPDATE row_layouts SET due=0,error='Showtime has expired' WHERE show_id=?",(job['show_id'],));db.commit();continue
         show=json.loads(row[0])
         try:
-            run=subprocess.run(['xvfb-run','-a',sys.executable,str(Path(__file__).with_name('row_reader.py'))],input=json.dumps(show),text=True,capture_output=True,timeout=75)
+            run=run_reader(show)
             result=json.loads(run.stdout)
             if run.returncode or result.get('error'):raise ValueError(result.get('error','Seat read failed'))
             ingest(db,show,result['data'])

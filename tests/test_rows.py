@@ -1,9 +1,9 @@
-import copy,json,os,tempfile,time,unittest
+import copy,json,os,tempfile,time,unittest,subprocess,signal
 import threading,urllib.request,urllib.parse
 from http.server import ThreadingHTTPServer
 from dashboard import handler
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch,Mock
 from store import connect,setmeta,meta
 import row_watch
 import watch_preferences as prefs
@@ -60,3 +60,11 @@ class RowTests(unittest.TestCase):
    self.assertEqual(data['show_id'],self.show['id'])
    self.assertEqual(data['data']['rows'][0]['id'],'Gold / A')
   finally:server.shutdown();server.server_close();thread.join()
+ def test_timed_out_reader_kills_the_browser_process_group(self):
+  process=Mock(pid=321)
+  process.communicate.side_effect=[subprocess.TimeoutExpired('reader',1),('','')]
+  with patch('row_watch.subprocess.Popen',return_value=process) as launch,patch('row_watch.os.killpg') as kill:
+   with self.assertRaisesRegex(ValueError,'timed out'):row_watch.run_reader(self.show,timeout=1)
+  self.assertTrue(launch.call_args.kwargs['start_new_session'])
+  kill.assert_called_once_with(321,signal.SIGKILL)
+  self.assertEqual(process.communicate.call_count,2)
