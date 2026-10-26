@@ -1,11 +1,13 @@
 import datetime as dt
+import copy
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from api_source import IST,ReadError,parse,show_url
 from api_watch import ingest
-from store import connect,coverage
+from store import connect,coverage,setmeta
+from watch_preferences import defaults
 
 DAY=(dt.datetime.now(IST)+dt.timedelta(days=2)).strftime('%Y%m%d')
 EVENT='ET12345678'
@@ -20,11 +22,35 @@ def response(session='1',status='0',event=EVENT):
 class ApiTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.db=connect(str(Path(self.tmp.name)/'state.sqlite3'))
+        setmeta(self.db,'watch_preferences',json.dumps({**defaults(),'enabled':True,'availability':True,'interval_minutes':0}))
         self.job={'id':'discovery:'+show_url(EVENT,DAY),'payload':json.dumps({'event':EVENT,'date':DAY,'movie':'Test Movie','notify_first':False})}
     def tearDown(self):self.db.close();self.tmp.cleanup()
     def test_silent_baseline_and_new_show(self):
         ingest(self.db,self.job,response());self.assertEqual(coverage(self.db)['pending_alerts'],0)
         ingest(self.db,self.job,response('2'));self.assertEqual(coverage(self.db)['pending_alerts'],1)
+    def test_alert_links_match_changed_cinemas(self):
+        baseline=response()
+        cards=baseline['data']['showtimeWidgets'][0]['data'][0]['data']
+        for code,name in [('PVR','PVR Cinema'),('ART','ART Cinemas')]:
+            card=copy.deepcopy(cards[0])
+            card['additionalData']={'venueCode':code,'venueName':name}
+            card['header']['redirectionUrl']=f'https://in.bookmyshow.com/cinemas/hyderabad/{code.lower()}/buytickets/{code}/{DAY}'
+            cards.append(card)
+        ingest(self.db,self.job,baseline)
+        changed=copy.deepcopy(baseline)
+        cards=changed['data']['showtimeWidgets'][0]['data'][0]['data']
+        cards[1]['showtimes'][0]['additionalData']['sessionId']='2'
+        cards[2]['showtimes'][0]['additionalData']['categories'][0]['availStatus']='3'
+        ingest(self.db,self.job,changed)
+        messages=[r[0] for r in self.db.execute('SELECT text FROM outbox')]
+        self.assertEqual(len(messages),2)
+        for code,name in [('PVR','PVR Cinema'),('ART','ART Cinemas')]:
+            message=next(m for m in messages if name in m)
+            self.assertIn(f'/buytickets/{code}/{DAY}',message)
+            self.assertNotIn('/buytickets/TEST/',message)
+            self.assertIn(dt.datetime.strptime(DAY,'%Y%m%d').strftime('%d %b %Y'),message)
+        ingest(self.db,self.job,changed)
+        self.assertEqual(coverage(self.db)['pending_alerts'],2)
     def test_repeat_category_releases_and_retry_persistence(self):
         ingest(self.db,self.job,response())
         for status in ('3','0','3'):ingest(self.db,self.job,response(status=status))

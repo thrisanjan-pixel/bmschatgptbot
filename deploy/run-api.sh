@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p runtime
 export BMS_DB="$PWD/runtime/api.sqlite3"
+export BMS_ROWS_ENABLED=1
 python="${BMS_PYTHON:-$HOME/.local/share/bms-verify/venv/bin/python}"
 if [[ "${1:-start}" == stop ]]; then
     if [[ -f runtime/api-supervisor.pid ]]; then

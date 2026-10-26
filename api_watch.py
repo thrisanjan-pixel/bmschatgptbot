@@ -1,5 +1,6 @@
 """One paced HTTP worker, durable state and Telegram delivery. No browser processes."""
 import argparse
+import datetime as dt
 import fcntl
 import json
 import logging
@@ -12,6 +13,7 @@ from api_source import CATALOG,ReadError,end_day,get_json,movies,parse,show_url,
 from local_credentials import load
 from store import connect,coverage,emit,enqueue,meta,setmeta
 from telegram import drain,send
+import watch_preferences as preferences
 
 def schedule(db,event,day,title,notify=False):
     url=show_url(event,day)
@@ -24,23 +26,44 @@ def ingest(db,job,data):
     previous=json.loads(row[0]) if row else None;current=result['shows']
     title=result['film'] or args['movie']
     for show in current.values():show['movie']=show['movie'] or title
-    changes=[]
-    if previous is not None or args['notify_first']:
+    changes={}
+    prefs=preferences.read(db)
+    enabled=prefs['enabled'] and not prefs.get('row_show') and meta(db,'notifications_paused','0')!='1'
+    if previous is not None and enabled:
         old=previous or {}
         for identity,show in current.items():
-            if identity not in old:
-                changes.append('New show · '+show['venue']+' · '+show['time'])
-            else:
+            if not preferences.matches(show,prefs):continue
+            change=None
+            if identity not in old and prefs['new_shows']:
+                change='New show · '+show['time']
+            elif identity in old and prefs['availability']:
                 before=old[identity].get('categories',{})
                 opened=[c['name'] for k,c in show['categories'].items()
-                    if k in before and before[k]['status']=='0' and c['status'] in ('1','2','3')]
-                if opened:changes.append('Category now available · '+show['venue']+' · '+show['time']+' · '+', '.join(opened))
+                    if k in before and before[k]['status']=='0' and c['status'] in ('1','2','3')
+                    and (not prefs['categories'] or c['name'] in prefs['categories'])]
+                if opened:change='Category now available · '+show['time']+' · '+', '.join(opened)
+            if change:
+                group=changes.setdefault(show['venue_code'],{'show':show,'lines':[]})
+                group['lines'].append(change)
     if previous!=current:
         revision=int(meta(db,'revision:'+key,'0'))+1;setmeta(db,'revision:'+key,revision)
         if changes:
-            first=next(iter(current.values()))
-            message=f"🎬 {title}\n{first['language']}\n📅 {result['day']}\n\n"+'\n'.join(changes)
-            emit(db,key+':'+str(revision),message[:3300]+'\n\n'+first['url'])
+            date=dt.datetime.strptime(result['day'],'%Y%m%d').strftime('%d %b %Y')
+            for venue,group in changes.items():
+                show=group['show']
+                heading=f"🎬 {title}\n{show['language']}\n📅 {date}\n📍 {show['venue']}\n\n"
+                # Split at line boundaries and retain the matching venue link on every part.
+                chunks=['']
+                for line in group['lines']:
+                    if len(chunks[-1])+len(line)>2800:chunks.append('')
+                    chunks[-1]+=line+'\n'
+                for index,chunk in enumerate(chunks):
+                    now=time.time()
+                    pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 LIMIT 1').fetchone()
+                    if now-float(meta(db,'watch_last_alert','0'))>=prefs['interval_minutes']*60 and (not pending or prefs['interval_minutes']==0):
+                        emit(db,f'{key}:{revision}:{venue}:{index}',heading+chunk+'\n'+show['url'])
+                        setmeta(db,'watch_last_alert',now)
+                    else:setmeta(db,'watch_skipped',int(meta(db,'watch_skipped','0'))+1)
     db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',(key,json.dumps(current)))
     for old in db.execute('SELECT id,payload FROM sessions WHERE active=1').fetchall():
         show=json.loads(old['payload'])
@@ -105,11 +128,22 @@ class Monitor:
         try:
             while not self.stop.is_set() and (not seconds or time.monotonic()-start<seconds):
                 if not thread.is_alive():raise RuntimeError('HTTP worker stopped')
-                ready=not self.dry_run and load()
-                setmeta(db,'notifications_mode','enabled' if ready else 'disabled' if self.dry_run else 'waiting for local setup')
+                muted=meta(db,'notifications_paused','0')=='1' or not preferences.read(db)['enabled']
+                ready=not muted and not self.dry_run and load()
+                setmeta(db,'notifications_mode','paused' if muted else 'enabled' if ready else 'disabled' if self.dry_run else 'waiting for local setup')
                 setmeta(db,'city_state','cooldown' if float(meta(db,'source_cooldown','0'))>time.time() else 'running')
                 setmeta(db,'city_heartbeat',time.time());setmeta(db,'monitor_mode','api');db.commit()
-                if ready:drain(db)
+                if ready:
+                    # Serialize sending with preference saves: after a pause is saved,
+                    # no new delivery can begin using an earlier settings read.
+                    db.execute('BEGIN IMMEDIATE')
+                    prefs=preferences.read(db)
+                    last=db.execute('SELECT coalesce(max(delivered),0) FROM outbox').fetchone()[0]
+                    if prefs['enabled'] and meta(db,'notifications_paused','0')!='1' and time.time()-last>=prefs['interval_minutes']*60:
+                        drain(db)
+                        delivered_at=db.execute('SELECT coalesce(max(delivered),0) FROM outbox').fetchone()[0]
+                        if delivered_at>last:preferences.delivered(db)
+                    db.commit()
                 self.stop.wait(1)
         finally:
             self.stop.set();thread.join(timeout=30);setmeta(db,'city_state','stopped');db.commit();db.close()

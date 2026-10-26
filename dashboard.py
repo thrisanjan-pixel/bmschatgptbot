@@ -4,14 +4,16 @@ import json
 import os
 import time
 import hmac
+import html
 import re
 import secrets
 import threading
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs,urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 DEFAULT_DB='/workspace/booking-tracker/state.sqlite3'
 from store import connect, coverage, meta, setmeta
+import watch_preferences as preferences
 
 
 def status(path):
@@ -61,6 +63,37 @@ def handler(path, public=False):
         def local_host(self):
             return self.headers.get('Host','') in (f'localhost:{self.server.server_port}',f'127.0.0.1:{self.server.server_port}')
         def do_POST(self):
+            if self.path=='/api/rows':
+                if not self.authorized():return
+                if os.environ.get('BMS_ROWS_ENABLED')!='1':self.reply('Row reader is unavailable on this host.',503);return
+                if (not public and not self.local_host()) or not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<2048:raise ValueError('Invalid request')
+                    show_id=json.loads(self.rfile.read(length)).get('show_id')
+                    if not isinstance(show_id,str):raise ValueError('Choose a showtime')
+                    import row_watch
+                    db=connect(path)
+                    try:row_watch.request(db,show_id)
+                    finally:db.close()
+                except (ValueError,TypeError) as e:self.reply(html.escape(str(e)),400);return
+                self.reply('Loading real rows for this show.',202);return
+            if self.path=='/api/watch':
+                if not self.authorized():return
+                if (not public and not self.local_host()) or not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):
+                    self.reply('Request rejected.',403);return
+                db=None
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<=65536:raise ValueError('Invalid request size')
+                    data=json.loads(self.rfile.read(length))
+                    if data.get('enabled') and data.get('row_show') and os.environ.get('BMS_ROWS_ENABLED')!='1':raise ValueError('Row monitoring is unavailable on this host')
+                    db=connect(path);preferences.save(db,data)
+                except (ValueError,TypeError) as error:
+                    self.reply('Settings not saved: '+html.escape(str(error)),400);return
+                finally:
+                    if db is not None:db.close()
+                self.reply('Watch saved. Alerts follow your selected filters.');return
             if public:self.reply('Setup is disabled on the hosted dashboard.',403);return
             # The in-app browser can forward localhost through 127.0.0.1.
             # Require a local Host and the unguessable form token; permit both
@@ -113,7 +146,21 @@ def handler(path, public=False):
 <form method="post" action="/setup"><input type="hidden" name="csrf" value="'''+csrf+'''">
 <label>Bot token<input type="password" name="token" required autocomplete="off"></label><label>Chat ID<input name="chat" required autocomplete="off"></label>
 <button>Save locally and send setup test</button></form>''');return
-            if self.path=='/api/status':
+            if urlsplit(self.path).path=='/api/rows':
+                if not public and not self.local_host():self.reply('Local access only.',403);return
+                import row_watch
+                show_id=parse_qs(urlsplit(self.path).query).get('show',[''])[0]
+                db=connect(path)
+                try:body=json.dumps(row_watch.get(db,show_id)).encode()
+                finally:db.close()
+                content_type='application/json'
+            elif self.path=='/api/watch':
+                if not public and not self.local_host():self.reply('Local access only.',403);return
+                db=connect(path)
+                try:body=json.dumps({'preferences':preferences.read(db),'options':preferences.options(db),'csrf':csrf,'skipped':int(meta(db,'watch_skipped','0')),'completed':float(meta(db,'watch_completed','0')),'rows_supported':os.environ.get('BMS_ROWS_ENABLED')=='1'}).encode()
+                finally:db.close()
+                content_type='application/json'
+            elif self.path=='/api/status':
                 body=json.dumps(status(path)).encode();content_type='application/json'
             elif self.path=='/':
                 body=Path(__file__).with_name('static').joinpath('screenwatch.html').read_bytes();content_type='text/html; charset=utf-8'

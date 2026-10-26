@@ -59,3 +59,7 @@ HTTP 403, 429 and 5xx responses pause source requests with persisted cooldown an
 ## Files and validation
 
 `city_watch.py` owns discovery and scheduling; `source.py` handles normal browser access; `parsers.py` validates public data; `seats.py` reads seat statuses; `store.py` maintains state/outbox; `telegram.py` delivers text and images; `dashboard.py` serves the local UI. `tests/` contains 21 behavioral tests. `deploy/` contains the external server installer and service definitions. The external deployment/reboot checks remain unrun until a server is available.
+
+### Personal alert controls
+Open My watch on the dashboard to select movies, cinemas, languages, formats, dates, seat categories and an IST time window. Alerts default to paused; enabling requires at least one movie. New shows are the default; category reopening is optional. A global limit allows at most one message per 10, 30 or 60 minutes. Excess changes are skipped, not replayed. Saving settings archives any pending old alerts. First observations remain silent. Choices persist in the local SQLite database.
+
