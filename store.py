@@ -17,6 +17,7 @@ def connect(path):
     CREATE TABLE IF NOT EXISTS inventory(url TEXT PRIMARY KEY,title TEXT,seen REAL);
     CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,payload TEXT,cutoff REAL,active INTEGER DEFAULT 1);
     CREATE TABLE IF NOT EXISTS snapshots(id TEXT PRIMARY KEY,payload TEXT);
+    CREATE TABLE IF NOT EXISTS metric_history(at INTEGER PRIMARY KEY,movies INTEGER,venues INTEGER,sessions INTEGER);
     CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,text TEXT,photo BLOB,
       created REAL,delivered REAL DEFAULT 0,attempts INTEGER DEFAULT 0,next_try REAL DEFAULT 0);
     ''')

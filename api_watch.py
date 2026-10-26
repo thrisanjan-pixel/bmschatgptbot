@@ -125,7 +125,10 @@ class Monitor:
                     message=str(error) if isinstance(error,ReadError) else type(error).__name__
                     db.execute('UPDATE jobs SET due=?,error=? WHERE id=?',(time.time()+delay,message,job['id']))
                     if getattr(error,'status',0) in (403,429) or getattr(error,'status',0)>=500:
-                        setmeta(db,'source_cooldown',time.time()+delay)
+                        started=time.time()
+                        setmeta(db,'source_cooldown',started+delay)
+                        setmeta(db,'source_cooldown_started',started)
+                        setmeta(db,'source_cooldown_duration',delay)
                     db.commit();logging.warning('%s: %s',job['kind'],message)
                 self.stop.wait(2)
         finally:db.close()
@@ -139,7 +142,12 @@ class Monitor:
                 ready=not muted and not self.dry_run and load()
                 setmeta(db,'notifications_mode','paused' if muted else 'enabled' if ready else 'disabled' if self.dry_run else 'waiting for local setup')
                 setmeta(db,'city_state','cooldown' if float(meta(db,'source_cooldown','0'))>time.time() else 'running')
-                setmeta(db,'city_heartbeat',time.time());setmeta(db,'monitor_mode','api');db.commit()
+                setmeta(db,'city_heartbeat',time.time());setmeta(db,'monitor_mode','api')
+                bucket=int(time.time()//900)*900
+                if not db.execute('SELECT 1 FROM metric_history WHERE at=?',(bucket,)).fetchone():
+                    totals=coverage(db)
+                    db.execute('INSERT INTO metric_history VALUES(?,?,?,?)',(bucket,totals['movies'],totals['venues'],totals['sessions']))
+                db.commit()
                 if ready:
                     # Serialize sending with preference saves: after a pause is saved,
                     # no new delivery can begin using an earlier settings read.
