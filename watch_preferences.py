@@ -1,16 +1,42 @@
 """Saved personal watch filters and conservative Telegram pacing."""
 import datetime as dt
 import json
+import sqlite3
 import time
+import uuid
 from store import meta,setmeta
 
 FIELDS=('movies','cinemas','screens','languages','formats','dates','categories')
 def defaults():
     return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':False,'enabled':False,'once':True,'interval_minutes':10,'row_show':'','rows':[]}
 
-def read(db):
-    try:return {**defaults(),**json.loads(meta(db,'watch_preferences','{}'))}
-    except (ValueError,TypeError):return defaults()
+def ensure(db):
+    db.execute('''CREATE TABLE IF NOT EXISTS alerts(
+        id TEXT PRIMARY KEY,payload TEXT NOT NULL,created REAL NOT NULL,
+        updated REAL NOT NULL,last_alert REAL NOT NULL DEFAULT 0,
+        completed REAL NOT NULL DEFAULT 0)''')
+    if db.execute('SELECT 1 FROM alerts LIMIT 1').fetchone():return
+    try:old={**defaults(),**json.loads(meta(db,'watch_preferences','{}'))}
+    except (ValueError,TypeError):old=defaults()
+    if old['enabled'] or old['row_show'] or any(old[key] for key in FIELDS):
+        now=time.time()
+        db.execute('INSERT OR IGNORE INTO alerts VALUES(?,?,?,?,?,?)',('legacy',json.dumps(old),now,now,
+            float(meta(db,'watch_last_alert','0')),float(meta(db,'watch_completed','0'))))
+        db.execute("UPDATE outbox SET alert_id='legacy' WHERE alert_id='' AND delivered=0")
+        db.commit()
+
+def rules(db):
+    ensure(db)
+    return [{**dict(row),'preferences':{**defaults(),**json.loads(row['payload'])}}
+        for row in db.execute('SELECT * FROM alerts ORDER BY created DESC')]
+
+def active(db):
+    return [rule for rule in rules(db) if rule['preferences']['enabled']]
+
+def read(db,alert_id=None):
+    saved=rules(db)
+    rule=next((r for r in saved if r['id']==alert_id),None) if alert_id else (saved[0] if saved else None)
+    return rule['preferences'] if rule else defaults()
 
 def validate(data):
     if not isinstance(data,dict):raise ValueError('Invalid settings')
@@ -56,13 +82,31 @@ def matches(show,p):
         if p['time_to'] and clock>p['time_to']:return False
     return True
 
-def archive_pending(db):
+def archive_pending(db,alert_id=None):
     db.execute('CREATE TABLE IF NOT EXISTS suppressed_outbox AS SELECT *, CAST(0 AS REAL) AS suppressed_at FROM outbox WHERE 0')
-    db.execute('INSERT INTO suppressed_outbox SELECT *,? FROM outbox WHERE delivered=0',(time.time(),))
-    db.execute('DELETE FROM outbox WHERE delivered=0')
+    if 'alert_id' not in {row[1] for row in db.execute('PRAGMA table_info(suppressed_outbox)')}:
+        try:db.execute("ALTER TABLE suppressed_outbox ADD COLUMN alert_id TEXT DEFAULT ''")
+        except sqlite3.OperationalError as error:
+            if 'duplicate column name' not in str(error):raise
+    fields='id,text,photo,created,delivered,attempts,next_try,alert_id,suppressed_at'
+    if alert_id:
+        db.execute(f'INSERT INTO suppressed_outbox({fields}) SELECT id,text,photo,created,delivered,attempts,next_try,alert_id,? FROM outbox WHERE delivered=0 AND alert_id=?',(time.time(),alert_id))
+        db.execute('DELETE FROM outbox WHERE delivered=0 AND alert_id=?',(alert_id,))
+    else:
+        db.execute(f'INSERT INTO suppressed_outbox({fields}) SELECT id,text,photo,created,delivered,attempts,next_try,alert_id,? FROM outbox WHERE delivered=0',(time.time(),))
+        db.execute('DELETE FROM outbox WHERE delivered=0')
 
-def save(db,data):
+def save(db,data,alert_id=None,create=False):
     p=validate(data)
+    saved=rules(db)
+    if create:
+        if len(saved)>=20:raise ValueError('Maximum 20 alerts. Pause or edit an existing alert.')
+        alert_id=uuid.uuid4().hex
+    elif alert_id:
+        if not any(rule['id']==alert_id for rule in saved):raise ValueError('Alert no longer exists')
+    elif saved:
+        alert_id=saved[0]['id']
+    else:alert_id=uuid.uuid4().hex
     if p['row_show'] and p['enabled']:
         import row_watch
         layout=row_watch.get(db,p['row_show'])
@@ -72,26 +116,35 @@ def save(db,data):
         if not set(p['rows']).issubset(allowed):raise ValueError('Reload the layout and choose valid rows for this category')
         if p['enabled'] and (layout['error'] or time.time()-layout['checked']>300):raise ValueError('Reload the seat layout before enabling row alerts')
         db.commit()
-    db.execute('BEGIN IMMEDIATE')
-    archive_pending(db)
-    setmeta(db,'watch_preferences',json.dumps(p))
-    setmeta(db,'notifications_paused','0' if p['enabled'] else '1')
-    setmeta(db,'notifications_mode','enabled' if p['enabled'] else 'paused')
+    now=time.time();db.execute('BEGIN IMMEDIATE')
+    archive_pending(db,alert_id)
+    db.execute('''INSERT INTO alerts(id,payload,created,updated) VALUES(?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated=excluded.updated,completed=0''',
+        (alert_id,json.dumps(p),now,now))
+    enabled=bool(db.execute("SELECT 1 FROM alerts WHERE json_extract(payload,'$.enabled')=1 LIMIT 1").fetchone())
+    setmeta(db,'notifications_paused','0' if enabled else '1')
+    setmeta(db,'notifications_mode','enabled' if enabled else 'paused')
     setmeta(db,'watch_completed','0')
     db.commit()
-    return p
+    return alert_id
 
-def delivered(db):
-    p=read(db)
+def delivered(db,alert_id=None):
+    saved=rules(db)
+    rule=next((r for r in saved if r['id']==alert_id),None) if alert_id else (saved[0] if saved else None)
+    if not rule:return
+    p=rule['preferences']
     if p['once']:
         p['enabled']=False
-        setmeta(db,'watch_preferences',json.dumps(p))
-        setmeta(db,'notifications_paused','1')
-        setmeta(db,'notifications_mode','paused')
+        db.execute('UPDATE alerts SET payload=?,updated=?,completed=? WHERE id=?',
+            (json.dumps(p),time.time(),time.time(),rule['id']))
+        archive_pending(db,rule['id'])
+        enabled=bool(db.execute("SELECT 1 FROM alerts WHERE json_extract(payload,'$.enabled')=1 LIMIT 1").fetchone())
+        setmeta(db,'notifications_paused','0' if enabled else '1')
+        setmeta(db,'notifications_mode','enabled' if enabled else 'paused')
         setmeta(db,'watch_completed',str(time.time()))
-        archive_pending(db)
 
 def options(db):
+    from api_source import seat_layout_url
     shows=[json.loads(r[0]) for r in db.execute('SELECT payload FROM sessions WHERE active=1 AND cutoff>?',(time.time(),))]
     result={k:set() for k in FIELDS};cinemas={};profiles=set()
     for s in shows:
@@ -102,6 +155,8 @@ def options(db):
         result['categories'].update(c['name'] for c in s['categories'].values())
         profiles.add((s['movie'],s['venue_code'],language,format_,tuple(sorted(c['name'] for c in s['categories'].values())),str(s.get('format','')),s['date'],s['url']))
     result['movies'].update(r[0] for r in db.execute('SELECT title FROM inventory'))
+    cinema_names={r['code']:r['name'] for r in db.execute('SELECT code,name FROM venues')}
     return {**{k:sorted(v) for k,v in result.items()},'cinemas':[{'value':k,'label':v} for k,v in sorted(cinemas.items(),key=lambda x:x[1])],
+            'cinema_names':cinema_names,
             'profiles':[{'movie':p[0],'cinema':p[1],'language':p[2],'format':p[3],'categories':p[4],'screen':p[5],'date':p[6],'url':p[7]} for p in sorted(profiles)],
-            'showtimes':[{'id':s['id'],'movie':s['movie'],'cinema':s['venue_code'],'screen':str(s.get('format','')),'language':dimensions(s)[0],'format':dimensions(s)[1],'date':s['date'],'time':s['time'],'categories':[c['name'] for c in s['categories'].values()]} for s in shows]}
+            'showtimes':[{'id':s['id'],'movie':s['movie'],'cinema':s['venue_code'],'screen':str(s.get('format','')),'language':dimensions(s)[0],'format':dimensions(s)[1],'date':s['date'],'time':s['time'],'categories':[c['name'] for c in s['categories'].values()],'booking_url':seat_layout_url(s)} for s in shows]}

@@ -1,6 +1,6 @@
 # Railway: browser-free bot and private mobile dashboard
 
-The root Dockerfile runs the API worker and dashboard together, without Chromium or pip dependencies. One replica uses SQLite on a persistent /data volume. Railway provides HTTPS for the generated domain.
+The root Dockerfile runs the API worker, dashboard, and isolated seat-row reader. The row reader uses Playwright/Chromium. One replica uses SQLite on a persistent /data volume. Railway provides HTTPS for the generated domain.
 
 ## Current deployment status
 
@@ -34,3 +34,11 @@ A pending service deletion was encountered during the follow-up, cancelled befor
 ### Live website verified
 
 Corrected password deployment f47807ff-b7dd-48fe-9827-1b7990bc2cd7 passed /healthz. Generated https://bmschatgptbot-production.up.railway.app with target port 8000; explicitly set PORT=8000. Main f93e3c9 adds a mobile/in-app compatible sign-in form with 8-hour Secure/HttpOnly/SameSite=Strict sessions, CSRF protection and login throttling; 48 tests passed. Live sign-in succeeded. Unauthenticated /api/status remains 401; dashboard inventory showed 28 movies, 96 cinemas and 3797 future screenings, 179/213 showtime pages checked, zero alerts delivered. BookMyShow occasionally returns 403 and the worker correctly enters cooldown; source checks are not guaranteed uninterrupted. Telegram token/chat are still absent on Railway. Consent request pending to transfer existing private PC credentials directly to Railway and send one labelled connection test, keeping watch alerts paused. Rows remain PC-only.
+
+## Current limitations — 2026-10-27
+
+The mobile dashboard and Telegram connection were later deployed. The seat-row reader is included in the Railway image, but a hosted seat-layout request returned BookMyShow HTTP 403. A normal browser on the user's PC opened the same public showtime page. Do not claim hosted row monitoring works until an actual row list and subsequent update have been observed. The catalogue may also enter source cooldown.
+
+`BMS_ROW_PROXY` is an optional HTTP proxy URL for the isolated seat-layout browser process only. It must contain a public IPv4 address and port. Telegram and catalogue requests do not use it. Free public proxies can fail or disappear without notice; do not send credentials through them. Leave this unset unless a specific proxy has passed a read-only seat-layout check. No paid proxy is authorized.
+
+The dashboard now stores multiple named alert rules in SQLite and shows Running, Paused, and Completed cards. Existing single-rule preferences migrate into a `legacy` alert on first access. Pending messages and the old rate limit migrate with it. Deploy with the existing persistent volume and one replica. Check that the existing rule is present and that alerts do not multiply after migration.

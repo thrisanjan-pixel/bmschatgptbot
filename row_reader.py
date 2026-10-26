@@ -1,11 +1,21 @@
 """Read one public seat map on an isolated virtual display. Never select seats."""
-import json,os,re,sys
+import ipaddress,json,os,re,sys
+from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright
 from api_source import seat_layout_url
 
 def read(show):
     with sync_playwright() as runtime:
-        browser=runtime.chromium.launch(headless=False)
+        launch={'headless':False}
+        proxy=os.environ.get('BMS_ROW_PROXY','').strip()
+        if proxy:
+            parsed=urlsplit(proxy)
+            try:address=ipaddress.ip_address(parsed.hostname or '')
+            except ValueError:raise ValueError('Invalid seat reader proxy address') from None
+            if parsed.scheme!='http' or not isinstance(address,ipaddress.IPv4Address) or not address.is_global or not parsed.port or parsed.username or parsed.password or parsed.path or parsed.query:
+                raise ValueError('Invalid seat reader proxy address')
+            launch['proxy']={'server':proxy}
+        browser=runtime.chromium.launch(**launch)
         try:
             page=browser.new_page()
             url=seat_layout_url(show)

@@ -68,11 +68,14 @@ def drain(db, commit=True):
     now = time.time()
     row = db.execute('SELECT * FROM outbox WHERE delivered=0 AND next_try<=? ORDER BY created LIMIT 1', (now,)).fetchone()
     if not row:
-        return
+        return None
     try:
         send(row['text'], row['photo'])
     except DeliveryError as error:
         db.execute('UPDATE outbox SET attempts=attempts+1,next_try=? WHERE id=?', (now+max(30,error.retry),row['id']))
+        delivered_id=None
     else:
         db.execute('UPDATE outbox SET delivered=? WHERE id=?', (time.time(), row['id']))
+        delivered_id=row['alert_id'] if 'alert_id' in row.keys() else ''
     if commit:db.commit()
+    return delivered_id

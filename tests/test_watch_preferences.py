@@ -93,4 +93,5 @@ class PreferenceTests(unittest.TestCase):
             self.assertEqual(e.exception.code,403);e.exception.close()
             with urllib.request.urlopen(urllib.request.Request(url,data=body,headers={'X-CSRF-Token':data['csrf']})) as r:self.assertEqual(r.status,200)
             with urllib.request.urlopen(url) as r:self.assertEqual(json.load(r)['preferences']['movies'],['Test Movie'])
+            with urllib.request.urlopen(url+'?new=1') as r:self.assertEqual(json.load(r)['preferences']['movies'],[])
         finally:server.shutdown();server.server_close();thread.join()

@@ -20,6 +20,10 @@ def connect(path):
     CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,text TEXT,photo BLOB,
       created REAL,delivered REAL DEFAULT 0,attempts INTEGER DEFAULT 0,next_try REAL DEFAULT 0);
     ''')
+    if 'alert_id' not in {row[1] for row in db.execute('PRAGMA table_info(outbox)')}:
+        try:db.execute("ALTER TABLE outbox ADD COLUMN alert_id TEXT DEFAULT ''")
+        except sqlite3.OperationalError as error:
+            if 'duplicate column name' not in str(error):raise
     return db
 
 
@@ -39,10 +43,10 @@ def enqueue(db, kind, url, payload, expires=0):
                (key, kind, url, json.dumps(payload), expires))
 
 
-def emit(db, event, text, photo=None):
+def emit(db, event, text, photo=None, alert_id=''):
     key = hashlib.sha256(event.encode()).hexdigest()
-    db.execute('INSERT OR IGNORE INTO outbox(id,text,photo,created) VALUES(?,?,?,?)',
-               (key, text, photo, time.time()))
+    db.execute('INSERT OR IGNORE INTO outbox(id,text,photo,created,alert_id) VALUES(?,?,?,?,?)',
+               (key, text, photo, time.time(), alert_id))
 
 
 def snapshot(db, key, current, message, photo=None, baseline=False):

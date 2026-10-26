@@ -27,44 +27,49 @@ def ingest(db,job,data):
     title=result['film'] or args['movie']
     for show in current.values():show['movie']=show['movie'] or title
     changes={}
-    prefs=preferences.read(db)
-    enabled=prefs['enabled'] and not prefs.get('row_show') and meta(db,'notifications_paused','0')!='1'
-    if previous is not None and enabled:
+    if previous is not None and meta(db,'notifications_paused','0')!='1':
         old=previous or {}
-        for identity,show in current.items():
-            if not preferences.matches(show,prefs):continue
-            change=None
-            if identity not in old and prefs['new_shows']:
-                change='New show · '+show['time']
-            elif identity in old and prefs['availability']:
-                before=old[identity].get('categories',{})
-                opened=[c['name'] for k,c in show['categories'].items()
-                    if k in before and before[k]['status']=='0' and c['status'] in ('1','2','3')
-                    and (not prefs['categories'] or c['name'] in prefs['categories'])]
-                if opened:change='Category now available · '+show['time']+' · '+', '.join(opened)
-            if change:
-                group=changes.setdefault(show['venue_code'],{'show':show,'lines':[]})
-                group['lines'].append((change,seat_layout_url(show)))
+        for rule in preferences.active(db):
+            prefs=rule['preferences']
+            if prefs.get('row_show'):continue
+            groups={}
+            for identity,show in current.items():
+                if not preferences.matches(show,prefs):continue
+                change=None
+                if identity not in old and prefs['new_shows']:
+                    change='New show · '+show['time']
+                elif identity in old and prefs['availability']:
+                    before=old[identity].get('categories',{})
+                    opened=[c['name'] for k,c in show['categories'].items()
+                        if k in before and before[k]['status']=='0' and c['status'] in ('1','2','3')
+                        and (not prefs['categories'] or c['name'] in prefs['categories'])]
+                    if opened:change='Category now available · '+show['time']+' · '+', '.join(opened)
+                if change:
+                    group=groups.setdefault(show['venue_code'],{'show':show,'lines':[]})
+                    group['lines'].append((change,seat_layout_url(show)))
+            if groups:changes[rule['id']]=(rule,groups)
     if previous!=current:
         revision=int(meta(db,'revision:'+key,'0'))+1;setmeta(db,'revision:'+key,revision)
         if changes:
             date=dt.datetime.strptime(result['day'],'%Y%m%d').strftime('%d %b %Y')
-            for venue,group in changes.items():
-                show=group['show']
-                heading=f"🎬 {title}\n{show['language']}\n📅 {date}\n📍 {show['venue']}\n\n"
-                # Put a direct seat-selection link next to every matching showtime.
-                chunks=['']
-                for line,url in group['lines']:
-                    block=line+'\n'+url+'\n'
-                    if len(chunks[-1])+len(block)>2800:chunks.append('')
-                    chunks[-1]+=block
-                for index,chunk in enumerate(chunks):
-                    now=time.time()
-                    pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 LIMIT 1').fetchone()
-                    if now-float(meta(db,'watch_last_alert','0'))>=prefs['interval_minutes']*60 and (not pending or prefs['interval_minutes']==0):
-                        emit(db,f'{key}:{revision}:{venue}:{index}',heading+chunk)
-                        setmeta(db,'watch_last_alert',now)
-                    else:setmeta(db,'watch_skipped',int(meta(db,'watch_skipped','0'))+1)
+            for alert_id,(rule,groups) in changes.items():
+                prefs=rule['preferences']
+                for venue,group in groups.items():
+                    show=group['show']
+                    heading=f"🎬 {title}\n{show['language']}\n📅 {date}\n📍 {show['venue']}\n\n"
+                    chunks=['']
+                    for line,url in group['lines']:
+                        block=line+'\n'+url+'\n'
+                        if len(chunks[-1])+len(block)>2800:chunks.append('')
+                        chunks[-1]+=block
+                    for index,chunk in enumerate(chunks):
+                        now=time.time()
+                        pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(alert_id,)).fetchone()
+                        if now-rule['last_alert']>=prefs['interval_minutes']*60 and (not pending or prefs['interval_minutes']==0):
+                            emit(db,f'{alert_id}:{key}:{revision}:{venue}:{index}',heading+chunk,alert_id=alert_id)
+                            db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,alert_id))
+                            rule['last_alert']=now
+                        else:setmeta(db,'watch_skipped',int(meta(db,'watch_skipped','0'))+1)
     db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',(key,json.dumps(current)))
     for old in db.execute('SELECT id,payload FROM sessions WHERE active=1').fetchall():
         show=json.loads(old['payload'])
@@ -129,7 +134,8 @@ class Monitor:
         try:
             while not self.stop.is_set() and (not seconds or time.monotonic()-start<seconds):
                 if not thread.is_alive():raise RuntimeError('HTTP worker stopped')
-                muted=meta(db,'notifications_paused','0')=='1' or not preferences.read(db)['enabled']
+                running=preferences.active(db)
+                muted=meta(db,'notifications_paused','0')=='1' or not running
                 ready=not muted and not self.dry_run and load()
                 setmeta(db,'notifications_mode','paused' if muted else 'enabled' if ready else 'disabled' if self.dry_run else 'waiting for local setup')
                 setmeta(db,'city_state','cooldown' if float(meta(db,'source_cooldown','0'))>time.time() else 'running')
@@ -138,12 +144,12 @@ class Monitor:
                     # Serialize sending with preference saves: after a pause is saved,
                     # no new delivery can begin using an earlier settings read.
                     db.execute('BEGIN IMMEDIATE')
-                    prefs=preferences.read(db)
+                    running=preferences.active(db)
                     last=db.execute('SELECT coalesce(max(delivered),0) FROM outbox').fetchone()[0]
-                    if prefs['enabled'] and meta(db,'notifications_paused','0')!='1' and time.time()-last>=prefs['interval_minutes']*60:
-                        drain(db,commit=False)
-                        delivered_at=db.execute('SELECT coalesce(max(delivered),0) FROM outbox').fetchone()[0]
-                        if delivered_at>last:preferences.delivered(db)
+                    interval=min((r['preferences']['interval_minutes'] for r in running),default=10)*60
+                    if running and meta(db,'notifications_paused','0')!='1' and time.time()-last>=interval:
+                        delivered_id=drain(db,commit=False)
+                        if delivered_id:preferences.delivered(db,delivered_id)
                     db.commit()
                 self.stop.wait(1)
         finally:

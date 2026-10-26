@@ -28,7 +28,7 @@ def status(path):
                 'telegram_configured':all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')),
                 'mode':meta(db,'monitor_mode','browser'),
                 'last_success':float(meta(db,'api_last_success',meta(db,'catalog_last_success','0'))),
-                'recent_alerts':[dict(r) for r in db.execute('SELECT text,created,delivered,attempts FROM outbox ORDER BY created DESC LIMIT 12')],
+                'recent_alerts':[dict(r) for r in db.execute('SELECT text,created,delivered,attempts,alert_id FROM outbox ORDER BY created DESC LIMIT 12')],
                 'delivered_alerts':db.execute('SELECT count(*) FROM outbox WHERE delivered>0').fetchone()[0],
                 'shows':[json.loads(r[0]) for r in db.execute('SELECT payload FROM sessions WHERE active=1 AND cutoff>? ORDER BY cutoff LIMIT 300',(time.time(),))],
                 'movie_details':[{'title':r['title'],'url':r['url'],'image':meta(db,'poster:'+r['url'])} for r in db.execute('SELECT title,url FROM inventory ORDER BY title')],
@@ -132,12 +132,17 @@ def handler(path, public=False):
                     if not isinstance(data,dict):raise ValueError('Invalid settings')
                     if public and data.get('enabled') and not all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')):raise ValueError('Connect Telegram before enabling alerts')
                     if data.get('enabled') and data.get('row_show') and os.environ.get('BMS_ROWS_ENABLED')!='1':raise ValueError('Row monitoring is unavailable on this host')
-                    db=connect(path);preferences.save(db,data)
+                    db=connect(path)
+                    requested=data.pop('alert_id',None)
+                    create=data.pop('create',False)
+                    if requested is not None and not isinstance(requested,str):raise ValueError('Invalid alert ID')
+                    if type(create) is not bool:raise ValueError('Invalid alert request')
+                    saved_id=preferences.save(db,data,requested,create)
                 except (ValueError,TypeError) as error:
-                    self.reply('Settings not saved: '+html.escape(str(error)),400);return
+                    self.reply(json.dumps({'error':'Settings not saved: '+str(error)}),400);return
                 finally:
                     if db is not None:db.close()
-                self.reply('Watch saved. Alerts follow your selected filters.');return
+                self.reply(json.dumps({'id':saved_id}));return
             if public:self.reply('Setup is disabled on the hosted dashboard.',403);return
             # The in-app browser can forward localhost through 127.0.0.1.
             # Require a local Host and the unguessable form token; permit both
@@ -200,10 +205,20 @@ def handler(path, public=False):
                 try:body=json.dumps(row_watch.get(db,show_id)).encode()
                 finally:db.close()
                 content_type='application/json'
-            elif self.path=='/api/watch':
+            elif urlsplit(self.path).path=='/api/watch':
                 if not public and not self.local_host():self.reply('Local access only.',403);return
                 db=connect(path)
-                try:body=json.dumps({'preferences':preferences.read(db),'options':preferences.options(db),'csrf':csrf,'skipped':int(meta(db,'watch_skipped','0')),'completed':float(meta(db,'watch_completed','0')),'rows_supported':os.environ.get('BMS_ROWS_ENABLED')=='1'}).encode()
+                try:
+                    alert_id=parse_qs(urlsplit(self.path).query).get('id',[''])[0]
+                    alerts=preferences.rules(db)
+                    new=parse_qs(urlsplit(self.path).query).get('new',[''])[0]=='1'
+                    selected=next((a for a in alerts if a['id']==alert_id),None) if alert_id else (alerts[0] if alerts and not new else None)
+                    body=json.dumps({'preferences':selected['preferences'] if selected else preferences.defaults(),
+                        'selected_id':selected['id'] if selected else '',
+                        'alerts':alerts,'options':preferences.options(db),'csrf':csrf,
+                        'skipped':int(meta(db,'watch_skipped','0')),
+                        'completed':selected['completed'] if selected else 0,
+                        'rows_supported':os.environ.get('BMS_ROWS_ENABLED')=='1'}).encode()
                 finally:db.close()
                 content_type='application/json'
             elif self.path=='/api/status':
