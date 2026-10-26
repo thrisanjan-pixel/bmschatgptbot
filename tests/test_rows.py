@@ -41,6 +41,12 @@ class RowTests(unittest.TestCase):
   self.assertEqual(len(row_watch.get(self.db,self.show['id'])['data']['rows']),2)
  def test_expired_or_unknown_show_request_rejected(self):
   with self.assertRaises(ValueError):row_watch.request(self.db,'invalid')
+ def test_repeated_load_does_not_bypass_failure_backoff(self):
+  due=time.time()+300
+  self.db.execute("UPDATE row_layouts SET payload='{}',checked=0,error='Seat page unavailable (HTTP 403)',due=? WHERE show_id=?",(due,self.show['id']));self.db.commit()
+  row_watch.request(self.db,self.show['id'])
+  saved=self.db.execute('SELECT due,error FROM row_layouts WHERE show_id=?',(self.show['id'],)).fetchone()
+  self.assertEqual(saved['error'],'Seat page unavailable (HTTP 403)');self.assertGreater(saved['due'],time.time()+295)
  def test_expired_row_watch_can_always_be_paused(self):
   self.configure();p=prefs.read(self.db)
   self.db.execute('UPDATE sessions SET cutoff=0');self.db.commit()

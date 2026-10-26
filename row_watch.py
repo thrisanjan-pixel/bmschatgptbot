@@ -11,7 +11,8 @@ def request(db,show_id):
     schema(db)
     row=db.execute('SELECT payload FROM sessions WHERE id=? AND active=1 AND cutoff>?',(show_id,time.time())).fetchone()
     if not row:raise ValueError('Choose a future showtime from the list')
-    db.execute("INSERT INTO row_layouts(show_id,payload,due) VALUES(?,'{}',?) ON CONFLICT(show_id) DO UPDATE SET due=CASE WHEN checked<? THEN excluded.due ELSE due END",(show_id,time.time(),time.time()-60))
+    now=time.time()
+    db.execute("INSERT INTO row_layouts(show_id,payload,due) VALUES(?,'{}',?) ON CONFLICT(show_id) DO UPDATE SET due=CASE WHEN checked<? AND (due<=? OR error='') THEN excluded.due ELSE due END",(show_id,now,now-60,now))
     db.commit()
 
 def get(db,show_id):
