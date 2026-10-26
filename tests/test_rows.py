@@ -41,6 +41,15 @@ class RowTests(unittest.TestCase):
   self.assertEqual(len(row_watch.get(self.db,self.show['id'])['data']['rows']),2)
  def test_expired_or_unknown_show_request_rejected(self):
   with self.assertRaises(ValueError):row_watch.request(self.db,'invalid')
+ def test_expired_row_watch_can_always_be_paused(self):
+  self.configure();p=prefs.read(self.db)
+  self.db.execute('UPDATE sessions SET cutoff=0');self.db.commit()
+  prefs.save(self.db,{**p,'enabled':False})
+  self.assertFalse(prefs.read(self.db)['enabled']);self.assertEqual(meta(self.db,'notifications_paused'),'1')
+ def test_row_watch_does_not_require_category_or_new_show_alerts(self):
+  self.configure();p=prefs.read(self.db)
+  prefs.save(self.db,{**p,'new_shows':False,'availability':False})
+  self.assertTrue(prefs.read(self.db)['enabled'])
  def test_get_row_status_route(self):
   row_watch.ingest(self.db,self.show,copy.deepcopy(self.result))
   server=ThreadingHTTPServer(('127.0.0.1',0),handler(str(Path(self.tmp.name)/'s.db')))

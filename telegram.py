@@ -10,7 +10,8 @@ import uuid
 class DeliveryError(RuntimeError):
     def __init__(self, code=0, retry=30):
         super().__init__(f'Telegram delivery failed (HTTP {code})')
-        self.retry = retry
+        try:self.retry=max(30,min(86400,int(retry)))
+        except (ValueError,TypeError,OverflowError):self.retry=30
 
 
 def request(method, data, photo=None):
@@ -33,8 +34,10 @@ def request(method, data, photo=None):
                                      data=body, headers={'Content-Type': content_type})
         with urllib.request.urlopen(req, timeout=30) as response:
             result = json.load(response)
+        if not isinstance(result,dict):raise DeliveryError()
         if not result.get('ok'):
             raise DeliveryError(result.get('error_code', 0), result.get('parameters', {}).get('retry_after', 30))
+        if 'result' not in result:raise DeliveryError()
         return result['result']
     except urllib.error.HTTPError as error:
         retry = 30
@@ -43,7 +46,7 @@ def request(method, data, photo=None):
         except (ValueError, OSError):
             pass
         raise DeliveryError(error.code, retry) from None
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, TypeError):
         raise DeliveryError() from None
 
 
@@ -61,7 +64,7 @@ def send(text, photo=None):
         request('sendMessage', {'chat_id': chat, 'text': text[:4000], 'disable_web_page_preview': True})
 
 
-def drain(db):
+def drain(db, commit=True):
     now = time.time()
     row = db.execute('SELECT * FROM outbox WHERE delivered=0 AND next_try<=? ORDER BY created LIMIT 1', (now,)).fetchone()
     if not row:
@@ -72,4 +75,4 @@ def drain(db):
         db.execute('UPDATE outbox SET attempts=attempts+1,next_try=? WHERE id=?', (now+max(30,error.retry),row['id']))
     else:
         db.execute('UPDATE outbox SET delivered=? WHERE id=?', (time.time(), row['id']))
-    db.commit()
+    if commit:db.commit()

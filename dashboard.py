@@ -110,7 +110,9 @@ def handler(path, public=False):
                 try:
                     length=int(self.headers.get('Content-Length','0'))
                     if not 0<length<2048:raise ValueError('Invalid request')
-                    show_id=json.loads(self.rfile.read(length)).get('show_id')
+                    data=json.loads(self.rfile.read(length))
+                    if not isinstance(data,dict):raise ValueError('Invalid request')
+                    show_id=data.get('show_id')
                     if not isinstance(show_id,str):raise ValueError('Choose a showtime')
                     import row_watch
                     db=connect(path)
@@ -127,6 +129,8 @@ def handler(path, public=False):
                     length=int(self.headers.get('Content-Length','0'))
                     if not 0<length<=65536:raise ValueError('Invalid request size')
                     data=json.loads(self.rfile.read(length))
+                    if not isinstance(data,dict):raise ValueError('Invalid settings')
+                    if public and data.get('enabled') and not all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')):raise ValueError('Connect Telegram before enabling alerts')
                     if data.get('enabled') and data.get('row_show') and os.environ.get('BMS_ROWS_ENABLED')!='1':raise ValueError('Row monitoring is unavailable on this host')
                     db=connect(path);preferences.save(db,data)
                 except (ValueError,TypeError) as error:

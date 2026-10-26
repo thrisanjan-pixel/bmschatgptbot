@@ -140,7 +140,7 @@ class Monitor:
                     prefs=preferences.read(db)
                     last=db.execute('SELECT coalesce(max(delivered),0) FROM outbox').fetchone()[0]
                     if prefs['enabled'] and meta(db,'notifications_paused','0')!='1' and time.time()-last>=prefs['interval_minutes']*60:
-                        drain(db)
+                        drain(db,commit=False)
                         delivered_at=db.execute('SELECT coalesce(max(delivered),0) FROM outbox').fetchone()[0]
                         if delivered_at>last:preferences.delivered(db)
                     db.commit()

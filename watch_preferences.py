@@ -37,7 +37,7 @@ def validate(data):
     if not isinstance(result['rows'],list) or len(result['rows'])>200 or any(not isinstance(r,str) or len(r)>300 for r in result['rows']):raise ValueError('Invalid rows')
     if result['row_show'] and not result['rows']:raise ValueError('Load and select at least one row')
     if result['rows'] and not result['row_show']:raise ValueError('Select a specific showtime for rows')
-    if result['enabled'] and (not result['movies'] or not (result['new_shows'] or result['availability'])):raise ValueError('Select at least one movie and an alert type before enabling')
+    if result['enabled'] and (not result['movies'] or (not result['row_show'] and not (result['new_shows'] or result['availability']))):raise ValueError('Select at least one movie and an alert type before enabling')
     return result
 
 def dimensions(show):
@@ -63,7 +63,7 @@ def archive_pending(db):
 
 def save(db,data):
     p=validate(data)
-    if p['row_show']:
+    if p['row_show'] and p['enabled']:
         import row_watch
         layout=row_watch.get(db,p['row_show'])
         show=db.execute('SELECT payload FROM sessions WHERE id=? AND active=1 AND cutoff>?',(p['row_show'],time.time())).fetchone()

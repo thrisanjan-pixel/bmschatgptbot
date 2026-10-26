@@ -4,6 +4,7 @@ import urllib.request
 import urllib.error
 from http.server import ThreadingHTTPServer
 import unittest
+from unittest.mock import patch
 from tests import test_api_watch as fixtures
 response=fixtures.response
 DAY=fixtures.DAY
@@ -50,6 +51,17 @@ class PreferenceTests(unittest.TestCase):
         self.configure(enabled=True,once=False)
         prefs.delivered(self.db)
         self.assertTrue(prefs.read(self.db)['enabled'])
+    def test_delivery_can_preserve_outer_transaction_for_atomic_pause(self):
+        from telegram import drain
+        self.configure(enabled=True,once=True)
+        emit(self.db,'atomic','Test alert');self.db.commit()
+        self.db.execute('BEGIN IMMEDIATE')
+        with patch('telegram.send') as send:drain(self.db,commit=False)
+        self.assertTrue(self.db.in_transaction)
+        send.assert_called_once()
+        prefs.delivered(self.db);self.db.rollback()
+        self.assertTrue(prefs.read(self.db)['enabled'])
+        self.assertEqual(self.db.execute('SELECT delivered FROM outbox').fetchone()[0],0)
     def test_option_profiles_use_actual_cinema_categories(self):
         ingest(self.db,self.job,response())
         profiles=prefs.options(self.db)['profiles']
@@ -73,6 +85,9 @@ class PreferenceTests(unittest.TestCase):
         url=f'http://127.0.0.1:{server.server_port}/api/watch'
         try:
             with urllib.request.urlopen(url) as r:data=json.load(r)
+            for invalid in ([],None,'invalid'):
+                with self.assertRaises(urllib.error.HTTPError) as caught:urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(invalid).encode(),headers={'X-CSRF-Token':data['csrf']}))
+                self.assertEqual(caught.exception.code,400);caught.exception.close()
             body=json.dumps({**prefs.defaults(),'movies':['Test Movie']}).encode()
             with self.assertRaises(urllib.error.HTTPError) as e:urllib.request.urlopen(urllib.request.Request(url,data=body))
             self.assertEqual(e.exception.code,403);e.exception.close()
