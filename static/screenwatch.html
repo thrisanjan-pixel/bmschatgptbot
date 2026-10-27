@@ -183,8 +183,11 @@ function currentValues(key){return [...document.querySelectorAll('#box-'+key+' i
 function selectedOptionList(key){return watchData?.options[key]||[]}
 function categoryLabel(value, layoutRows=[]){
  const base=String(value).replace(/[.\s]+$/g,'');
- const peers=[...new Set(selectedOptionList('categories').filter(v=>String(v).replace(/[.\s]+$/g,'')===base))].sort((a,b)=>a.length-b.length||a.localeCompare(b));
- if(peers.length<2)return value;
+ const cinemaCodes=currentValues('cinemas'),screenTypes=currentValues('screens');
+ const matching=(watchData?.options.profiles||[]).filter(p=>(!cinemaCodes.length||cinemaCodes.includes(p.cinema))&&pickedMatch(screenTypes,p.screen)).flatMap(p=>p.categories);
+ const available=(cinemaCodes.length||screenTypes.length)&&matching.length?matching:selectedOptionList('categories');
+ const peers=[...new Set(available.filter(v=>String(v).replace(/[.\s]+$/g,'')===base))].sort((a,b)=>a.length-b.length||a.localeCompare(b));
+ if(peers.length<2)return base;
  const groups=peers.map(name=>({name,indices:layoutRows.map((r,i)=>r.category===name?i:-1).filter(i=>i>=0)}));
  if(groups.every(g=>g.indices.length)){
   groups.sort((a,b)=>Math.min(...a.indices)-Math.min(...b.indices));
