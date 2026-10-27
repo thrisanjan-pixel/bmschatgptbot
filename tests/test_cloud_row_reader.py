@@ -45,7 +45,15 @@ class CloudRowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Unknown seat status'):
             parse_layout(self.show,encrypted('GOLD:A:0000000002:1:N:0||1:R:A501+31'),self.areas)
         with self.assertRaisesRegex(ValueError,'No matching seat categories'):
-            parse_layout(self.show,encrypted('GOLD:A:0000000002:1:N:0||1:R:A101+31'),{})
+            parse_layout(self.show,encrypted('UNKNOWN:A:0000000002:1:N:0||1:R:A101+31'),{})
+
+    def test_live_amb_aisle_record_does_not_hide_real_rows(self):
+        self.show['categories']={'0001':{'name':'PLATINUM'},'0002':{'name':'GOLD'}}
+        text='PLATINUM:A:0000000001:1:N:0|GOLD:B:0000000002:2:N:0||1:A:A000:A0401|1:B:B000:B1021+1|0::B000:B0+0|2:C:B2022+2'
+        data=parse_layout(self.show,encrypted(text),{})
+        self.assertEqual({r['id'] for r in data['rows']},
+            {'PLATINUM / A','GOLD / B','GOLD / C'})
+        self.assertEqual(data['available'],[{'row_id':'GOLD / B','seat':'1'}])
 
     def test_multichar_area_codes_and_unselected_areas(self):
         text='GOLD:AA:0000000002:1:N:0||1:R:AA101+31:Z?+00'
