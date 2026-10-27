@@ -229,7 +229,24 @@ def handler(path, public=False):
                             with urllib.request.urlopen(request,timeout=12) as source:code=source.status
                         except urllib.error.HTTPError as error:code=error.code
                         except (urllib.error.URLError,TimeoutError):code=0
-                        seat_probe.update(at=time.time(),result={'source_http_status':code})
+                        result={'source_http_status':code}
+                        fields={'strAppCode':'WEB','lngTransactionIdentifier':'0','strCommand':'GETSEATLAYOUT','strVenueCode':'ALUC',
+                            'strParam1':'6249','strParam2':'WEB','strParam3':'','strParam4':'','strParam5':'Y','strParam6':'Y',
+                            'strParam7':'N','strParam8':'','strParam9':'','strParam10':'','strFormat':'json'}
+                        boundary='----Screenwatch'+secrets.token_hex(12)
+                        body=b''.join((f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n').encode() for key,value in fields.items())+f'--{boundary}--\r\n'.encode()
+                        headers={'Content-Type':'multipart/form-data; boundary='+boundary,'Accept':'application/json',
+                            'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145.0.0.0 Safari/537.36',
+                            'x-app-code':'WEB','x-region-code':'HYD','x-region-slug':'hyderabad','x-platform-code':'DESKTOP-WEB',
+                            'x-location-selection':'manual','Referer':'https://in.bookmyshow.com/movies/hyderabad/seat-layout/ET00523251/ALUC/6249/20261105'}
+                        request=urllib.request.Request('https://services-in.bookmyshow.com/doTrans.aspx',body,headers)
+                        try:
+                            with urllib.request.urlopen(request,timeout=12) as source:
+                                data=json.load(source).get('BookMyShow',{})
+                                result.update(seat_http_status=source.status,seat_success=data.get('blnSuccess'),seat_data_bytes=len(data.get('strData','')))
+                        except urllib.error.HTTPError as error:result['seat_http_status']=error.code
+                        except (urllib.error.URLError,TimeoutError,ValueError):result['seat_http_status']=0
+                        seat_probe.update(at=time.time(),result=result)
                     result=seat_probe['result']
                 self.reply_json(result);return
             if self.path=='/api/row-agent/jobs':
