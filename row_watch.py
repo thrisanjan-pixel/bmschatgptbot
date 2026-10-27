@@ -48,17 +48,27 @@ def ingest(db,show,result):
             before={tuple(item) for item in json.loads(state['available'])} if state and state['signature']==signature else set()
             current={(s['row_id'],s['seat']) for s in result['available'] if s['row_id'] in selected}
             added=[s for s in result['available'] if s['row_id'] in selected and (s['row_id'],s['seat']) not in before]
-            db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
-                (rule['id'],signature,json.dumps(sorted(current))))
-            if not added or signature in seen_signatures:continue
+            if not added:
+                db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
+                    (rule['id'],signature,json.dumps(sorted(current))))
+                continue
+            if signature in seen_signatures:
+                db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
+                    (rule['id'],signature,json.dumps(sorted(current))))
+                continue
             seen_signatures.add(signature)
             now=time.time()
             pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone()
             if now-rule['last_alert']>=p['interval_minutes']*60 and not pending:
-                lines=['Seats now available in '+r+': '+', '.join(s['seat'] for s in added if s['row_id']==r) for r in sorted({s['row_id'] for s in added})]
-                message=f"🎬 {show['movie']}\n📍 {show['venue']}\n{show['date']} · {show['time']}\n\n"+'\n'.join(lines)
-                emit(db,'row:'+rule['id']+':'+show['id']+':'+str(time.time_ns()),message[:3300]+'\n\n'+result['url'],alert_id=rule['id'])
+                opened_rows=sorted({s['row_id'] for s in added})
+                lines=['• '+r+': '+', '.join(s['seat'] for s in added if s['row_id']==r) for r in opened_rows]
+                message=f"🎟 Seats now available · Row{'s' if len(opened_rows)>1 else ''} {', '.join(opened_rows)}\n\n🎬 {show['movie']}\n📍 {show['venue']}\n📅 {show['date']} · {show['time']}\n\n"+'\n'.join(lines)+f"\n\n{result['url']}"
+                from seat_map import render
+                photo=render(show,result,opened_rows)
+                emit(db,'row:'+rule['id']+':'+show['id']+':'+str(time.time_ns()),message[:950],photo,alert_id=rule['id'])
                 db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,rule['id']))
+                db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
+                    (rule['id'],signature,json.dumps(sorted(current))))
     db.execute('UPDATE row_layouts SET payload=?,checked=?,error=?,due=0 WHERE show_id=?',(json.dumps(result),time.time(),'',show['id']));db.commit()
 
 def schedule_active(db,now,interval=30):

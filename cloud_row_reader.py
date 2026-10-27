@@ -75,7 +75,7 @@ def parse_layout(show,encoded,category_areas):
         name=category_areas.get(parts[2])
         if name:areas[parts[1]]=name
     if not areas:raise ValueError('No matching seat categories in layout')
-    rows={};available=set()
+    rows={};available=set();seats=[]
     for item in sections[1].split('|'):
         if not item:continue
         parts=item.split(':')
@@ -93,13 +93,15 @@ def parse_layout(show,encoded,category_areas):
             category=areas[area]
             row_id=category+' / '+label
             rows[row_id]={'id':row_id,'category':category,'row':label}
+            number=extra[0] if extra and extra[0] not in ('0','00') else encoded_seat[2:]
+            if not re.fullmatch(r'[A-Za-z0-9._ -]{1,20}',number):raise ValueError('Seat number format changed')
+            seats.append({'row_id':row_id,'seat':number,'available':status in (1,4)})
             if status in (1,4):
-                number=extra[0] if extra and extra[0] not in ('0','00') else encoded_seat[2:]
-                if not re.fullmatch(r'[A-Za-z0-9._ -]{1,20}',number):raise ValueError('Seat number format changed')
                 available.add((row_id,number))
     if not rows:raise ValueError('No readable seat rows')
     return {'rows':list(rows.values()),
             'available':[{'row_id':row_id,'seat':number} for row_id,number in sorted(available)],
+            'seats':seats,
             'url':seat_layout_url(show)}
 
 
