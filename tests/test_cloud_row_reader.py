@@ -47,6 +47,12 @@ class CloudRowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'No matching seat categories'):
             parse_layout(self.show,encrypted('GOLD:A:0000000002:1:N:0||1:R:A101+31'),{})
 
+    def test_multichar_area_codes_and_unselected_areas(self):
+        text='GOLD:AA:0000000002:1:N:0||1:R:AA101+31:Z?+00'
+        data=parse_layout(self.show,encrypted(text),{'0000000002':'Gold'})
+        self.assertEqual({(s['row_id'],s['seat']) for s in data['available']},
+            {('Gold / R','31')})
+
     def test_active_row_rule_is_due_at_30_seconds(self):
         with tempfile.TemporaryDirectory() as folder:
             db=connect(str(Path(folder)/'state.sqlite3'))
@@ -88,3 +94,4 @@ class CloudRowTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
