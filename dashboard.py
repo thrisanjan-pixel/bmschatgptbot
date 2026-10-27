@@ -46,6 +46,7 @@ def status(path):
 
 
 def handler(path, public=False):
+    passwordless=public and os.environ.get('SCREENWATCH_PASSWORDLESS')=='1'
     csrf=secrets.token_urlsafe(32)
     setup_lock=threading.Lock()
     sessions={}
@@ -61,7 +62,7 @@ def handler(path, public=False):
         return hmac.new(password.encode(),token.encode(),hashlib.sha256).hexdigest()
     class Handler(BaseHTTPRequestHandler):
         def authenticated(self):
-            if not public:return True
+            if not public or passwordless:return True
             password=os.environ.get('DASHBOARD_PASSWORD','')
             expected='Basic '+base64.b64encode(('screenwatch:'+password).encode()).decode()
             if password and hmac.compare_digest(self.headers.get('Authorization',''),expected):return True
@@ -110,6 +111,8 @@ def handler(path, public=False):
         def local_host(self):
             return self.headers.get('Host','') in (f'localhost:{self.server.server_port}',f'127.0.0.1:{self.server.server_port}')
         def do_POST(self):
+            if passwordless and self.path=='/login':
+                self.send_response(303);self.send_header('Location','/');self.end_headers();return
             if public and self.path=='/login':
                 try:
                     length=int(self.headers.get('Content-Length','0'))
@@ -235,6 +238,8 @@ def handler(path, public=False):
                         else:os.environ[k]=v
             self.reply('Telegram setup test delivered. The local monitor will enable notifications shortly. <a href="/">Open dashboard</a>')
         def do_GET(self):
+            if passwordless and self.path=='/login':
+                self.send_response(303);self.send_header('Location','/');self.end_headers();return
             if self.path=='/healthz':
                 self.reply('ok');return
             if public and self.path in ('/','/login') and not self.authenticated():
@@ -294,5 +299,5 @@ def handler(path, public=False):
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--db',default=os.environ.get('BMS_DB',DEFAULT_DB));p.add_argument('--port',type=int,default=int(os.environ.get('PORT','8000')))
     a=p.parse_args();public=os.environ.get('BMS_PUBLIC')=='1'
-    if public and len(os.environ.get('DASHBOARD_PASSWORD',''))<16:raise SystemExit('Set DASHBOARD_PASSWORD to at least 16 characters before hosting.')
+    if public and os.environ.get('SCREENWATCH_PASSWORDLESS')!='1' and len(os.environ.get('DASHBOARD_PASSWORD',''))<16:raise SystemExit('Set DASHBOARD_PASSWORD to at least 16 characters before hosting.')
     ThreadingHTTPServer(('0.0.0.0' if public else '127.0.0.1',a.port),handler(a.db,public)).serve_forever()

@@ -1,5 +1,5 @@
 FROM python:3.12-slim-bookworm
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 BMS_DB=/data/state.sqlite3 BMS_PUBLIC=1 HOME=/home/app BMS_ROWS_ENABLED=1
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 BMS_DB=/data/state.sqlite3 BMS_PUBLIC=1 SCREENWATCH_PASSWORDLESS=1 HOME=/home/app BMS_ROWS_ENABLED=1
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates gosu tini \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 app && useradd --uid 10001 --gid app --create-home app \
