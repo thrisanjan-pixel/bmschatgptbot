@@ -287,7 +287,12 @@ def options(db):
         result['screens'].update(v['screens']);result['categories'].update(v['categories'])
     result['languages'].update(['Telugu','Hindi','Tamil','Malayalam','Kannada','English'])
     result['formats'].update(['2D','3D','IMAX','IMAX 3D','4DX','4DX 3D'])
-    return {**{k:sorted(v) for k,v in result.items()},'cinemas':[{'value':k,'label':v} for k,v in sorted(cinema_names.items(),key=lambda x:x[1])],
+    category_rows={}
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='row_layouts'").fetchone():
+        for row in db.execute("SELECT show_id,payload FROM row_layouts WHERE checked>0"):
+            try:category_rows[row[0]]=[{'category':r['category'],'row':r['row']} for r in json.loads(row[1]).get('rows',[])]
+            except (ValueError,KeyError,TypeError):continue
+    return {'category_rows':category_rows,**{k:sorted(v) for k,v in result.items()},'cinemas':[{'value':k,'label':v} for k,v in sorted(cinema_names.items(),key=lambda x:x[1])],
             'cinema_names':cinema_names,
             'venue_options':{code:{k:sorted(items) for k,items in value.items()} for code,value in venue_options.items()},
             'profiles':[{'movie':p[0],'cinema':p[1],'language':p[2],'format':p[3],'categories':p[4],'screen':p[5],'date':p[6],'url':p[7]} for p in sorted(profiles)],
