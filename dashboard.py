@@ -54,6 +54,8 @@ def handler(path, public=False):
     auth_lock=threading.Lock()
     row_nonces={}
     row_auth_lock=threading.Lock()
+    seat_probe={'at':0,'result':{}}
+    seat_probe_lock=threading.Lock()
     class Handler(BaseHTTPRequestHandler):
         def authenticated(self):
             if not public:return True
@@ -217,6 +219,19 @@ def handler(path, public=False):
         def do_GET(self):
             if self.path=='/healthz':
                 self.reply('ok');return
+            if self.path=='/healthz/seat-source':
+                with seat_probe_lock:
+                    if time.time()-seat_probe['at']>600:
+                        import urllib.error,urllib.request
+                        url='https://in.bookmyshow.com/api/movies-data/seatlayout/v1/primary?eventCode=ET00523251&dateCode=20261105&regionCode=HYD&venueCode=ALUC'
+                        request=urllib.request.Request(url,headers={'User-Agent':'BMSLocalNotifier/0.1','Accept':'application/json','x-app-code':'WEB','x-region-code':'HYD','x-region-slug':'hyderabad','x-platform-code':'DESKTOP-WEB','x-location-selection':'manual'})
+                        try:
+                            with urllib.request.urlopen(request,timeout=12) as source:code=source.status
+                        except urllib.error.HTTPError as error:code=error.code
+                        except (urllib.error.URLError,TimeoutError):code=0
+                        seat_probe.update(at=time.time(),result={'source_http_status':code})
+                    result=seat_probe['result']
+                self.reply_json(result);return
             if self.path=='/api/row-agent/jobs':
                 if not public:self.reply('Not found',404);return
                 if not self.row_authorized():self.reply('Unauthorized',401);return
