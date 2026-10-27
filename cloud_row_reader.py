@@ -84,16 +84,22 @@ def parse_layout(show,encoded,category_areas):
         label=parts[1]
         for cell in parts[2:]:
             encoded_seat,*extra=cell.split('+')
-            if len(encoded_seat)<3 or not encoded_seat[1].isdigit():raise ValueError('Seat status format changed')
-            area=encoded_seat[0]
-            if area not in areas:continue
-            status=int(encoded_seat[1])
+            # Area IDs in the encrypted layout are usually one character, but
+            # they are not guaranteed to stay that way. Match the longest
+            # known category area before reading the status digit.
+            area=next((code for code in sorted(areas,key=len,reverse=True)
+                if encoded_seat.startswith(code)),None)
+            # Ignore other categories; their seat encoding is irrelevant here.
+            if area is None:continue
+            seat_state=encoded_seat[len(area):]
+            if not seat_state or not seat_state[0].isdigit():raise ValueError('Seat status format changed')
+            status=int(seat_state[0])
             if status not in (0,1,2,3,4,7,8,9):raise ValueError('Unknown seat status')
             if status==0:continue
             category=areas[area]
             row_id=category+' / '+label
             rows[row_id]={'id':row_id,'category':category,'row':label}
-            number=extra[0] if extra and extra[0] not in ('0','00') else encoded_seat[2:]
+            number=extra[0] if extra and extra[0] not in ('0','00') else seat_state[1:]
             if not re.fullmatch(r'[A-Za-z0-9._ -]{1,20}',number):raise ValueError('Seat number format changed')
             seats.append({'row_id':row_id,'seat':number,'available':status in (1,4)})
             if status in (1,4):
@@ -134,3 +140,4 @@ def read(show,timeout=20):
         return parse_layout(show,result['strData'],category_areas)
     except (KeyError,TypeError,json.JSONDecodeError) as error:
         raise ValueError('Seat source response changed') from error
+
