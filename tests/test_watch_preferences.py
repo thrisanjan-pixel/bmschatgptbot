@@ -75,6 +75,16 @@ class PreferenceTests(unittest.TestCase):
         for key in prefs.FIELDS:
             self.assertFalse(prefs.matches(s,{**p,key:['Wrong']}),key)
         self.assertFalse(prefs.matches(s,{**p,'time_to':'19:00'}))
+    def test_future_screen_and_format_filters_match_when_showtime_is_added(self):
+        show={'movie':'Film','venue_code':'PVR','date':DAY,'language':'Telugu • IMAX 3D','format':'HDR','time':'07:30 PM','categories':{'a':{'name':'Recliner'}}}
+        p={**prefs.defaults(),'movies':['Film'],'screens':['HDR'],'formats':['IMAX 3D'],'languages':['Telugu'],'new_shows':True}
+        self.assertTrue(prefs.matches(show,p))
+        self.assertFalse(prefs.matches(show,{**p,'screens':['PCX']}))
+    def test_catalog_movie_is_selectable_before_showtimes_exist(self):
+        self.db.execute('INSERT INTO inventory VALUES(?,?,?)',('https://in.bookmyshow.com/movies/hyderabad/film/ET12345678','Upcoming Film',1))
+        options=prefs.options(self.db)
+        self.assertIn('Upcoming Film',options['movies'])
+        self.assertEqual(options['showtimes'],[])
     def test_validate_requires_movie_and_bounded_frequency(self):
         for p in ({'enabled':True},{'interval_minutes':0},{'time_from':'21:00','time_to':'19:00'}):
             with self.assertRaises(ValueError):prefs.validate(p)
@@ -95,3 +105,4 @@ class PreferenceTests(unittest.TestCase):
             with urllib.request.urlopen(url) as r:self.assertEqual(json.load(r)['preferences']['movies'],['Test Movie'])
             with urllib.request.urlopen(url+'?new=1') as r:self.assertEqual(json.load(r)['preferences']['movies'],[])
         finally:server.shutdown();server.server_close();thread.join()
+
