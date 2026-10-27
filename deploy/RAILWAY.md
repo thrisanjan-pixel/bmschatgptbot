@@ -1,6 +1,6 @@
 # Railway: browser-free bot and private mobile dashboard
 
-The root Dockerfile runs the API worker, dashboard, and isolated seat-row reader. The row reader uses Playwright/Chromium. One replica uses SQLite on a persistent /data volume. Railway provides HTTPS for the generated domain.
+The root Dockerfile runs the API worker, dashboard, and cloud seat-row reader. One replica uses SQLite on a persistent /data volume. Railway provides HTTPS for the generated domain.
 
 ## Current deployment status
 
@@ -39,14 +39,10 @@ Corrected password deployment f47807ff-b7dd-48fe-9827-1b7990bc2cd7 passed /healt
 
 The mobile dashboard and Telegram connection were later deployed. The seat-row reader is included in the Railway image, but a hosted seat-layout request returned BookMyShow HTTP 403. A normal browser on the user's PC opened the same public showtime page. Do not claim hosted row monitoring works until an actual row list and subsequent update have been observed. The catalogue may also enter source cooldown.
 
-`BMS_ROW_PROXY` is an optional HTTP proxy URL for the isolated seat-layout browser process only. It must contain a public IPv4 address and port. Telegram and catalogue requests do not use it. Free public proxies can fail or disappear without notice; do not send credentials through them. Leave this unset unless a specific proxy has passed a read-only seat-layout check. No paid proxy is authorized.
-
 The dashboard now stores multiple named alert rules in SQLite and shows Running, Paused, and Completed cards. Existing single-rule preferences migrate into a `legacy` alert on first access. Pending messages and the old rate limit migrate with it. Deploy with the existing persistent volume and one replica. Check that the existing rule is present and that alerts do not multiply after migration.
 
-## PC seat reader for exact rows
+## Cloud seat reader for exact rows
 
-Railway receives HTTP 403 from BookMyShow seat-layout pages, so its hosted Chromium reader is idle. The user's PC runs `pc_row_agent.js` using locally installed Node and Playwright plus ordinary Chrome. Open `http://127.0.0.1:8125/` on the PC and enter the Screenwatch website password there. The password stays in process memory, is never stored in Git or the Railway response, and must be re-entered after the agent or PC restarts. The local page is bound to loopback only.
+The hosted seat-layout webpage returned HTTP 403, but Railway can read BookMyShow's public seat metadata and `GETSEATLAYOUT` response directly (both HTTP 200 on 2026-10-27). `cloud_row_reader.py` decrypts the seat data using the key in BookMyShow's public client bundle, maps seat areas through the selected showtime's category metadata, and returns actual available seat numbers. A local check matched the browser's 31 available seats in rows R and S. The Railway worker now runs this reader without Chromium, a PC helper, or a proxy.
 
-The PC reader signs requests with a fresh nonce and HMAC. Railway supplies only active or requested future showtimes. The PC opens the public seat-layout page without selecting/bookings seats, reads real rows and available seats, and reports the observation to Railway. Active row showtimes become due 30 seconds after a successful observation; the PC loop polls every 3 seconds. Network or BookMyShow failures back off for 5 minutes. The dashboard shows whether the PC reader is connected and the last layout check. The PC must stay on and awake for continuous row alerts; phone access alone cannot keep the reader running.
-
-The first seat observation is a silent baseline. A later newly available seat in a selected row queues one Telegram alert with that exact showtime's seat-selection URL. Unchanged available seats do not repeat. Alert delivery is still subject to the user's selected minimum notification interval and any Telegram retry. Do not represent the 30-second target as a guaranteed delivery latency during source failure or PC downtime.
+Active row showtimes become due 30 seconds after a successful observation; the worker checks for due jobs every second. BookMyShow or network failures back off for 5 minutes, keeping the last good observation. The first seat observation is a silent baseline. A later newly available seat in a selected row queues one Telegram alert with that exact showtime's seat-selection URL. Unchanged available seats do not repeat. Delivery remains subject to the alert's selected notification interval and any Telegram retry. Do not represent 30 seconds as guaranteed delivery latency during source failures or rate limits.
