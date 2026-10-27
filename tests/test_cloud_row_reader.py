@@ -53,6 +53,11 @@ class CloudRowTests(unittest.TestCase):
         self.assertEqual({(s['row_id'],s['seat']) for s in data['available']},
             {('Gold / R','31')})
 
+    def test_row_labels_with_spaces_and_alternate_row_shape(self):
+        text='GOLD:AA:0000000002:1:N:0||Row A-1:AA101+31'
+        data=parse_layout(self.show,encrypted(text),{'0000000002':'Gold'})
+        self.assertEqual({r['id'] for r in data['rows']},{'Gold / Row A-1'})
+
     def test_active_row_rule_is_due_at_30_seconds(self):
         with tempfile.TemporaryDirectory() as folder:
             db=connect(str(Path(folder)/'state.sqlite3'))
