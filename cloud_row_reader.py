@@ -19,6 +19,9 @@ LAYOUT_KEY=b'kYp3s6v9y$B&E)H+MbQeThWmZq4t7w!z'
 MAX_LAYOUT_BYTES=2_000_000
 _area_cache={}
 
+class CategoryMappingError(ValueError):
+    pass
+
 
 def _areas(show,timeout):
     key=(show['event'],show['venue_code'],show['date'],show['session'])
@@ -68,13 +71,20 @@ def parse_layout(show,encoded,category_areas):
     sections=text.split('||',2)
     if len(sections)<2:raise ValueError('Seat layout format changed')
     areas={}
+    names={}
+    for category in show.get('categories',{}).values():
+        name=category.get('name','')
+        names.setdefault(' '.join(name.casefold().split()),set()).add(name)
     for item in sections[0].split('|'):
         if not item:continue
         parts=item.split(':')
         if len(parts)<3 or not parts[1] or not parts[2].isdigit():raise ValueError('Seat area format changed')
         name=category_areas.get(parts[2])
+        if not name:
+            candidates=names.get(' '.join(parts[0].casefold().split()),set())
+            if len(candidates)==1:name=next(iter(candidates))
         if name:areas[parts[1]]=name
-    if not areas:raise ValueError('No matching seat categories in layout')
+    if not areas:raise CategoryMappingError('No matching seat categories in layout')
     rows={};available=set();seats=[]
     area_codes=sorted(areas,key=len,reverse=True)
     def area_for(cell):
@@ -83,16 +93,11 @@ def parse_layout(show,encoded,category_areas):
     for item in sections[1].split('|'):
         if not item:continue
         parts=item.split(':')
-        # The legacy form is row-index:physical-row:seat:seat. New layouts can
-        # omit the index, and some cinemas use physical labels with spaces or
-        # punctuation. Locate the first actual seat cell to distinguish both.
-        seat_start=next((i for i,cell in enumerate(parts[1:],1) if area_for(cell)),None)
-        if seat_start is None:continue
-        label_index=1 if seat_start>=2 else 0
-        label=parts[label_index].strip()
-        if not label or not re.fullmatch(r'[\w .()/#-]{1,32}',label,re.UNICODE):
-            raise ValueError('Seat row format changed')
-        for cell in parts[seat_start:]:
+        indexed=bool(re.fullmatch(r'\d+',parts[0].strip()))
+        if len(parts)<(3 if indexed else 2):continue
+        label=parts[1 if indexed else 0].strip()
+        parsed=[]
+        for cell in parts[2 if indexed else 1:]:
             encoded_seat,*extra=cell.split('+')
             # Area IDs in the encrypted layout are usually one character, but
             # they are not guaranteed to stay that way. Match the longest
@@ -104,12 +109,19 @@ def parse_layout(show,encoded,category_areas):
             if not seat_state or not seat_state[0].isdigit():raise ValueError('Seat status format changed')
             status=int(seat_state[0])
             if status not in (0,1,2,3,4,7,8,9):raise ValueError('Unknown seat status')
-            if status==0:continue
-            category=areas[area]
+            number=extra[0] if extra and extra[0] not in ('0','00') else seat_state[1:]
+            # Real AMB layouts include blank aisle records such as
+            # 0::B000:B0+0. Parse the cells before validating the row label so
+            # these empty records cannot invalidate every real seating row.
+            if status==0 and (not number or not number.strip('0')):continue
+            if not re.fullmatch(r'[A-Za-z0-9._ -]{1,20}',number):raise ValueError('Seat number format changed')
+            parsed.append((areas[area],number,status))
+        if not parsed:continue
+        if not label or not re.fullmatch(r'[\w .()/#-]{1,32}',label,re.UNICODE):
+            raise ValueError('Seat row format changed')
+        for category,number,status in parsed:
             row_id=category+' / '+label
             rows[row_id]={'id':row_id,'category':category,'row':label}
-            number=extra[0] if extra and extra[0] not in ('0','00') else seat_state[1:]
-            if not re.fullmatch(r'[A-Za-z0-9._ -]{1,20}',number):raise ValueError('Seat number format changed')
             seats.append({'row_id':row_id,'seat':number,'available':status in (1,4)})
             if status in (1,4):
                 available.add((row_id,number))
@@ -122,7 +134,6 @@ def parse_layout(show,encoded,category_areas):
 
 def read(show,timeout=20):
     url=seat_layout_url(show)
-    category_areas=_areas(show,timeout)
     boundary='----Screenwatch'+secrets.token_hex(12)
     fields={'strAppCode':'WEB','lngTransactionIdentifier':'0','strCommand':'GETSEATLAYOUT',
         'strVenueCode':show['venue_code'],'strParam1':show['session'],'strParam2':'WEB',
@@ -146,7 +157,12 @@ def read(show,timeout=20):
     try:
         result=json.loads(raw)['BookMyShow']
         if result.get('blnSuccess')!='true':raise ValueError('Seat source refused layout')
-        return parse_layout(show,result['strData'],category_areas)
+        # The layout includes category names. Prefer a unique name match to
+        # the verified showtime categories, avoiding a second endpoint that
+        # may be blocked even while the live layout endpoint works.
+        try:return parse_layout(show,result['strData'],{})
+        except CategoryMappingError:
+            return parse_layout(show,result['strData'],_areas(show,timeout))
     except (KeyError,TypeError,json.JSONDecodeError) as error:
         raise ValueError('Seat source response changed') from error
 
