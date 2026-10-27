@@ -36,7 +36,7 @@ def run_reader(show,timeout=75):
 
 def ingest(db,show,result):
     schema(db);old=get(db,show['id']);previous=old['data']
-    known={r['id']:r for r in previous.get('rows',[])};known.update({r['id']:r for r in result['rows']});result['rows']=list(known.values())
+    known={r['id']:r for r in result['rows']};known.update({r['id']:r for r in previous.get('rows',[]) if r['id'] not in known});result['rows']=list(known.values())
     if meta(db,'notifications_paused','0')!='1':
         seen_signatures=set()
         for rule in prefs.active(db):
@@ -48,6 +48,9 @@ def ingest(db,show,result):
             before={tuple(item) for item in json.loads(state['available'])} if state and state['signature']==signature else set()
             current={(s['row_id'],s['seat']) for s in result['available'] if s['row_id'] in selected}
             added=[s for s in result['available'] if s['row_id'] in selected and (s['row_id'],s['seat']) not in before]
+            if not p['notify_existing'] and (not state or state['signature']!=signature):
+                db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',(rule['id'],signature,json.dumps(sorted(current))))
+                continue
             if not added:
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
                     (rule['id'],signature,json.dumps(sorted(current))))

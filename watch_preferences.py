@@ -23,7 +23,7 @@ def format_matches(actual,wanted):
     if wanted in ('imax','4dx'):return wanted in actual
     return actual==wanted
 def defaults():
-    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'interval_minutes':10,'row_show':'','rows':[],'request_state':''}
+    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'notify_existing':True,'interval_minutes':10,'row_show':'','rows':[],'request_state':''}
 
 def ensure(db):
     db.execute('''CREATE TABLE IF NOT EXISTS alerts(
@@ -58,6 +58,18 @@ def rules(db):
         message=db.execute('SELECT text FROM outbox WHERE alert_id=? ORDER BY created DESC LIMIT 1',(rule['id'],)).fetchone()
         link=re.search(r'https://in\.bookmyshow\.com/movies/hyderabad/seat-layout/[A-Za-z0-9/]+',message[0]) if message else None
         rule['booking_url']=link[0] if link else ''
+        checked=0;error='';due=0
+        if p['row_show'] and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='row_layouts'").fetchone():
+            layout=db.execute('SELECT checked,error,due FROM row_layouts WHERE show_id=?',(p['row_show'],)).fetchone()
+            if layout:checked,error,due=layout
+        elif not p['row_show']:
+            jobs=[r for r in db.execute('SELECT payload,checked,error,due FROM jobs') if json.loads(r['payload']).get('movie') in p['movies']]
+            checked=max((r['checked'] for r in jobs),default=0)
+            error=next((r['error'] for r in jobs if r['error']),'')
+            due=min((r['due'] for r in jobs),default=0)
+        delivery=db.execute('SELECT count(*),coalesce(max(attempts),0) FROM outbox WHERE alert_id=? AND delivered=0',(rule['id'],)).fetchone()
+        health='Source unavailable' if error else 'Checks delayed' if checked and time.time()-checked>180 else 'Watching seats' if p['row_show'] else 'Watching availability' if checked else 'Waiting for listings'
+        rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
         result.append(rule)
     return result
 
@@ -76,7 +88,7 @@ def prime_availability(db):
     for rule in active(db):
         p=rule['preferences']
         if not p['availability'] or p['row_show']:continue
-        signature=json.dumps({key:p[key] for key in (*FIELDS,'time_from','time_to','availability')},sort_keys=True)
+        signature=json.dumps({key:p[key] for key in (*FIELDS,'time_from','time_to','availability','notify_existing')},sort_keys=True)
         state=db.execute('SELECT signature FROM alert_initial_state WHERE alert_id=?',(rule['id'],)).fetchone()
         if state and state[0]==signature:
             seen.add(signature)
@@ -87,7 +99,7 @@ def prime_availability(db):
         'SELECT payload FROM sessions WHERE active=1 AND cutoff>?',(time.time(),))]
     for rule,signature in pending:
         p=rule['preferences']
-        if signature not in seen:
+        if signature not in seen and p['notify_existing']:
             found=[]
             for show in shows:
                 if not matches(show,p):continue
@@ -126,7 +138,7 @@ def validate(data):
         if value:dt.datetime.strptime(value,'%H:%M')
         result[key]=value
     if result['time_from'] and result['time_to'] and result['time_from']>result['time_to']:raise ValueError('End time must be after start time')
-    for key in ('new_shows','availability','enabled','once'):
+    for key in ('new_shows','availability','enabled','once','notify_existing'):
         if type(data.get(key,result[key])) is not bool:raise ValueError('Invalid '+key)
         result[key]=data.get(key,result[key])
     interval=data.get('interval_minutes',10)

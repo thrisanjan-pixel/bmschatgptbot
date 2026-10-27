@@ -156,6 +156,7 @@ def handler(path, public=False):
                     db=connect(path)
                     try:row_watch.request(db,show_id)
                     finally:db.close()
+                except sqlite3.Error:self.reply('Seat reader is busy. Please retry shortly.',503);return
                 except (ValueError,TypeError) as e:self.reply(html.escape(str(e)),400);return
                 self.reply('Loading real rows for this show.',202);return
             if self.path=='/api/watch':
@@ -295,4 +296,3 @@ if __name__=='__main__':
     a=p.parse_args();public=os.environ.get('BMS_PUBLIC')=='1'
     if public and len(os.environ.get('DASHBOARD_PASSWORD',''))<16:raise SystemExit('Set DASHBOARD_PASSWORD to at least 16 characters before hosting.')
     ThreadingHTTPServer(('0.0.0.0' if public else '127.0.0.1',a.port),handler(a.db,public)).serve_forever()
-
