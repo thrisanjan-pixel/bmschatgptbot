@@ -49,8 +49,6 @@ def handler(path, public=False):
     sessions={}
     login_failures=[]
     auth_lock=threading.Lock()
-    seat_probe={'at':0,'result':{}}
-    seat_probe_lock=threading.Lock()
     class Handler(BaseHTTPRequestHandler):
         def authenticated(self):
             if not public:return True
@@ -197,22 +195,6 @@ def handler(path, public=False):
         def do_GET(self):
             if self.path=='/healthz':
                 self.reply('ok');return
-            if self.path=='/healthz/seat-source':
-                with seat_probe_lock:
-                    if time.time()-seat_probe['at']>600:
-                        from cloud_row_reader import read
-                        sample={'id':'ALUC:20261105:6249:ET00523251','event':'ET00523251',
-                            'venue_code':'ALUC','session':'6249','date':'20261105',
-                            'categories':{'0005':{'name':'3D PLATINUM'},'0006':{'name':'3D GOLD'},
-                                '0007':{'name':'3D DIRECTOR CHOICE'},'0008':{'name':'3D GOLD.'}}}
-                        try:
-                            layout=read(sample)
-                            result={'rows':len(layout['rows']),'available':len(layout['available']),
-                                'available_rows':sorted({seat['row_id'] for seat in layout['available']})}
-                        except ValueError as error:result={'error':str(error)}
-                        seat_probe.update(at=time.time(),result=result)
-                    result=seat_probe['result']
-                self.reply_json(result);return
             if public and self.path in ('/','/login') and not self.authenticated():
                 self.login_page();return
             if not self.authorized():return
