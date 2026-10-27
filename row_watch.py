@@ -12,7 +12,10 @@ def request(db,show_id):
     row=db.execute('SELECT payload FROM sessions WHERE id=? AND active=1 AND cutoff>?',(show_id,time.time())).fetchone()
     if not row:raise ValueError('Choose a future showtime from the list')
     now=time.time()
-    db.execute("INSERT INTO row_layouts(show_id,payload,due) VALUES(?,'{}',?) ON CONFLICT(show_id) DO UPDATE SET due=CASE WHEN checked<? AND (due<=? OR error='') THEN excluded.due ELSE due END",(show_id,now,now-60,now))
+    if now-float(meta(db,'row_agent_heartbeat','0'))<90:
+        db.execute("INSERT INTO row_layouts(show_id,payload,due) VALUES(?,'{}',?) ON CONFLICT(show_id) DO UPDATE SET due=excluded.due,error=''",(show_id,now))
+    else:
+        db.execute("INSERT INTO row_layouts(show_id,payload,due) VALUES(?,'{}',?) ON CONFLICT(show_id) DO UPDATE SET due=CASE WHEN checked<? AND (due<=? OR error='') THEN excluded.due ELSE due END",(show_id,now,now-60,now))
     db.commit()
 
 def get(db,show_id):
@@ -62,6 +65,8 @@ def main():
     signal.signal(signal.SIGTERM,halt);signal.signal(signal.SIGINT,halt)
     while not stop:
         now=time.time()
+        if os.environ.get('BMS_PUBLIC')=='1' or now-float(meta(db,'row_agent_heartbeat','0'))<90:
+            time.sleep(1);continue
         if meta(db,'notifications_paused','0')!='1':
             for rule in prefs.active(db):
                 show_id=rule['preferences'].get('row_show')

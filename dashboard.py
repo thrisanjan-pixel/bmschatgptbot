@@ -15,6 +15,7 @@ from pathlib import Path
 DEFAULT_DB='/workspace/booking-tracker/state.sqlite3'
 from store import connect, coverage, meta, setmeta
 import watch_preferences as preferences
+import row_agent_protocol as row_agent
 
 
 def status(path):
@@ -26,6 +27,8 @@ def status(path):
         return {'state':state,'heartbeat':heartbeat,'cooldown_until':float(meta(db,'source_cooldown','0')),
                 'cooldown_started':float(meta(db,'source_cooldown_started','0')),
                 'cooldown_duration':float(meta(db,'source_cooldown_duration','0')),
+                'row_agent_online':row_agent.connected(db),
+                'row_agent_last':float(meta(db,'row_agent_heartbeat','0')),
                 'metric_history':[dict(r) for r in db.execute('SELECT at,movies,venues,sessions FROM metric_history ORDER BY at DESC LIMIT 7')][::-1],
                 'hosted':os.environ.get('BMS_PUBLIC')=='1',
                 'telegram_configured':all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')),
@@ -49,6 +52,8 @@ def handler(path, public=False):
     sessions={}
     login_failures=[]
     auth_lock=threading.Lock()
+    row_nonces={}
+    row_auth_lock=threading.Lock()
     class Handler(BaseHTTPRequestHandler):
         def authenticated(self):
             if not public:return True
@@ -80,6 +85,17 @@ def handler(path, public=False):
             self.send_header('Referrer-Policy','no-referrer')
             self.send_header('Content-Length',str(len(body)))
             self.end_headers();self.wfile.write(body)
+        def reply_json(self,value,code=200):
+            body=json.dumps(value).encode()
+            self.send_response(code)
+            self.send_header('Content-Type','application/json; charset=utf-8')
+            self.send_header('Cache-Control','no-store')
+            self.send_header('X-Content-Type-Options','nosniff')
+            self.send_header('Content-Length',str(len(body)))
+            self.end_headers();self.wfile.write(body)
+        def row_authorized(self,body=b''):
+            with row_auth_lock:
+                return row_agent.verify(os.environ.get('DASHBOARD_PASSWORD',''),self.command,self.path,self.headers,body,row_nonces)
         def local_host(self):
             return self.headers.get('Host','') in (f'localhost:{self.server.server_port}',f'127.0.0.1:{self.server.server_port}')
         def do_POST(self):
@@ -106,6 +122,19 @@ def handler(path, public=False):
                 self.send_header('Set-Cookie','screenwatch_session='+session+'; Path=/; Max-Age=28800; HttpOnly; Secure; SameSite=Strict')
                 self.send_header('Cache-Control','no-store')
                 self.end_headers();return
+            if self.path=='/api/row-agent/observation':
+                if not public:self.reply('Not found',404);return
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<=512000:raise ValueError('Invalid observation size')
+                    body=self.rfile.read(length)
+                    if not self.row_authorized(body):self.reply('Unauthorized',401);return
+                    payload=json.loads(body)
+                    db=connect(path)
+                    try:row_agent.observation(db,payload)
+                    finally:db.close()
+                except (ValueError,TypeError,UnicodeError) as error:self.reply_json({'error':str(error)},400);return
+                self.reply_json({'ok':True});return
             if self.path=='/api/rows':
                 if not self.authorized():return
                 if os.environ.get('BMS_ROWS_ENABLED')!='1':self.reply('Row reader is unavailable on this host.',503);return
@@ -136,6 +165,7 @@ def handler(path, public=False):
                     if public and data.get('enabled') and not all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')):raise ValueError('Connect Telegram before enabling alerts')
                     if data.get('enabled') and data.get('row_show') and os.environ.get('BMS_ROWS_ENABLED')!='1':raise ValueError('Row monitoring is unavailable on this host')
                     db=connect(path)
+                    if public and data.get('enabled') and data.get('row_show') and not row_agent.connected(db):raise ValueError('Connect the PC seat reader before starting a row alert')
                     requested=data.pop('alert_id',None)
                     create=data.pop('create',False)
                     if requested is not None and not isinstance(requested,str):raise ValueError('Invalid alert ID')
@@ -187,6 +217,13 @@ def handler(path, public=False):
         def do_GET(self):
             if self.path=='/healthz':
                 self.reply('ok');return
+            if self.path=='/api/row-agent/jobs':
+                if not public:self.reply('Not found',404);return
+                if not self.row_authorized():self.reply('Unauthorized',401);return
+                db=connect(path)
+                try:result=row_agent.jobs(db)
+                finally:db.close()
+                self.reply_json({'jobs':result,'interval_seconds':30});return
             if public and self.path in ('/','/login') and not self.authenticated():
                 self.login_page();return
             if not self.authorized():return
@@ -221,7 +258,7 @@ def handler(path, public=False):
                         'alerts':alerts,'options':preferences.options(db),'csrf':csrf,
                         'skipped':int(meta(db,'watch_skipped','0')),
                         'completed':selected['completed'] if selected else 0,
-                        'rows_supported':os.environ.get('BMS_ROWS_ENABLED')=='1'}).encode()
+                        'rows_supported':os.environ.get('BMS_ROWS_ENABLED')=='1' and (not public or row_agent.connected(db))}).encode()
                 finally:db.close()
                 content_type='application/json'
             elif self.path=='/api/status':

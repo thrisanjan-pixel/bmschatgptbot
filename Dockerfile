@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir -r requirements-browser.txt \
     && python -m playwright install --with-deps --no-shell chromium \
     && chmod -R a+rX /opt/playwright \
     && rm -rf /var/lib/apt/lists/*
-COPY --chown=app:app api_watch.py api_source.py store.py telegram.py local_credentials.py dashboard.py supervise.py watch_preferences.py row_watch.py row_reader.py ./
+COPY --chown=app:app api_watch.py api_source.py store.py telegram.py local_credentials.py dashboard.py supervise.py watch_preferences.py row_watch.py row_reader.py row_agent_protocol.py ./
 COPY --chown=app:app static/screenwatch.html ./static/screenwatch.html
 COPY --chmod=755 deploy/railway-entrypoint.sh /usr/local/bin/bms-entrypoint
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/bms-entrypoint"]
