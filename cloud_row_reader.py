@@ -76,19 +76,28 @@ def parse_layout(show,encoded,category_areas):
         if name:areas[parts[1]]=name
     if not areas:raise ValueError('No matching seat categories in layout')
     rows={};available=set();seats=[]
+    area_codes=sorted(areas,key=len,reverse=True)
+    def area_for(cell):
+        return next((code for code in area_codes if cell.startswith(code) and
+            (len(cell)>len(code) or '+' in cell)),None)
     for item in sections[1].split('|'):
         if not item:continue
         parts=item.split(':')
-        if len(parts)<3 or not re.fullmatch(r'[A-Za-z0-9]{1,32}',parts[1]):
+        # The legacy form is row-index:physical-row:seat:seat. New layouts can
+        # omit the index, and some cinemas use physical labels with spaces or
+        # punctuation. Locate the first actual seat cell to distinguish both.
+        seat_start=next((i for i,cell in enumerate(parts[1:],1) if area_for(cell)),None)
+        if seat_start is None:continue
+        label_index=1 if seat_start>=2 else 0
+        label=parts[label_index].strip()
+        if not label or not re.fullmatch(r'[\w .()/#-]{1,32}',label,re.UNICODE):
             raise ValueError('Seat row format changed')
-        label=parts[1]
-        for cell in parts[2:]:
+        for cell in parts[seat_start:]:
             encoded_seat,*extra=cell.split('+')
             # Area IDs in the encrypted layout are usually one character, but
             # they are not guaranteed to stay that way. Match the longest
             # known category area before reading the status digit.
-            area=next((code for code in sorted(areas,key=len,reverse=True)
-                if encoded_seat.startswith(code)),None)
+            area=area_for(cell)
             # Ignore other categories; their seat encoding is irrelevant here.
             if area is None:continue
             seat_state=encoded_seat[len(area):]
