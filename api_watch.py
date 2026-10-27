@@ -42,7 +42,7 @@ def ingest(db,job,data):
                     before=old[identity].get('categories',{})
                     opened=[c['name'] for k,c in show['categories'].items()
                         if k in before and before[k]['status']=='0' and c['status'] in ('1','2','3')
-                        and (not prefs['categories'] or c['name'] in prefs['categories'])]
+                        and preferences.category_matches(c['name'],prefs)]
                     if opened:change='Category now available · '+show['time']+' · '+', '.join(opened)
                 if change:
                     group=groups.setdefault(show['venue_code'],{'show':show,'lines':[]})
@@ -97,6 +97,11 @@ def seed(db,previous_db=None):
         setmeta(db,'imported_inventory','1')
     db.commit()
 
+def poll_interval(db,job):
+    if job['kind']=='catalog':return 600
+    movie=json.loads(job['payload']).get('movie','')
+    return 30 if any(movie in rule['preferences']['movies'] for rule in preferences.active(db)) else 120
+
 class Monitor:
     def __init__(self,path,dry_run=False):self.path=path;self.dry_run=dry_run;self.stop=threading.Event()
     def worker(self):
@@ -118,7 +123,7 @@ class Monitor:
                             schedule(db,movie['event'],'',movie['title'],initialized)
                         setmeta(db,'catalog_initialized','1');setmeta(db,'catalog_last_success',now)
                     else:ingest(db,job,data)
-                    db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(time.time(),time.time()+(600 if job['kind']=='catalog' else 120),job['id']))
+                    db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(time.time(),time.time()+poll_interval(db,job),job['id']))
                     db.commit();logging.info('%s checked',job['kind'])
                 except Exception as error:
                     db.rollback();delay=max(300,getattr(error,'retry',300))

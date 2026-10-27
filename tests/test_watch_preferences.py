@@ -80,6 +80,8 @@ class PreferenceTests(unittest.TestCase):
         p={**prefs.defaults(),'movies':['Film'],'screens':['HDR'],'formats':['IMAX 3D'],'languages':['Telugu'],'new_shows':True}
         self.assertTrue(prefs.matches(show,p))
         self.assertFalse(prefs.matches(show,{**p,'screens':['PCX']}))
+        self.assertTrue(prefs.matches(show,{**p,'formats':['3D']}))
+        self.assertFalse(prefs.matches(show,{**p,'formats':['2D']}))
     def test_catalog_movie_is_selectable_before_showtimes_exist(self):
         self.db.execute('INSERT INTO inventory VALUES(?,?,?)',('https://in.bookmyshow.com/movies/hyderabad/film/ET12345678','Upcoming Film',1))
         options=prefs.options(self.db)
@@ -105,4 +107,3 @@ class PreferenceTests(unittest.TestCase):
             with urllib.request.urlopen(url) as r:self.assertEqual(json.load(r)['preferences']['movies'],['Test Movie'])
             with urllib.request.urlopen(url+'?new=1') as r:self.assertEqual(json.load(r)['preferences']['movies'],[])
         finally:server.shutdown();server.server_close();thread.join()
-

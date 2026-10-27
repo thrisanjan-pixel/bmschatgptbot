@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from api_source import show_url
-from api_watch import ingest
+from api_watch import ingest,poll_interval
 from store import connect, setmeta
 import watch_preferences as prefs
 from tests.test_api_watch import DAY, EVENT, response
@@ -32,6 +32,14 @@ class AlertRuleTests(unittest.TestCase):
         self.assertEqual(saved[0]['id'], 'legacy')
         self.assertTrue(saved[0]['preferences']['enabled'])
         self.assertEqual(saved[0]['preferences']['movies'], ['Test Movie'])
+
+    def test_deleted_last_legacy_request_does_not_reappear_on_refresh(self):
+        setmeta(self.db,'watch_preferences',json.dumps({**prefs.defaults(),'movies':['Test Movie'],'enabled':True}))
+        self.db.commit()
+        alert_id=prefs.rules(self.db)[0]['id']
+        prefs.delete(self.db,alert_id)
+        self.assertEqual(prefs.rules(self.db),[])
+        self.assertEqual(prefs.rules(self.db),[])
 
     def test_two_alerts_emit_separately_and_pause_is_scoped(self):
         first = prefs.save(self.db, {**prefs.defaults(), 'movies': ['Test Movie'],
@@ -83,6 +91,39 @@ class AlertRuleTests(unittest.TestCase):
         self.assertEqual(self.db.execute('SELECT count(*) FROM outbox').fetchone()[0],0)
         ingest(self.db,self.job,response(status='3'))
         self.assertEqual(self.db.execute('SELECT count(*) FROM outbox WHERE alert_id=?',(alert_id,)).fetchone()[0],1)
+
+    def test_cancel_reset_and_got_tickets_preserve_the_request(self):
+        alert_id=prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'enabled':True},create=True)
+        prefs.transition(self.db,alert_id,'cancel')
+        self.assertEqual(prefs.rules(self.db)[0]['status'],'cancelled')
+        self.assertEqual(prefs.active(self.db),[])
+        prefs.transition(self.db,alert_id,'reset')
+        self.assertEqual(prefs.active(self.db)[0]['id'],alert_id)
+        prefs.transition(self.db,alert_id,'booked')
+        rule=prefs.rules(self.db)[0]
+        self.assertEqual(rule['status'],'completed')
+        self.assertEqual(rule['preferences']['request_state'],'booked')
+        self.assertEqual(prefs.active(self.db),[])
+
+    def test_expired_request_is_missed_and_cannot_be_reset_without_new_date(self):
+        alert_id=prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'dates':['20000101'],'enabled':True},create=True)
+        self.assertEqual(prefs.rules(self.db)[0]['status'],'missed')
+        self.assertEqual(prefs.active(self.db),[])
+        with self.assertRaisesRegex(ValueError,'future date'):prefs.transition(self.db,alert_id,'reset')
+
+    def test_future_hdr_screen_is_available_without_current_screening(self):
+        self.db.execute("INSERT INTO venues VALUES('PRHN','Prasads Multiplex','https://in.bookmyshow.com',1)")
+        options=prefs.options(self.db)
+        self.assertIn('PCX HDR BY BARCO',options['venue_options']['PRHN']['screens'])
+        self.assertEqual(options['showtimes'],[])
+
+    def test_active_request_uses_thirty_second_target_interval(self):
+        job={**self.job,'kind':'discovery'}
+        self.assertEqual(poll_interval(self.db,job),120)
+        alert_id=prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'enabled':True},create=True)
+        self.assertEqual(poll_interval(self.db,job),30)
+        prefs.transition(self.db,alert_id,'cancel')
+        self.assertEqual(poll_interval(self.db,job),120)
 
 
 if __name__ == '__main__':

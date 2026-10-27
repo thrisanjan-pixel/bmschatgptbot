@@ -1,14 +1,29 @@
 """Saved personal watch filters and conservative Telegram pacing."""
 import datetime as dt
 import json
+import re
 import sqlite3
 import time
 import uuid
 from store import emit,meta,setmeta
 
 FIELDS=('movies','cinemas','screens','languages','formats','dates','categories')
+VENUE_SCREENS={
+    'PRHN':['PCX SCREEN','PCX HDR BY BARCO','BARCO FLAGSHIP 4K LASER','BARCO 4K LASER',
+            'BARCO 4K SMART LASER','PCX Infinity Vis 3D','Infinity Vision 3D','Infinity Vision 2D'],
+    'AMBH':['BARCO FLAGSHIP LASER DOLBY ATMOS','M B LUXE','VIP SCREEN','HDR BY BARCO'],
+    'ALUC':['DOLBY CINEMA'],
+}
+
+def normalized(value):return ' '.join(str(value).casefold().split())
+def category_matches(name,p):return not p['categories'] or normalized(name) in {normalized(v) for v in p['categories']}
+def format_matches(actual,wanted):
+    actual=normalized(actual);wanted=normalized(wanted)
+    if wanted in ('2d','3d'):return bool(re.search(r'(?<![a-z0-9])'+wanted+r'(?![a-z0-9])',actual))
+    if wanted in ('imax','4dx'):return wanted in actual
+    return actual==wanted
 def defaults():
-    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':False,'enabled':False,'once':True,'interval_minutes':10,'row_show':'','rows':[]}
+    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'interval_minutes':10,'row_show':'','rows':[],'request_state':''}
 
 def ensure(db):
     db.execute('''CREATE TABLE IF NOT EXISTS alerts(
@@ -16,6 +31,7 @@ def ensure(db):
         updated REAL NOT NULL,last_alert REAL NOT NULL DEFAULT 0,
         completed REAL NOT NULL DEFAULT 0)''')
     if db.execute('SELECT 1 FROM alerts LIMIT 1').fetchone():return
+    if meta(db,'alerts_migration_complete','0')=='1':return
     try:old={**defaults(),**json.loads(meta(db,'watch_preferences','{}'))}
     except (ValueError,TypeError):old=defaults()
     if old['enabled'] or old['row_show'] or any(old[key] for key in FIELDS):
@@ -27,11 +43,26 @@ def ensure(db):
 
 def rules(db):
     ensure(db)
-    return [{**dict(row),'preferences':{**defaults(),**json.loads(row['payload'])}}
-        for row in db.execute('SELECT * FROM alerts ORDER BY created DESC')]
+    result=[]
+    for row in db.execute('SELECT * FROM alerts ORDER BY created DESC'):
+        rule={**dict(row),'preferences':{**defaults(),**json.loads(row['payload'])}}
+        p=rule['preferences'];state=p.get('request_state','')
+        expired=False
+        if p['dates']:
+            from api_source import end_day
+            expired=max(end_day(day) for day in p['dates'])<=time.time()
+        if p['row_show']:
+            show=db.execute('SELECT cutoff FROM sessions WHERE id=?',(p['row_show'],)).fetchone()
+            expired=expired or bool(show and show[0]<=time.time())
+        rule['status']='cancelled' if state=='cancelled' else 'completed' if rule['completed'] or state=='booked' else 'missed' if expired and p['enabled'] else 'active' if p['enabled'] else 'paused'
+        message=db.execute('SELECT text FROM outbox WHERE alert_id=? ORDER BY created DESC LIMIT 1',(rule['id'],)).fetchone()
+        link=re.search(r'https://in\.bookmyshow\.com/movies/hyderabad/seat-layout/[A-Za-z0-9/]+',message[0]) if message else None
+        rule['booking_url']=link[0] if link else ''
+        result.append(rule)
+    return result
 
 def active(db):
-    return [rule for rule in rules(db) if rule['preferences']['enabled']]
+    return [rule for rule in rules(db) if rule['status']=='active']
 
 
 def prime_availability(db):
@@ -62,7 +93,7 @@ def prime_availability(db):
                 if not matches(show,p):continue
                 opened=sorted({category['name'] for category in show['categories'].values()
                     if category['status'] in ('1','2','3') and
-                    (not p['categories'] or category['name'] in p['categories'])})
+                    category_matches(category['name'],p)})
                 if opened:found.append((show,opened))
             if found and not db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone():
                 lines=[]
@@ -117,8 +148,11 @@ def dimensions(show):
 def matches(show,p):
     language,format_=dimensions(show)
     for key,value in [('movies',show['movie']),('cinemas',show['venue_code']),('screens',str(show.get('format',''))),('dates',show['date']),('languages',language),('formats',format_)]:
-        if p[key] and value not in p[key]:return False
-    if p['categories'] and not any(c['name'] in p['categories'] for c in show['categories'].values()):return False
+        if key=='formats':
+            if p[key] and not any(format_matches(value,v) for v in p[key]):return False
+            continue
+        if p[key] and (value not in p[key] if key in ('movies','cinemas','dates') else normalized(value) not in {normalized(v) for v in p[key]}):return False
+    if p['categories'] and not any(category_matches(c['name'],p) for c in show['categories'].values()):return False
     if p['time_from'] or p['time_to']:
         try:clock=dt.datetime.strptime(show['time'].strip(),'%I:%M %p').strftime('%H:%M')
         except ValueError:return False
@@ -144,7 +178,6 @@ def save(db,data,alert_id=None,create=False):
     p=validate(data)
     saved=rules(db)
     if create:
-        if len(saved)>=20:raise ValueError('Maximum 20 alerts. Pause or edit an existing alert.')
         alert_id=uuid.uuid4().hex
     elif alert_id:
         if not any(rule['id']==alert_id for rule in saved):raise ValueError('Alert no longer exists')
@@ -156,7 +189,7 @@ def save(db,data,alert_id=None,create=False):
         layout=row_watch.get(db,p['row_show'])
         show=db.execute('SELECT payload FROM sessions WHERE id=? AND active=1 AND cutoff>?',(p['row_show'],time.time())).fetchone()
         if not show or not matches(json.loads(show[0]),p):raise ValueError('The row showtime must match your selected filters')
-        allowed={r['id'] for r in layout['data'].get('rows',[]) if not p['categories'] or r['category'] in p['categories']}
+        allowed={r['id'] for r in layout['data'].get('rows',[]) if category_matches(r['category'],p)}
         if not set(p['rows']).issubset(allowed):raise ValueError('Reload the layout and choose valid rows for this category')
         # A source 403 must not invalidate a previously successful layout. Keep
         # allowing alerts for rows from that cached layout while row_watch
@@ -177,6 +210,26 @@ def save(db,data,alert_id=None,create=False):
     return alert_id
 
 
+def transition(db,alert_id,action):
+    rule=next((r for r in rules(db) if r['id']==alert_id),None)
+    if not rule:raise ValueError('Alert no longer exists')
+    p=rule['preferences']
+    if action=='reset':
+        if rule['status']=='missed':raise ValueError('Choose a future date before resetting this alert')
+        saved=save(db,{**p,'enabled':True},alert_id)
+        db.execute('UPDATE alerts SET last_alert=0 WHERE id=?',(alert_id,));db.commit()
+        return saved
+    if action not in ('cancel','booked'):raise ValueError('Unknown alert action')
+    p['enabled']=False;p['request_state']='cancelled' if action=='cancel' else 'booked'
+    db.execute('BEGIN IMMEDIATE');archive_pending(db,alert_id)
+    db.execute('UPDATE alerts SET payload=?,updated=?,completed=? WHERE id=?',
+        (json.dumps(p),time.time(),time.time() if action=='booked' else 0,alert_id))
+    enabled=bool(db.execute("SELECT 1 FROM alerts WHERE json_extract(payload,'$.enabled')=1 LIMIT 1").fetchone())
+    setmeta(db,'notifications_paused','0' if enabled else '1')
+    setmeta(db,'notifications_mode','enabled' if enabled else 'paused');db.commit()
+    return alert_id
+
+
 def delete(db,alert_id):
     if not isinstance(alert_id,str) or not alert_id or len(alert_id)>150:
         raise ValueError('Choose an alert to delete')
@@ -185,6 +238,9 @@ def delete(db,alert_id):
     db.execute('BEGIN IMMEDIATE')
     archive_pending(db,alert_id)
     db.execute('DELETE FROM alerts WHERE id=?',(alert_id,))
+    # Once a user deletes a migrated request, an empty alerts table is real
+    # state. Do not recreate it from obsolete single-alert settings on GET.
+    setmeta(db,'alerts_migration_complete','1')
     for table in ('row_alert_state','alert_initial_state'):
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
             db.execute(f'DELETE FROM {table} WHERE alert_id=?',(alert_id,))
@@ -221,8 +277,18 @@ def options(db):
         profiles.add((s['movie'],s['venue_code'],language,format_,tuple(sorted(c['name'] for c in s['categories'].values())),str(s.get('format','')),s['date'],s['url']))
     result['movies'].update(r[0] for r in db.execute('SELECT title FROM inventory'))
     cinema_names={r['code']:r['name'] for r in db.execute('SELECT code,name FROM venues')}
-    return {**{k:sorted(v) for k,v in result.items()},'cinemas':[{'value':k,'label':v} for k,v in sorted(cinemas.items(),key=lambda x:x[1])],
+    cinema_names.update(cinemas)
+    venue_options={code:{'screens':set(VENUE_SCREENS.get(code,[])),'categories':set()} for code in cinema_names}
+    for row in db.execute('SELECT payload FROM sessions'):
+        s=json.loads(row[0]);v=venue_options.setdefault(s['venue_code'],{'screens':set(),'categories':set()})
+        if s.get('format'):v['screens'].add(str(s['format']))
+        v['categories'].update(c['name'] for c in s['categories'].values())
+    for v in venue_options.values():
+        result['screens'].update(v['screens']);result['categories'].update(v['categories'])
+    result['languages'].update(['Telugu','Hindi','Tamil','Malayalam','Kannada','English'])
+    result['formats'].update(['2D','3D','IMAX','IMAX 3D','4DX','4DX 3D'])
+    return {**{k:sorted(v) for k,v in result.items()},'cinemas':[{'value':k,'label':v} for k,v in sorted(cinema_names.items(),key=lambda x:x[1])],
             'cinema_names':cinema_names,
+            'venue_options':{code:{k:sorted(items) for k,items in value.items()} for code,value in venue_options.items()},
             'profiles':[{'movie':p[0],'cinema':p[1],'language':p[2],'format':p[3],'categories':p[4],'screen':p[5],'date':p[6],'url':p[7]} for p in sorted(profiles)],
             'showtimes':[{'id':s['id'],'movie':s['movie'],'cinema':s['venue_code'],'screen':str(s.get('format','')),'language':dimensions(s)[0],'format':dimensions(s)[1],'date':s['date'],'time':s['time'],'categories':[c['name'] for c in s['categories'].values()],'booking_url':seat_layout_url(s)} for s in shows]}
-

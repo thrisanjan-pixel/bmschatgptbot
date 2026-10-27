@@ -7,6 +7,7 @@ import hmac
 import html
 import re
 import secrets
+import sqlite3
 import threading
 from http.cookies import SimpleCookie, CookieError
 from urllib.parse import parse_qs,urlsplit
@@ -150,6 +151,12 @@ def handler(path, public=False):
                         if data:raise ValueError('Invalid delete request')
                         preferences.delete(db,requested)
                         self.reply(json.dumps({'deleted':True}));return
+                    if action in ('cancel','reset','booked'):
+                        if data:raise ValueError('Invalid alert action request')
+                        if action=='reset' and public and not all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')):raise ValueError('Connect Telegram before enabling alerts')
+                        if action=='reset' and preferences.read(db,requested).get('row_show') and os.environ.get('BMS_ROWS_ENABLED')!='1':raise ValueError('Row monitoring is unavailable on this host')
+                        saved_id=preferences.transition(db,requested,action)
+                        self.reply(json.dumps({'id':saved_id}));return
                     if action:raise ValueError('Invalid alert action')
                     create=data.pop('create',False)
                     if requested is not None and not isinstance(requested,str):raise ValueError('Invalid alert ID')
@@ -157,6 +164,8 @@ def handler(path, public=False):
                     saved_id=preferences.save(db,data,requested,create)
                 except (ValueError,TypeError) as error:
                     self.reply(json.dumps({'error':'Settings not saved: '+str(error)}),400);return
+                except sqlite3.Error:
+                    self.reply(json.dumps({'error':'The alert database is busy or unavailable. Please try again.'}),503);return
                 finally:
                     if db is not None:db.close()
                 self.reply(json.dumps({'id':saved_id}));return
