@@ -54,5 +54,17 @@ class HostedDashboardTests(unittest.TestCase):
                 with urllib.request.urlopen(urllib.request.Request(url+'/api/status',headers={'Cookie':cookie.split(';')[0]})) as response:self.assertEqual(response.status,200)
                 with self.assertRaises(urllib.error.HTTPError) as caught:urllib.request.urlopen(urllib.request.Request(url+'/api/status',headers={'Cookie':'screenwatch_session=forged'}))
                 self.assertEqual(caught.exception.code,401);caught.exception.close()
+                # A new handler represents a restarted deployment. Its empty
+                # memory cache must still accept the existing session cookie.
+                restarted=ThreadingHTTPServer(('127.0.0.1',0),handler(str(Path(tmp)/'state.sqlite3'),public=True))
+                restarted_thread=threading.Thread(target=restarted.serve_forever,daemon=True);restarted_thread.start()
+                request=urllib.request.Request(f'http://127.0.0.1:{restarted.server_port}/api/status',headers={'Cookie':cookie.split(';')[0]})
+                try:
+                    with urllib.request.urlopen(request) as response:self.assertEqual(response.status,200)
+                    with patch.dict(os.environ,{'DASHBOARD_PASSWORD':'different-test-password-at-least-16'}):
+                        with self.assertRaises(urllib.error.HTTPError) as caught:urllib.request.urlopen(request)
+                        self.assertEqual(caught.exception.code,401);caught.exception.close()
+                finally:restarted.shutdown();restarted.server_close();restarted_thread.join()
             finally:
                 server.shutdown();server.server_close();thread.join()
+

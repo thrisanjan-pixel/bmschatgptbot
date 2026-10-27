@@ -4,6 +4,7 @@ import json
 import os
 import time
 import hmac
+import hashlib
 import html
 import re
 import secrets
@@ -50,6 +51,14 @@ def handler(path, public=False):
     sessions={}
     login_failures=[]
     auth_lock=threading.Lock()
+    if public:
+        db=connect(path)
+        try:
+            db.execute('CREATE TABLE IF NOT EXISTS web_sessions(token_hash TEXT PRIMARY KEY,expires REAL NOT NULL)')
+            db.commit()
+        finally:db.close()
+    def session_hash(password,token):
+        return hmac.new(password.encode(),token.encode(),hashlib.sha256).hexdigest()
     class Handler(BaseHTTPRequestHandler):
         def authenticated(self):
             if not public:return True
@@ -60,7 +69,16 @@ def handler(path, public=False):
                 cookies=SimpleCookie(self.headers.get('Cookie',''))
                 token=cookies['screenwatch_session'].value if 'screenwatch_session' in cookies else ''
             except CookieError:return False
-            with auth_lock:return bool(password and sessions.get(token,0)>time.time())
+            if not password or not token or len(token)>100:return False
+            digest=session_hash(password,token)
+            with auth_lock:
+                if sessions.get(digest,0)>time.time():return True
+            db=connect(path)
+            try:row=db.execute('SELECT expires FROM web_sessions WHERE token_hash=?',(digest,)).fetchone()
+            finally:db.close()
+            if not row or row[0]<=time.time():return False
+            with auth_lock:sessions[digest]=row[0]
+            return True
         def authorized(self):
             if self.authenticated():return True
             self.send_response(401)
@@ -109,7 +127,15 @@ def handler(path, public=False):
                     for key in list(sessions):
                         if sessions[key]<=now:del sessions[key]
                     if len(sessions)>=100:sessions.pop(next(iter(sessions)))
-                    session=secrets.token_urlsafe(32);sessions[session]=now+28800
+                    session=secrets.token_urlsafe(32);digest=session_hash(password,session)
+                    db=connect(path)
+                    try:
+                        db.execute('DELETE FROM web_sessions WHERE expires<=?',(now,))
+                        if db.execute('SELECT count(*) FROM web_sessions').fetchone()[0]>=100:
+                            db.execute('DELETE FROM web_sessions WHERE token_hash=(SELECT token_hash FROM web_sessions ORDER BY expires LIMIT 1)')
+                        db.execute('INSERT INTO web_sessions VALUES(?,?)',(digest,now+28800));db.commit()
+                    finally:db.close()
+                    sessions[digest]=now+28800
                 self.send_response(303)
                 self.send_header('Location','/')
                 self.send_header('Set-Cookie','screenwatch_session='+session+'; Path=/; Max-Age=28800; HttpOnly; Secure; SameSite=Strict')
@@ -269,3 +295,4 @@ if __name__=='__main__':
     a=p.parse_args();public=os.environ.get('BMS_PUBLIC')=='1'
     if public and len(os.environ.get('DASHBOARD_PASSWORD',''))<16:raise SystemExit('Set DASHBOARD_PASSWORD to at least 16 characters before hosting.')
     ThreadingHTTPServer(('0.0.0.0' if public else '127.0.0.1',a.port),handler(a.db,public)).serve_forever()
+
