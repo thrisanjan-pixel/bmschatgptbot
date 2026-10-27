@@ -158,7 +158,11 @@ def save(db,data,alert_id=None,create=False):
         if not show or not matches(json.loads(show[0]),p):raise ValueError('The row showtime must match your selected filters')
         allowed={r['id'] for r in layout['data'].get('rows',[]) if not p['categories'] or r['category'] in p['categories']}
         if not set(p['rows']).issubset(allowed):raise ValueError('Reload the layout and choose valid rows for this category')
-        if p['enabled'] and (layout['error'] or time.time()-layout['checked']>300):raise ValueError('Reload the seat layout before enabling row alerts')
+        # A source 403 must not invalidate a previously successful layout. Keep
+        # allowing alerts for rows from that cached layout while row_watch
+        # observes its normal retry cooldown; reject only if no layout was ever
+        # read for this showtime.
+        if p['enabled'] and not layout['checked']:raise ValueError('Load the seat layout once before enabling row alerts')
         db.commit()
     now=time.time();db.execute('BEGIN IMMEDIATE')
     archive_pending(db,alert_id)
@@ -221,3 +225,4 @@ def options(db):
             'cinema_names':cinema_names,
             'profiles':[{'movie':p[0],'cinema':p[1],'language':p[2],'format':p[3],'categories':p[4],'screen':p[5],'date':p[6],'url':p[7]} for p in sorted(profiles)],
             'showtimes':[{'id':s['id'],'movie':s['movie'],'cinema':s['venue_code'],'screen':str(s.get('format','')),'language':dimensions(s)[0],'format':dimensions(s)[1],'date':s['date'],'time':s['time'],'categories':[c['name'] for c in s['categories'].values()],'booking_url':seat_layout_url(s)} for s in shows]}
+

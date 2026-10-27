@@ -47,6 +47,13 @@ class RowTests(unittest.TestCase):
   row_watch.request(self.db,self.show['id'])
   saved=self.db.execute('SELECT due,error FROM row_layouts WHERE show_id=?',(self.show['id'],)).fetchone()
   self.assertEqual(saved['error'],'Seat page unavailable (HTTP 403)');self.assertGreater(saved['due'],time.time()+295)
+ def test_cached_layout_remains_usable_during_cloud_403_cooldown(self):
+  self.configure();due=time.time()+300
+  self.db.execute("UPDATE row_layouts SET error='Seat page unavailable (HTTP 403)',due=? WHERE show_id=?",(due,self.show['id']));self.db.commit()
+  saved=prefs.read(self.db)
+  alert_id=prefs.save(self.db,{**saved,'enabled':True})
+  self.assertEqual(alert_id,prefs.read(self.db) and prefs.rules(self.db)[0]['id'])
+  self.assertEqual(len(row_watch.get(self.db,self.show['id'])['data']['rows']),2)
  def test_expired_row_watch_can_always_be_paused(self):
   self.configure();p=prefs.read(self.db)
   self.db.execute('UPDATE sessions SET cutoff=0');self.db.commit()
@@ -74,3 +81,4 @@ class RowTests(unittest.TestCase):
   self.assertTrue(launch.call_args.kwargs['start_new_session'])
   kill.assert_called_once_with(321,signal.SIGKILL)
   self.assertEqual(process.communicate.call_count,2)
+
