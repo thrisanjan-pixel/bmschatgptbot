@@ -4,7 +4,7 @@ import json
 import sqlite3
 import time
 import uuid
-from store import meta,setmeta
+from store import emit,meta,setmeta
 
 FIELDS=('movies','cinemas','screens','languages','formats','dates','categories')
 def defaults():
@@ -32,6 +32,50 @@ def rules(db):
 
 def active(db):
     return [rule for rule in rules(db) if rule['preferences']['enabled']]
+
+
+def prime_availability(db):
+    """Notify once when a new category alert already matches open seats."""
+    from api_source import seat_layout_url
+
+    db.execute('''CREATE TABLE IF NOT EXISTS alert_initial_state(
+        alert_id TEXT PRIMARY KEY,signature TEXT NOT NULL)''')
+    seen=set()
+    pending=[]
+    for rule in active(db):
+        p=rule['preferences']
+        if not p['availability'] or p['row_show']:continue
+        signature=json.dumps({key:p[key] for key in (*FIELDS,'time_from','time_to','availability')},sort_keys=True)
+        state=db.execute('SELECT signature FROM alert_initial_state WHERE alert_id=?',(rule['id'],)).fetchone()
+        if state and state[0]==signature:
+            seen.add(signature)
+            continue
+        pending.append((rule,signature))
+    if not pending:return
+    shows=[json.loads(row[0]) for row in db.execute(
+        'SELECT payload FROM sessions WHERE active=1 AND cutoff>?',(time.time(),))]
+    for rule,signature in pending:
+        p=rule['preferences']
+        if signature not in seen:
+            found=[]
+            for show in shows:
+                if not matches(show,p):continue
+                opened=sorted({category['name'] for category in show['categories'].values()
+                    if category['status'] in ('1','2','3') and
+                    (not p['categories'] or category['name'] in p['categories'])})
+                if opened:found.append((show,opened))
+            if found and not db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone():
+                lines=[]
+                for show,opened in found[:3]:
+                    lines.append(show['venue']+' · '+show['date']+' · '+show['time']+'\n'+
+                        ', '.join(opened)+'\n'+seat_layout_url(show))
+                extra=f'\n\n{len(found)-3} more matching showtimes are open.' if len(found)>3 else ''
+                message='🎬 '+found[0][0]['movie']+'\nSeats already available for this alert:\n\n'+\
+                    '\n\n'.join(lines)+extra
+                emit(db,'initial:'+rule['id']+':'+signature,message[:3900],alert_id=rule['id'])
+                db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(time.time(),rule['id']))
+        seen.add(signature)
+        db.execute('INSERT OR REPLACE INTO alert_initial_state VALUES(?,?)',(rule['id'],signature))
 
 def read(db,alert_id=None):
     saved=rules(db)

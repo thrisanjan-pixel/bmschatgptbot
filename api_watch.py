@@ -153,9 +153,8 @@ class Monitor:
                     # no new delivery can begin using an earlier settings read.
                     db.execute('BEGIN IMMEDIATE')
                     running=preferences.active(db)
-                    last=db.execute('SELECT coalesce(max(delivered),0) FROM outbox').fetchone()[0]
-                    interval=min((r['preferences']['interval_minutes'] for r in running),default=10)*60
-                    if running and meta(db,'notifications_paused','0')!='1' and time.time()-last>=interval:
+                    if running and meta(db,'notifications_paused','0')!='1':
+                        preferences.prime_availability(db)
                         delivered_id=drain(db,commit=False)
                         if delivered_id:preferences.delivered(db,delivered_id)
                     db.commit()

@@ -6,6 +6,7 @@ import watch_preferences as prefs
 
 def schema(db):
     db.execute("CREATE TABLE IF NOT EXISTS row_layouts(show_id TEXT PRIMARY KEY,payload TEXT,checked REAL DEFAULT 0,error TEXT DEFAULT '',due REAL DEFAULT 0)")
+    db.execute("CREATE TABLE IF NOT EXISTS row_alert_state(alert_id TEXT PRIMARY KEY,signature TEXT NOT NULL,available TEXT NOT NULL)")
 
 def request(db,show_id):
     schema(db)
@@ -36,14 +37,21 @@ def run_reader(show,timeout=75):
 def ingest(db,show,result):
     schema(db);old=get(db,show['id']);previous=old['data']
     known={r['id']:r for r in previous.get('rows',[])};known.update({r['id']:r for r in result['rows']});result['rows']=list(known.values())
-    before={(s['row_id'],s['seat']) for s in previous.get('available',[])}
-    if old['checked'] and meta(db,'notifications_paused','0')!='1':
+    if meta(db,'notifications_paused','0')!='1':
+        seen_signatures=set()
         for rule in prefs.active(db):
             p=rule['preferences']
             if p.get('row_show')!=show['id']:continue
             selected=set(p.get('rows',[]))
+            signature=json.dumps([show['id'],sorted(selected)])
+            state=db.execute('SELECT signature,available FROM row_alert_state WHERE alert_id=?',(rule['id'],)).fetchone()
+            before={tuple(item) for item in json.loads(state['available'])} if state and state['signature']==signature else set()
+            current={(s['row_id'],s['seat']) for s in result['available'] if s['row_id'] in selected}
             added=[s for s in result['available'] if s['row_id'] in selected and (s['row_id'],s['seat']) not in before]
-            if not added:continue
+            db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
+                (rule['id'],signature,json.dumps(sorted(current))))
+            if not added or signature in seen_signatures:continue
+            seen_signatures.add(signature)
             now=time.time()
             pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone()
             if now-rule['last_alert']>=p['interval_minutes']*60 and not pending:

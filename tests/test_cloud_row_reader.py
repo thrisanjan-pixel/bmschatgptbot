@@ -66,5 +66,25 @@ class CloudRowTests(unittest.TestCase):
                 self.assertGreater(row_watch.get(db,self.show['id'])['due'],0)
             finally:db.close()
 
+    def test_new_row_rule_notifies_for_already_open_seat_only_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=connect(str(Path(folder)/'state.sqlite3'))
+            try:
+                db.execute('INSERT INTO sessions VALUES(?,?,?,1)',(self.show['id'],json.dumps(self.show),self.show['cutoff']))
+                row_watch.request(db,self.show['id'])
+                data={'rows':[{'id':'Gold / R','category':'Gold','row':'R'}],
+                    'available':[{'row_id':'Gold / R','seat':'31'}],
+                    'url':seat_layout_url(self.show)}
+                row_watch.ingest(db,self.show,copy.deepcopy(data))
+                alert_id=prefs.save(db,{**prefs.defaults(),'movies':['Movie'],
+                    'row_show':self.show['id'],'rows':['Gold / R'],'enabled':True},create=True)
+                row_watch.ingest(db,self.show,copy.deepcopy(data))
+                row_watch.ingest(db,self.show,copy.deepcopy(data))
+                messages=list(db.execute('SELECT text FROM outbox WHERE alert_id=?',(alert_id,)))
+                self.assertEqual(len(messages),1)
+                self.assertIn('Gold / R: 31',messages[0][0])
+                self.assertIn(seat_layout_url(self.show),messages[0][0])
+            finally:db.close()
+
 
 if __name__=='__main__':unittest.main()
