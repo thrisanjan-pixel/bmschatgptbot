@@ -172,6 +172,23 @@ def save(db,data,alert_id=None,create=False):
     db.commit()
     return alert_id
 
+
+def delete(db,alert_id):
+    if not isinstance(alert_id,str) or not alert_id or len(alert_id)>150:
+        raise ValueError('Choose an alert to delete')
+    if not any(rule['id']==alert_id for rule in rules(db)):
+        raise ValueError('Alert no longer exists')
+    db.execute('BEGIN IMMEDIATE')
+    archive_pending(db,alert_id)
+    db.execute('DELETE FROM alerts WHERE id=?',(alert_id,))
+    for table in ('row_alert_state','alert_initial_state'):
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
+            db.execute(f'DELETE FROM {table} WHERE alert_id=?',(alert_id,))
+    enabled=bool(db.execute("SELECT 1 FROM alerts WHERE json_extract(payload,'$.enabled')=1 LIMIT 1").fetchone())
+    setmeta(db,'notifications_paused','0' if enabled else '1')
+    setmeta(db,'notifications_mode','enabled' if enabled else 'paused')
+    db.commit()
+
 def delivered(db,alert_id=None):
     saved=rules(db)
     rule=next((r for r in saved if r['id']==alert_id),None) if alert_id else (saved[0] if saved else None)

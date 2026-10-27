@@ -145,6 +145,12 @@ def handler(path, public=False):
                     if data.get('enabled') and data.get('row_show') and os.environ.get('BMS_ROWS_ENABLED')!='1':raise ValueError('Row monitoring is unavailable on this host')
                     db=connect(path)
                     requested=data.pop('alert_id',None)
+                    action=data.pop('action','')
+                    if action=='delete':
+                        if data:raise ValueError('Invalid delete request')
+                        preferences.delete(db,requested)
+                        self.reply(json.dumps({'deleted':True}));return
+                    if action:raise ValueError('Invalid alert action')
                     create=data.pop('create',False)
                     if requested is not None and not isinstance(requested,str):raise ValueError('Invalid alert ID')
                     if type(create) is not bool:raise ValueError('Invalid alert request')
