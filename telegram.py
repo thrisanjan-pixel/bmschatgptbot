@@ -64,9 +64,9 @@ def send(text, photo=None):
         request('sendMessage', {'chat_id': chat, 'text': text[:4000], 'disable_web_page_preview': True})
 
 
-def drain(db, commit=True):
+def drain(db, commit=True, system_only=False):
     now = time.time()
-    row = db.execute('SELECT * FROM outbox WHERE delivered=0 AND next_try<=? ORDER BY created LIMIT 1', (now,)).fetchone()
+    row = db.execute("SELECT * FROM outbox WHERE delivered=0 AND next_try<=?"+(" AND alert_id='__health__'" if system_only else "")+" ORDER BY CASE WHEN alert_id='__health__' THEN 0 ELSE 1 END,created LIMIT 1", (now,)).fetchone()
     if not row:
         return None
     try:

@@ -17,6 +17,10 @@ def connect(path):
     CREATE TABLE IF NOT EXISTS inventory(url TEXT PRIMARY KEY,title TEXT,seen REAL);
     CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,payload TEXT,cutoff REAL,active INTEGER DEFAULT 1);
     CREATE TABLE IF NOT EXISTS snapshots(id TEXT PRIMARY KEY,payload TEXT);
+    CREATE TABLE IF NOT EXISTS check_stats(source TEXT,job_key TEXT,attempts INTEGER DEFAULT 0,
+      successes INTEGER DEFAULT 0,failures INTEGER DEFAULT 0,last_attempt REAL DEFAULT 0,
+      last_success REAL DEFAULT 0,last_interval REAL DEFAULT 0,max_interval REAL DEFAULT 0,
+      latency REAL DEFAULT 0,error TEXT DEFAULT '',PRIMARY KEY(source,job_key));
     CREATE TABLE IF NOT EXISTS metric_history(at INTEGER PRIMARY KEY,movies INTEGER,venues INTEGER,sessions INTEGER);
     CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,text TEXT,photo BLOB,
       created REAL,delivered REAL DEFAULT 0,attempts INTEGER DEFAULT 0,next_try REAL DEFAULT 0);
@@ -78,3 +82,18 @@ def coverage(db):
         result[kind] = {'total': row[0], 'checked': row[1] or 0, 'errors': row[2] or 0,
                         'oldest_check_age': round(now-row[3]) if row[3] else None}
     return result
+
+
+def record_check(db,source,key,started,error='',now=None):
+    now=time.time() if now is None else now
+    previous=db.execute('SELECT last_success FROM check_stats WHERE source=? AND job_key=?',(source,key)).fetchone()
+    interval=max(0,now-previous[0]) if previous and previous[0] and not error else 0
+    db.execute("""INSERT INTO check_stats VALUES(?,?,1,?,?,?, ?,?,?,?,?)
+      ON CONFLICT(source,job_key) DO UPDATE SET attempts=attempts+1,
+      successes=successes+excluded.successes,failures=failures+excluded.failures,
+      last_attempt=excluded.last_attempt,
+      last_success=CASE WHEN excluded.successes=1 THEN excluded.last_success ELSE last_success END,
+      last_interval=CASE WHEN excluded.last_interval>0 THEN excluded.last_interval ELSE last_interval END,
+      max_interval=max(max_interval,excluded.max_interval),latency=excluded.latency,error=excluded.error""",
+      (source,key,int(not error),int(bool(error)),now,now if not error else 0,interval,interval,max(0,now-started),error[:200]))
+    db.execute('DELETE FROM check_stats WHERE last_attempt<?',(now-30*86400,))

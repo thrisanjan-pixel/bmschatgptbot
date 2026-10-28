@@ -1,7 +1,7 @@
 """Durable on-demand row loads and polling of one selected show."""
 import argparse,json,os,signal,subprocess,sys,time
 from pathlib import Path
-from store import connect,meta,setmeta,emit
+from store import connect,meta,setmeta,emit,record_check
 import watch_preferences as prefs
 
 def schema(db):
@@ -81,6 +81,12 @@ def schedule_active(db,now,interval=30):
         if show_id:db.execute('UPDATE row_layouts SET due=? WHERE show_id=? AND due=0 AND checked<?',(now,show_id,now-interval))
     db.commit()
 
+def next_job(db,now):
+    active=sorted({r['preferences']['row_show'] for r in prefs.active(db) if r['preferences']['row_show']})
+    slots=','.join('?' for _ in active) or "''"
+    return db.execute(f"""SELECT * FROM row_layouts WHERE due>0 AND due<=?
+      ORDER BY CASE WHEN due<? THEN 0 WHEN show_id IN ({slots}) THEN 1 ELSE 2 END,due LIMIT 1""",(now,now-90,*active)).fetchone()
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--db',required=True);args=parser.parse_args()
     if os.environ.get('BMS_ROWS_ENABLED')!='1':return
@@ -92,7 +98,8 @@ def main():
     while not stop:
         now=time.time()
         schedule_active(db,now,30 if os.environ.get('BMS_PUBLIC')=='1' else 60)
-        job=db.execute('SELECT * FROM row_layouts WHERE due>0 AND due<=? ORDER BY due LIMIT 1',(now,)).fetchone()
+        setmeta(db,'row_reader_heartbeat',now);db.commit()
+        job=next_job(db,now)
         if not job:time.sleep(1);continue
         row=db.execute('SELECT payload FROM sessions WHERE id=? AND cutoff>?',(job['show_id'],now)).fetchone()
         if not row:
@@ -108,7 +115,9 @@ def main():
                 if run.returncode or payload.get('error'):raise ValueError(payload.get('error','Seat read failed'))
                 result=payload['data']
             ingest(db,show,result)
+            record_check(db,'rows',show['id'],now);db.commit()
         except Exception as e:
+            record_check(db,'rows',show['id'],now,str(e).splitlines()[0][:200])
             db.execute('UPDATE row_layouts SET error=?,due=? WHERE show_id=?',(str(e).splitlines()[0][:200],time.time()+300,job['show_id']));db.commit()
     db.close()
 if __name__=='__main__':main()

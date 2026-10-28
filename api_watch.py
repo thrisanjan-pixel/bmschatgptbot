@@ -11,7 +11,7 @@ import threading
 import time
 from api_source import CATALOG,ReadError,end_day,get_json,movies,parse,seat_layout_url,show_url,today
 from local_credentials import load
-from store import connect,coverage,emit,enqueue,meta,setmeta
+from store import connect,coverage,emit,enqueue,meta,setmeta,record_check
 from telegram import drain,send
 import watch_preferences as preferences
 
@@ -102,6 +102,12 @@ def poll_interval(db,job):
     movie=json.loads(job['payload']).get('movie','')
     return 30 if any(movie in rule['preferences']['movies'] for rule in preferences.active(db)) else 120
 
+def next_job(db,now):
+    movies=sorted({m for r in preferences.active(db) for m in r['preferences']['movies']})
+    slots=','.join('?' for _ in movies) or "''"
+    return db.execute(f"""SELECT * FROM jobs WHERE due<=? AND (expires=0 OR expires>?)
+      ORDER BY CASE WHEN due>0 AND due<? THEN 0 WHEN json_extract(payload,'$.movie') IN ({slots}) THEN 1 ELSE 2 END,due,checked LIMIT 1""",(now,now,now-300,*movies)).fetchone()
+
 class Monitor:
     def __init__(self,path,dry_run=False):self.path=path;self.dry_run=dry_run;self.stop=threading.Event()
     def worker(self):
@@ -111,10 +117,10 @@ class Monitor:
                 cooldown=float(meta(db,'source_cooldown','0'))
                 if cooldown>time.time():self.stop.wait(min(1,cooldown-time.time()));continue
                 now=time.time()
-                job=db.execute('SELECT * FROM jobs WHERE due<=? AND (expires=0 OR expires>?) ORDER BY (checked=0) DESC,due LIMIT 1',(now,now)).fetchone()
+                job=next_job(db,now)
                 if not job:self.stop.wait(1);continue
                 try:
-                    data=get_json(job['url'])
+                    started=time.time();data=get_json(job['url'])
                     if job['kind']=='catalog':
                         listings=movies(data);initialized=bool(meta(db,'catalog_initialized'))
                         for movie in listings:
@@ -124,6 +130,7 @@ class Monitor:
                         setmeta(db,'catalog_initialized','1');setmeta(db,'catalog_last_success',now)
                     else:ingest(db,job,data)
                     db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(time.time(),time.time()+poll_interval(db,job),job['id']))
+                    record_check(db,'listings',job['id'],started)
                     db.commit();logging.info('%s checked',job['kind'])
                 except Exception as error:
                     db.rollback();delay=max(300,getattr(error,'retry',300))
@@ -134,6 +141,7 @@ class Monitor:
                         setmeta(db,'source_cooldown',started+delay)
                         setmeta(db,'source_cooldown_started',started)
                         setmeta(db,'source_cooldown_duration',delay)
+                    record_check(db,'listings',job['id'],now,message)
                     db.commit();logging.warning('%s: %s',job['kind'],message)
                 self.stop.wait(2)
         finally:db.close()

@@ -29,6 +29,7 @@ def main():
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:stop.set())
     processes={}
     next_start={name:0 for name in ('api_watch.py' if args.api else 'city_watch.py','dashboard.py')}
+    if args.api:next_start['health_watch.py']=0
     if args.api and os.environ.get('BMS_ROWS_ENABLED')=='1':next_start['row_watch.py']=0
     try:
         while not stop.is_set():

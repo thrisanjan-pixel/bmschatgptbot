@@ -25,7 +25,13 @@ def status(path):
         heartbeat=float(meta(db,'city_heartbeat','0'))
         state=meta(db,'city_state','stopped')
         if time.time()-heartbeat>90:state='stale'
-        return {'state':state,'heartbeat':heartbeat,'cooldown_until':float(meta(db,'source_cooldown','0')),
+        from health_watch import hosting_status
+        health_issues=json.loads(meta(db,'health_watch_issues','{}'))
+        return {'reliability':{'checks':[dict(r) for r in db.execute('SELECT * FROM check_stats ORDER BY last_attempt DESC LIMIT 100')],
+                'issues':health_issues,'health_heartbeat':float(meta(db,'health_watch_heartbeat','0')),
+                'row_heartbeat':float(meta(db,'row_reader_heartbeat','0')),
+                'delivery':dict(db.execute("SELECT count(*) AS pending,coalesce(max(attempts),0) AS attempts,coalesce(min(created),0) AS oldest FROM outbox WHERE delivered=0").fetchone()),
+                'hosting':hosting_status(),'external_monitor_configured':False},'state':state,'heartbeat':heartbeat,'cooldown_until':float(meta(db,'source_cooldown','0')),
                 'cooldown_started':float(meta(db,'source_cooldown_started','0')),
                 'cooldown_duration':float(meta(db,'source_cooldown_duration','0')),
                 'metric_history':[dict(r) for r in db.execute('SELECT at,movies,venues,sessions FROM metric_history ORDER BY at DESC LIMIT 7')][::-1],
@@ -240,6 +246,10 @@ def handler(path, public=False):
         def do_GET(self):
             if passwordless and self.path=='/login':
                 self.send_response(303);self.send_header('Location','/');self.end_headers();return
+            if self.path=='/readyz':
+                data=status(path);r=data['reliability'];now=time.time()
+                ok=now-data['heartbeat']<90 and now-r['health_heartbeat']<90 and not r['issues']
+                self.reply('ready' if ok else 'monitor needs attention',200 if ok else 503);return
             if self.path=='/healthz':
                 self.reply('ok');return
             if public and self.path in ('/','/login') and not self.authenticated():
