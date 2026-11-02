@@ -65,6 +65,8 @@ def send(text, photo=None):
 
 
 def drain(db, commit=True, system_only=False):
+    from store import meta
+    if meta(db,'telegram_enabled','1')!='1':return None
     now = time.time()
     row = db.execute("SELECT * FROM outbox WHERE delivered=0 AND next_try<=?"+(" AND alert_id='__health__'" if system_only else "")+" ORDER BY CASE WHEN alert_id='__health__' THEN 0 ELSE 1 END,created LIMIT 1", (now,)).fetchone()
     if not row:

@@ -36,6 +36,7 @@ def status(path):
                 'cooldown_duration':float(meta(db,'source_cooldown_duration','0')),
                 'metric_history':[dict(r) for r in db.execute('SELECT at,movies,venues,sessions FROM metric_history ORDER BY at DESC LIMIT 7')][::-1],
                 'hosted':os.environ.get('BMS_PUBLIC')=='1',
+                'telegram_enabled':meta(db,'telegram_enabled','1')=='1',
                 'telegram_configured':all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')),
                 'mode':meta(db,'monitor_mode','browser'),
                 'last_success':float(meta(db,'api_last_success',meta(db,'catalog_last_success','0'))),
@@ -168,6 +169,21 @@ def handler(path, public=False):
                 except sqlite3.Error:self.reply('Seat reader is busy. Please retry shortly.',503);return
                 except (ValueError,TypeError) as e:self.reply(html.escape(str(e)),400);return
                 self.reply('Loading real rows for this show.',202);return
+            if self.path=='/api/telegram':
+                if not self.authorized():return
+                if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<256:raise ValueError()
+                    data=json.loads(self.rfile.read(length))
+                    if not isinstance(data,dict) or set(data)!={'enabled'} or type(data['enabled']) is not bool:raise ValueError()
+                    if data['enabled'] and public and not all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')):raise ValueError()
+                    db=connect(path)
+                    try:
+                        db.execute('BEGIN IMMEDIATE');setmeta(db,'telegram_enabled','1' if data['enabled'] else '0');db.commit()
+                    finally:db.close()
+                except (ValueError,TypeError,sqlite3.Error):self.reply(json.dumps({'error':'Could not change Telegram. Check connection and retry.'}),400);return
+                self.reply(json.dumps({'enabled':data['enabled']}));return
             if self.path=='/api/restore':
                 if not self.authorized():return
                 if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return
