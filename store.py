@@ -17,6 +17,8 @@ def connect(path):
     CREATE TABLE IF NOT EXISTS inventory(url TEXT PRIMARY KEY,title TEXT,seen REAL);
     CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,payload TEXT,cutoff REAL,active INTEGER DEFAULT 1);
     CREATE TABLE IF NOT EXISTS snapshots(id TEXT PRIMARY KEY,payload TEXT);
+    CREATE TABLE IF NOT EXISTS check_intervals(source TEXT,job_key TEXT,at REAL,gap REAL);
+    CREATE INDEX IF NOT EXISTS interval_job ON check_intervals(source,job_key,at);
     CREATE TABLE IF NOT EXISTS check_stats(source TEXT,job_key TEXT,attempts INTEGER DEFAULT 0,
       successes INTEGER DEFAULT 0,failures INTEGER DEFAULT 0,last_attempt REAL DEFAULT 0,
       last_success REAL DEFAULT 0,last_interval REAL DEFAULT 0,max_interval REAL DEFAULT 0,
@@ -96,4 +98,6 @@ def record_check(db,source,key,started,error='',now=None):
       last_interval=CASE WHEN excluded.last_interval>0 THEN excluded.last_interval ELSE last_interval END,
       max_interval=max(max_interval,excluded.max_interval),latency=excluded.latency,error=excluded.error""",
       (source,key,int(not error),int(bool(error)),now,now if not error else 0,interval,interval,max(0,now-started),error[:200]))
+    if interval:db.execute('INSERT INTO check_intervals VALUES(?,?,?,?)',(source,key,now,interval))
+    db.execute('DELETE FROM check_intervals WHERE at<?',(now-7*86400,))
     db.execute('DELETE FROM check_stats WHERE last_attempt<?',(now-30*86400,))

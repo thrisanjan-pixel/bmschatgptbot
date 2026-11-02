@@ -31,7 +31,7 @@ def status(path):
                 'issues':health_issues,'health_heartbeat':float(meta(db,'health_watch_heartbeat','0')),
                 'row_heartbeat':float(meta(db,'row_reader_heartbeat','0')),
                 'delivery':dict(db.execute("SELECT count(*) AS pending,coalesce(max(attempts),0) AS attempts,coalesce(min(created),0) AS oldest FROM outbox WHERE delivered=0").fetchone()),
-                'hosting':hosting_status(),'external_monitor_configured':False},'state':state,'heartbeat':heartbeat,'cooldown_until':float(meta(db,'source_cooldown','0')),
+                'backup_error':meta(db,'backup_error',''),'last_backup':float(meta(db,'last_backup','0')),'hosting':hosting_status(),'external_monitor_configured':False},'state':state,'heartbeat':heartbeat,'cooldown_until':float(meta(db,'source_cooldown','0')),
                 'cooldown_started':float(meta(db,'source_cooldown_started','0')),
                 'cooldown_duration':float(meta(db,'source_cooldown_duration','0')),
                 'metric_history':[dict(r) for r in db.execute('SELECT at,movies,venues,sessions FROM metric_history ORDER BY at DESC LIMIT 7')][::-1],
@@ -168,6 +168,18 @@ def handler(path, public=False):
                 except sqlite3.Error:self.reply('Seat reader is busy. Please retry shortly.',503);return
                 except (ValueError,TypeError) as e:self.reply(html.escape(str(e)),400);return
                 self.reply('Loading real rows for this show.',202);return
+            if self.path=='/api/restore':
+                if not self.authorized():return
+                if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return
+                try:
+                    from backup import restore,MAX_BYTES
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<=MAX_BYTES:raise ValueError('Backup must be smaller than 32 MB')
+                    db=connect(path)
+                    try:result=restore(db,self.rfile.read(length))
+                    finally:db.close()
+                except (ValueError,TypeError,sqlite3.Error):self.reply(json.dumps({'error':'Invalid backup or incompatible schema. Nothing was restored.'}),400);return
+                self.reply(json.dumps(result));return
             if self.path=='/api/watch':
                 if not self.authorized():return
                 if (not public and not self.local_host()) or not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):
@@ -273,6 +285,12 @@ def handler(path, public=False):
                 try:body=json.dumps(row_watch.get(db,show_id)).encode()
                 finally:db.close()
                 content_type='application/json'
+            elif self.path=='/api/backup':
+                from backup import export
+                db=connect(path)
+                try:body=json.dumps(export(db),ensure_ascii=False).encode()
+                finally:db.close()
+                self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Disposition','attachment; filename="screenwatch-backup.json"');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
             elif urlsplit(self.path).path=='/api/watch':
                 if not public and not self.local_host():self.reply('Local access only.',403);return
                 db=connect(path)

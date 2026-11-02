@@ -51,6 +51,9 @@ def main():
  while True:
   try:
    check(db)
+   from backup import automatic
+   try:automatic(db,a.db);setmeta(db,'backup_error','');db.commit()
+   except Exception:setmeta(db,'backup_error','Automatic backup failed; download a backup and check storage.');db.commit()
    if load():
     db.execute('BEGIN IMMEDIATE');drain(db,commit=False,system_only=True);db.commit()
   except Exception:

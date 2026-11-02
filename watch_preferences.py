@@ -70,6 +70,13 @@ def rules(db):
         delivery=db.execute('SELECT count(*),coalesce(max(attempts),0) FROM outbox WHERE alert_id=? AND delivered=0',(rule['id'],)).fetchone()
         health='Source unavailable' if error else 'Checks delayed' if checked and time.time()-checked>180 else 'Watching seats' if p['row_show'] else 'Watching availability' if checked else 'Waiting for listings'
         rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
+        keys=[p['row_show']] if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if json.loads(r['payload']).get('movie') in p['movies']]
+        source='rows' if p['row_show'] else 'listings'
+        intervals=[]
+        for key in keys:
+            intervals.extend(r[0] for r in db.execute('SELECT gap FROM check_intervals WHERE source=? AND job_key=? AND at>=?',(source,key,max(rule['created'],time.time()-7*86400))))
+        delays=db.execute('SELECT avg(delivered-created),max(delivered-created),count(*) FROM outbox WHERE alert_id=? AND delivered>0',(rule['id'],)).fetchone()
+        rule['report']={'window_days':7,'gap_samples':len(intervals),'average_gap':sum(intervals)/len(intervals) if intervals else None,'longest_gap':max(intervals) if intervals else None,'delivery_average':delays[0],'delivery_longest':delays[1],'deliveries':delays[2],'last_success':checked}
         result.append(rule)
     return result
 
