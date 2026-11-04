@@ -10,7 +10,7 @@ from pathlib import Path
 import signal
 import threading
 import time
-from api_source import CATALOG,ReadError,end_day,get_json,movies,parse,seat_layout_url,show_url,today
+from api_source import CATALOG,ReadError,end_day,get_json,movies,no_regional_shows,parse,seat_layout_url,show_url,today
 from local_credentials import load
 from store import connect,coverage,emit,enqueue,meta,setmeta,record_check
 from telegram import drain,send
@@ -42,7 +42,7 @@ def ingest(db,job,data):
     title=result['film'] or args['movie']
     for show in current.values():show['movie']=show['movie'] or title
     changes={}
-    if (previous is not None or args.get('notify_first')) and meta(db,'notifications_paused','0')!='1':
+    if (previous is not None or args.get('notify_first') or meta(db,'waiting_show:'+job['id'])=='1') and meta(db,'notifications_paused','0')!='1':
         old=previous or {}
         for rule in preferences.active(db):
             prefs=rule['preferences']
@@ -96,6 +96,7 @@ def ingest(db,job,data):
             (show['venue_code'],show['venue'],show['url']))
     for day in result['dates']:schedule(db,args['event'],day,title,previous is not None or args['notify_first'])
     for variant in result['variants']:schedule(db,variant,'',title,args['notify_first'])
+    db.execute('DELETE FROM meta WHERE key=?',('waiting_show:'+job['id'],))
     setmeta(db,'api_last_success',time.time())
 
 def seed(db,previous_db=None):
@@ -148,6 +149,10 @@ class Monitor:
                             setmeta(db,'poster:'+movie['url'],movie['image'])
                             schedule(db,movie['event'],'',movie['title'],initialized)
                         setmeta(db,'catalog_initialized','1');setmeta(db,'catalog_last_success',now)
+                    elif no_regional_shows(data):
+                        # Keep prior show state and wait for a verified showtime payload.
+                        setmeta(db,'waiting_show:'+job['id'],'1')
+                        setmeta(db,'api_last_success',time.time())
                     else:ingest(db,job,data)
                     db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(time.time(),time.time()+poll_interval(db,job),job['id']))
                     record_check(db,'listings',job['id'],started)

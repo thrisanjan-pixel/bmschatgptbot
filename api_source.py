@@ -63,6 +63,20 @@ def show_url(event,day=''):
     return API+'?'+urllib.parse.urlencode({'eventCode':event,'dateCode':day,'isDesktop':'true','regionCode':'HYD',
         'xLocationShared':'false','memberId':'','lsId':'','subCode':'','lat':'17.385','lon':'78.487'})
 
+def no_regional_shows(data):
+    body = data.get('data')
+    metadata = data.get('metadata')
+    if not isinstance(body, dict) or not isinstance(metadata, dict):
+        return False
+    error = metadata.get('error')
+    return (
+        isinstance(error, dict)
+        and error.get('errorCode') == '1a.1b.2001'
+        and body.get('additionalData') == {}
+        and not body.get('showtimeWidgets')
+    )
+
+
 def parse(data,event,requested_day='',now=None):
     now=dt.datetime.now(IST).timestamp() if now is None else now
     body=data.get('data',{});identity=body.get('additionalData',{})
