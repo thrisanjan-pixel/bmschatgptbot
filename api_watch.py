@@ -42,6 +42,7 @@ def ingest(db,job,data):
     title=result['film'] or args['movie']
     for show in current.values():show['movie']=show['movie'] or title
     changes={}
+    upcoming = meta(db, 'upcoming_event:'+args['event']) == '1'
     if (previous is not None or args.get('notify_first') or meta(db,'waiting_show:'+job['id'])=='1') and meta(db,'notifications_paused','0')!='1':
         old=previous or {}
         for rule in preferences.active(db):
@@ -50,15 +51,25 @@ def ingest(db,job,data):
             groups={}
             for identity,show in current.items():
                 if not preferences.matches(show,prefs) and not preferences.matches({**show,'movie':args['movie']},prefs):continue
-                change=None
-                if identity not in old and prefs['new_shows']:
-                    change='New show · '+show['time']
+                open_categories = {
+                    code for code, category in show['categories'].items()
+                    if category['status'] in ('1','2','3')
+                    and preferences.category_matches(category['name'],prefs)
+                }
+                before = old.get(identity, {}).get('categories', {})
+                was_bookable = any(
+                    category['status'] in ('1','2','3')
+                    and preferences.category_matches(category['name'],prefs)
+                    for category in before.values()
+                )
+                change = None
+                if prefs['new_shows'] and ((upcoming and open_categories and not was_bookable) or (not upcoming and identity not in old)):
+                    change = ('Booking open · ' if upcoming else 'New show · ') + show['time']
                 elif identity in old and prefs['availability']:
-                    before=old[identity].get('categories',{})
-                    opened=[c['name'] for k,c in show['categories'].items()
-                        if k in before and before[k]['status']=='0' and c['status'] in ('1','2','3')
-                        and preferences.category_matches(c['name'],prefs)]
-                    if opened:change='Category now available · '+show['time']+' · '+', '.join(opened)
+                    opened = [category['name'] for code, category in show['categories'].items()
+                              if code in open_categories and code in before and before[code]['status']=='0']
+                    if opened:
+                        change = 'Category now available · ' + show['time'] + ' · ' + ', '.join(opened)
                 if change:
                     group=groups.setdefault(show['venue_code'],{'show':show,'lines':[]})
                     group['lines'].append((change,seat_layout_url(show)))
@@ -102,6 +113,7 @@ def ingest(db,job,data):
 def seed(db,previous_db=None):
     enqueue(db,'catalog',CATALOG,{})
     register_movie(db,'https://in.bookmyshow.com/movies/hyderabad/ene-repeat/ET00506990','ENE Repeat')
+    setmeta(db,'upcoming_event:ET00506990','1')
     if previous_db and Path(previous_db).exists() and not meta(db,'imported_inventory'):
         old=connect(previous_db)
         try:
@@ -152,6 +164,7 @@ class Monitor:
                     elif no_regional_shows(data):
                         # Keep prior show state and wait for a verified showtime payload.
                         setmeta(db,'waiting_show:'+job['id'],'1')
+                        setmeta(db,'upcoming_event:'+json.loads(job['payload'])['event'],'1')
                         setmeta(db,'api_last_success',time.time())
                     else:ingest(db,job,data)
                     db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(time.time(),time.time()+poll_interval(db,job),job['id']))
