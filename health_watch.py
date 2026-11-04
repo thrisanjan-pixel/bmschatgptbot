@@ -24,6 +24,9 @@ def problems(db,now):
   h=rule['health'];last=h['last_success'] or rule['created']
   if now-last>300:
    key='source:'+ (rule['preferences']['row_show'] or rule['id'])
+   if not rule['preferences']['row_show'] and float(meta(db,'source_cooldown','0'))>now:
+    issues[key]='BookMyShow listing checks are in cooldown. No successful check for '+', '.join(rule['preferences']['movies'])+' in over 5 minutes.'
+    continue
    issues[key]='No successful check for '+', '.join(rule['preferences']['movies'])+' in over 5 minutes. '+('The source is returning errors.' if h['error'] else 'Checks may be stalled or delayed.')
  pending=db.execute('SELECT min(created),max(attempts) FROM outbox WHERE delivered=0 AND alert_id<>?',('__health__',)).fetchone()
  if pending[0] and now-pending[0]>180 and pending[1]:issues['telegram']='Telegram delivery has failed and messages are waiting for retry. This warning also depends on Telegram recovering.'

@@ -121,8 +121,12 @@ def poll_interval(db,job):
 def next_job(db,now):
     movies=sorted({preferences.normalized(m) for r in preferences.active(db) for m in r['preferences']['movies']})
     slots=','.join('?' for _ in movies) or "''"
+    cooldown_until = float(meta(db, 'source_cooldown', '0'))
+    recovering = bool(cooldown_until and 0 <= now - cooldown_until < 60)
     return db.execute(f"""SELECT * FROM jobs WHERE due<=? AND (expires=0 OR expires>?)
-      ORDER BY CASE WHEN due>0 AND due<? THEN 0 WHEN lower(trim(json_extract(payload,'$.movie'))) IN ({slots}) THEN 1 ELSE 2 END,due,checked LIMIT 1""",(now,now,now-300,*movies)).fetchone()
+      ORDER BY CASE WHEN NOT ? AND due>0 AND due<? THEN 0
+        WHEN lower(trim(json_extract(payload,'$.movie'))) IN ({slots}) THEN 1 ELSE 2 END,
+      due,checked LIMIT 1""",(now,now,recovering,now-300,*movies)).fetchone()
 
 class Monitor:
     def __init__(self,path,dry_run=False):self.path=path;self.dry_run=dry_run;self.stop=threading.Event()
