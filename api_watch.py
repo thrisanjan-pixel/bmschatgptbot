@@ -149,6 +149,34 @@ def next_job(db,now):
         WHEN lower(trim(json_extract(payload,'$.movie'))) IN ({slots}) THEN 1 ELSE 2 END,
       due,checked LIMIT 1""",(now,now,recovering,now-300,*movies)).fetchone()
 
+def record_listing_failure(db, job, error, started, now):
+    status = error.status if isinstance(error, ReadError) else 0
+    delay = error.retry if isinstance(error, ReadError) else 300
+    message = str(error) if isinstance(error, ReadError) else type(error).__name__
+    if status == 403 and job['error'] == 'Source HTTP 403':
+        delay = max(300, delay)
+
+    setmeta(db, 'listing_success_streak:'+job['id'], 0)
+    db.execute('UPDATE jobs SET due=?,error=? WHERE id=?', (now+delay, message, job['id']))
+    record_check(db, 'listings', job['id'], started, message, now=now)
+
+    # Escalate only when the failures point to a broader source problem.
+    recent_refusals = 0
+    if status == 403:
+        recent_refusals = db.execute(
+            """SELECT count(*) FROM check_stats
+               WHERE source='listings' AND error='Source HTTP 403'
+               AND last_attempt>=? AND job_key LIKE ?""",
+            (now-60, job['kind']+':%'),
+        ).fetchone()[0]
+    if status == 429 or recent_refusals >= 3:
+        delay = max(300, delay)
+        setmeta(db, 'source_cooldown', now+delay)
+        setmeta(db, 'source_cooldown_started', now)
+        setmeta(db, 'source_cooldown_duration', delay)
+    return message
+
+
 class Monitor:
     def __init__(self,path,dry_run=False):self.path=path;self.dry_run=dry_run;self.stop=threading.Event()
     def worker(self):
@@ -183,22 +211,8 @@ class Monitor:
                     record_check(db,'listings',job['id'],started)
                     db.commit();logging.info('%s checked',job['kind'])
                 except Exception as error:
-                    db.rollback();delay=getattr(error,'retry',300)
-                    if getattr(error,'status',0)==403:
-                        refused_at=time.time()
-                        previous_refusal=float(meta(db,'last_source_refusal','0'))
-                        if previous_refusal and refused_at-previous_refusal<900:
-                            delay=max(300,delay)
-                        setmeta(db,'last_source_refusal',refused_at)
-                    setmeta(db,'listing_success_streak:'+job['id'],0)
-                    message=str(error) if isinstance(error,ReadError) else type(error).__name__
-                    db.execute('UPDATE jobs SET due=?,error=? WHERE id=?',(time.time()+delay,message,job['id']))
-                    if getattr(error,'status',0) in (403,429) or getattr(error,'status',0)>=500:
-                        started=time.time()
-                        setmeta(db,'source_cooldown',started+delay)
-                        setmeta(db,'source_cooldown_started',started)
-                        setmeta(db,'source_cooldown_duration',delay)
-                    record_check(db,'listings',job['id'],now,message)
+                    db.rollback()
+                    message=record_listing_failure(db,job,error,started,time.time())
                     db.commit();logging.warning('%s: %s',job['kind'],message)
                 finally:
                     setmeta(db,'listing_check_started','0');db.commit()
