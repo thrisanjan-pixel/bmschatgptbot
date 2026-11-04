@@ -139,15 +139,26 @@ def poll_interval(db,job):
         return 15
     return 20 if streak >= 2 else 30
 
-def next_job(db,now):
-    movies=sorted({preferences.normalized(m) for r in preferences.active(db) for m in r['preferences']['movies']})
-    slots=','.join('?' for _ in movies) or "''"
+def watched_movies(db):
+    return sorted({preferences.normalized(m) for rule in preferences.active(db)
+                   for m in rule['preferences']['movies']})
+
+
+def next_job(db, now):
+    movies = watched_movies(db)
+    slots = ','.join('?' for _ in movies) or "''"
     cooldown_until = float(meta(db, 'source_cooldown', '0'))
     recovering = bool(cooldown_until and 0 <= now - cooldown_until < 60)
-    return db.execute(f"""SELECT * FROM jobs WHERE due<=? AND (expires=0 OR expires>?)
+    background_paused = float(meta(db, 'background_cooldown_until', '0')) > now
+    return db.execute(f"""WITH eligible AS (
+        SELECT *, lower(trim(json_extract(payload,'$.movie'))) IN ({slots}) AS watched
+        FROM jobs WHERE due<=? AND (expires=0 OR expires>?)
+      )
+      SELECT * FROM eligible WHERE watched OR NOT ?
       ORDER BY CASE WHEN NOT ? AND due>0 AND due<? THEN 0
-        WHEN lower(trim(json_extract(payload,'$.movie'))) IN ({slots}) THEN 1 ELSE 2 END,
-      due,checked LIMIT 1""",(now,now,recovering,now-300,*movies)).fetchone()
+        WHEN watched THEN 1 ELSE 2 END,due,checked LIMIT 1""",
+      (*movies, now, now, background_paused, recovering, now-300)).fetchone()
+
 
 def record_listing_failure(db, job, error, started, now):
     status = error.status if isinstance(error, ReadError) else 0
@@ -160,16 +171,27 @@ def record_listing_failure(db, job, error, started, now):
     db.execute('UPDATE jobs SET due=?,error=? WHERE id=?', (now+delay, message, job['id']))
     record_check(db, 'listings', job['id'], started, message, now=now)
 
-    # Escalate only when the failures point to a broader source problem.
-    recent_refusals = 0
+    watched_refusals = 0
     if status == 403:
-        recent_refusals = db.execute(
-            """SELECT count(*) FROM check_stats
-               WHERE source='listings' AND error='Source HTTP 403'
-               AND last_attempt>=? AND job_key LIKE ?""",
-            (now-60, job['kind']+':%'),
-        ).fetchone()[0]
-    if status == 429 or recent_refusals >= 3:
+        active_movies = set(watched_movies(db))
+        refused_jobs = db.execute(
+            """SELECT jobs.payload FROM check_stats
+               JOIN jobs ON jobs.id=check_stats.job_key
+               WHERE source='listings' AND check_stats.error='Source HTTP 403'
+                 AND last_attempt>=? AND jobs.kind=?""",
+            (now-60, job['kind']),
+        )
+        background_refusals = 0
+        for row in refused_jobs:
+            movie = preferences.normalized(json.loads(row['payload']).get('movie',''))
+            if movie in active_movies:
+                watched_refusals += 1
+            else:
+                background_refusals += 1
+        if background_refusals >= 3:
+            setmeta(db, 'background_cooldown_until', now+max(300, delay))
+
+    if status == 429 or watched_refusals >= 3:
         delay = max(300, delay)
         setmeta(db, 'source_cooldown', now+delay)
         setmeta(db, 'source_cooldown_started', now)
