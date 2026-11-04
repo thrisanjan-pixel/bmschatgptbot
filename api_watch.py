@@ -184,6 +184,12 @@ class Monitor:
                     db.commit();logging.info('%s checked',job['kind'])
                 except Exception as error:
                     db.rollback();delay=getattr(error,'retry',300)
+                    if getattr(error,'status',0)==403:
+                        refused_at=time.time()
+                        previous_refusal=float(meta(db,'last_source_refusal','0'))
+                        if previous_refusal and refused_at-previous_refusal<900:
+                            delay=max(300,delay)
+                        setmeta(db,'last_source_refusal',refused_at)
                     setmeta(db,'listing_success_streak:'+job['id'],0)
                     message=str(error) if isinstance(error,ReadError) else type(error).__name__
                     db.execute('UPDATE jobs SET due=?,error=? WHERE id=?',(time.time()+delay,message,job['id']))

@@ -32,7 +32,7 @@ def nodes(value):
         for child in value:yield from nodes(child)
 
 def retry_delay(status, header=None):
-    minimum = 60 if 500 <= status <= 599 else 300
+    minimum = {403: 180}.get(status, 60 if 500 <= status <= 599 else 300)
     if not header:
         return minimum
     if header.isdigit():
