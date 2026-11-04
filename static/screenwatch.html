@@ -221,8 +221,9 @@ function picker(key,saved=[]){
  for(const o of options)addOption(o);
  all.onclick=()=>{list.querySelectorAll('label:not([hidden]) input:not(:disabled)').forEach(i=>i.checked=true);selectionChanged(key);panel.open=false};
  clear.onclick=()=>{list.querySelectorAll('input').forEach(i=>i.checked=false);selectionChanged(key);panel.open=false};tools.append(all,clear);menu.append(search,tools,list);
- if(['screens','languages','formats','categories','dates'].includes(key)){
-  const custom=el('div','future-option-add'),input=el('input'),add=el('button','button','Add');input.type=key==='dates'?'date':'text';if(key==='dates')input.min=new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'});input.maxLength=80;input.setAttribute('aria-label',key==='dates'?'Add future date':'Add future '+labels[key].toLowerCase());input.placeholder='Add future '+labels[key].toLowerCase()+'…';add.type='button';
+ if(['movies','screens','languages','formats','categories','dates'].includes(key)){
+  const custom=el('div','future-option-add'),input=el('input'),add=el('button','button','Add');input.type=key==='dates'?'date':'text';if(key==='dates')input.min=new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'});input.maxLength=key==='movies'?300:80;input.setAttribute('aria-label',key==='dates'?'Add future date':'Add future '+labels[key].toLowerCase());input.placeholder='Add future '+labels[key].toLowerCase()+'…';add.type='button';
+  if(key==='movies'){input.placeholder='Upcoming movie title';add.textContent='Track title';menu.append(el('p','filter-hint','Enter the BookMyShow title to watch for its first Hyderabad bookings.'))}
   const addFuture=()=>{const value=key==='dates'?input.value.replaceAll('-',''):input.value.trim();if(!value)return;let option=[...list.querySelectorAll('input')].find(i=>norm(i.value)===norm(value));if(!option)option=addOption({value,label:labelValue(key,value),custom:true});option.checked=true;input.value='';search.value='';selectionChanged(key);panel.open=false};add.onclick=addFuture;input.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();addFuture()}};custom.append(input,add);menu.append(custom);
  }
  const hint=el('div','filter-hint');hint.id='hint-'+key;menu.append(hint);panel.append(summary,menu);

@@ -27,7 +27,7 @@ def ingest(db,job,data):
     title=result['film'] or args['movie']
     for show in current.values():show['movie']=show['movie'] or title
     changes={}
-    if previous is not None and meta(db,'notifications_paused','0')!='1':
+    if (previous is not None or args.get('notify_first')) and meta(db,'notifications_paused','0')!='1':
         old=previous or {}
         for rule in preferences.active(db):
             prefs=rule['preferences']
@@ -100,13 +100,13 @@ def seed(db,previous_db=None):
 def poll_interval(db,job):
     if job['kind']=='catalog':return 600
     movie=json.loads(job['payload']).get('movie','')
-    return 30 if any(movie in rule['preferences']['movies'] for rule in preferences.active(db)) else 120
+    return 30 if any(preferences.normalized(movie) in {preferences.normalized(m) for m in rule['preferences']['movies']} for rule in preferences.active(db)) else 120
 
 def next_job(db,now):
-    movies=sorted({m for r in preferences.active(db) for m in r['preferences']['movies']})
+    movies=sorted({preferences.normalized(m) for r in preferences.active(db) for m in r['preferences']['movies']})
     slots=','.join('?' for _ in movies) or "''"
     return db.execute(f"""SELECT * FROM jobs WHERE due<=? AND (expires=0 OR expires>?)
-      ORDER BY CASE WHEN due>0 AND due<? THEN 0 WHEN json_extract(payload,'$.movie') IN ({slots}) THEN 1 ELSE 2 END,due,checked LIMIT 1""",(now,now,now-300,*movies)).fetchone()
+      ORDER BY CASE WHEN due>0 AND due<? THEN 0 WHEN lower(trim(json_extract(payload,'$.movie'))) IN ({slots}) THEN 1 ELSE 2 END,due,checked LIMIT 1""",(now,now,now-300,*movies)).fetchone()
 
 class Monitor:
     def __init__(self,path,dry_run=False):self.path=path;self.dry_run=dry_run;self.stop=threading.Event()

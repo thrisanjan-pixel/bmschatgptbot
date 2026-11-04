@@ -63,14 +63,14 @@ def rules(db):
             layout=db.execute('SELECT checked,error,due FROM row_layouts WHERE show_id=?',(p['row_show'],)).fetchone()
             if layout:checked,error,due=layout
         elif not p['row_show']:
-            jobs=[r for r in db.execute('SELECT payload,checked,error,due FROM jobs') if json.loads(r['payload']).get('movie') in p['movies']]
+            jobs=[r for r in db.execute('SELECT payload,checked,error,due FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
             checked=max((r['checked'] for r in jobs),default=0)
             error=next((r['error'] for r in jobs if r['error']),'')
             due=min((r['due'] for r in jobs),default=0)
         delivery=db.execute('SELECT count(*),coalesce(max(attempts),0) FROM outbox WHERE alert_id=? AND delivered=0',(rule['id'],)).fetchone()
         health='Source unavailable' if error else 'Checks delayed' if checked and time.time()-checked>180 else 'Watching seats' if p['row_show'] else 'Watching availability' if checked else 'Waiting for listings'
         rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
-        keys=[p['row_show']] if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if json.loads(r['payload']).get('movie') in p['movies']]
+        keys=[p['row_show']] if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
         source='rows' if p['row_show'] else 'listings'
         intervals=[]
         for key in keys:
@@ -114,6 +114,7 @@ def prime_availability(db):
                     if category['status'] in ('1','2','3') and
                     category_matches(category['name'],p)})
                 if opened:found.append((show,opened))
+            if not found and not any(matches(show,p) for show in shows):continue
             if found and not db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone():
                 lines=[]
                 for show,opened in found[:3]:
@@ -170,7 +171,7 @@ def matches(show,p):
         if key=='formats':
             if p[key] and not any(format_matches(value,v) for v in p[key]):return False
             continue
-        if p[key] and (value not in p[key] if key in ('movies','cinemas','dates') else normalized(value) not in {normalized(v) for v in p[key]}):return False
+        if p[key] and (value not in p[key] if key in ('cinemas','dates') else normalized(value) not in {normalized(v) for v in p[key]}):return False
     if p['categories'] and not any(category_matches(c['name'],p) for c in show['categories'].values()):return False
     if p['time_from'] or p['time_to']:
         try:clock=dt.datetime.strptime(show['time'].strip(),'%I:%M %p').strftime('%H:%M')
