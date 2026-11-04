@@ -10,7 +10,7 @@ import urllib.request
 
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from api_source import seat_layout_url
+from api_source import retry_delay, seat_layout_url
 
 ENDPOINT='https://services-in.bookmyshow.com/doTrans.aspx'
 # This key is published in BookMyShow's seat-layout client bundle. If it changes,
@@ -21,6 +21,14 @@ _area_cache={}
 
 class CategoryMappingError(ValueError):
     pass
+
+
+class SeatHTTPError(ValueError):
+    def __init__(self, source, error):
+        super().__init__(f'{source} HTTP {error.code}')
+        self.status = error.code
+        self.retry = retry_delay(error.code, error.headers.get('Retry-After') if error.headers else None)
+        error.close()
 
 
 def _areas(show,timeout):
@@ -35,7 +43,7 @@ def _areas(show,timeout):
         'x-platform-code':'DESKTOP-WEB','x-location-selection':'manual'})
     try:
         with urllib.request.urlopen(request,timeout=timeout) as response:data=json.load(response)['data']
-    except urllib.error.HTTPError as error:raise ValueError(f'Seat metadata HTTP {error.code}') from error
+    except urllib.error.HTTPError as error:raise SeatHTTPError('Seat metadata', error) from None
     except (urllib.error.URLError,TimeoutError,ValueError,KeyError) as error:
         raise ValueError('Seat metadata unavailable') from error
     if data.get('eventData',{}).get('eventCode')!=show['event'] or data.get('venue',{}).get('venueCode')!=show['venue_code']:
@@ -151,7 +159,7 @@ def read(show,timeout=20):
             raw=response.read(MAX_LAYOUT_BYTES+1)
             if len(raw)>MAX_LAYOUT_BYTES:raise ValueError('Seat response is too large')
     except urllib.error.HTTPError as error:
-        raise ValueError(f'Seat source HTTP {error.code}') from error
+        raise SeatHTTPError('Seat source', error) from None
     except (urllib.error.URLError,TimeoutError) as error:
         raise ValueError('Seat source could not be reached') from error
     try:
@@ -165,4 +173,3 @@ def read(show,timeout=20):
             return parse_layout(show,result['strData'],_areas(show,timeout))
     except (KeyError,TypeError,json.JSONDecodeError) as error:
         raise ValueError('Seat source response changed') from error
-

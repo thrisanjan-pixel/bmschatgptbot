@@ -82,6 +82,7 @@ def schedule_active(db,now,interval=30):
     db.commit()
 
 def next_job(db,now):
+    if float(meta(db,'seat_cooldown_until','0'))>now:return None
     active=sorted({r['preferences']['row_show'] for r in prefs.active(db) if r['preferences']['row_show']})
     slots=','.join('?' for _ in active) or "''"
     return db.execute(f"""SELECT * FROM row_layouts WHERE due>0 AND due<=?
@@ -117,7 +118,13 @@ def main():
             ingest(db,show,result)
             record_check(db,'rows',show['id'],now);db.commit()
         except Exception as e:
-            record_check(db,'rows',show['id'],now,str(e).splitlines()[0][:200])
-            db.execute('UPDATE row_layouts SET error=?,due=? WHERE show_id=?',(str(e).splitlines()[0][:200],time.time()+300,job['show_id']));db.commit()
+            message=(str(e).partition(chr(10))[0] or type(e).__name__)[:200]
+            retry_at=time.time()+300
+            if getattr(e,'status',0)==429:
+                retry_at=time.time()+max(300,e.retry)
+                setmeta(db,'seat_cooldown_until',retry_at)
+            record_check(db,'rows',show['id'],now,message)
+            db.execute('UPDATE row_layouts SET error=?,due=? WHERE show_id=?',(message,retry_at,job['show_id']))
+            db.commit()
     db.close()
 if __name__=='__main__':main()

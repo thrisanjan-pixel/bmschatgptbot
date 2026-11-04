@@ -184,6 +184,8 @@ function updateListingCheckState(data){
  else if(left)message='BookMyShow cooldown · retry in '+left+'s. This follows a rate limit or several refused watched requests.';
  else if(data.listing_check_started&&now-data.listing_check_started<90)message='Checking BookMyShow listings now.';
  if(!left&&data.background_cooldown_until>now)message+=' Background discovery is in cooldown; watched films can still check.';
+ const seatDelay=Math.ceil((data.seat_cooldown_until||0)-now);
+ if(seatDelay>0)message+=' Seat checks rate-limited · retry in '+seatDelay+'s.';
  $('listing-check-state').textContent=message;
 }
 function updateCooldownClock(){if(!statusData)return;updateListingCheckState(statusData);const active=statusData.state==='cooldown'&&Number(statusData.cooldown_until)>Date.now()/1000;document.body.classList.toggle('cooldown',active);document.body.classList.toggle('polling',!active&&statusData.state==='running');$('snapshot-badge').hidden=!active;$('cooldown-progress').hidden=!active;if(!active)return;const left=Math.max(0,Math.ceil(Number(statusData.cooldown_until)-Date.now()/1000)),duration=Math.max(1,Number(statusData.cooldown_duration)||Number(statusData.cooldown_until)-Number(statusData.cooldown_started)||left);$('cooldown-count').textContent=left+'s';$('cooldown-fill').style.width=Math.min(100,Math.max(0,100*left/duration))+'%'}
