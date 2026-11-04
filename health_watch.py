@@ -40,9 +40,10 @@ def check(db,now=None):
  current=problems(db,now)
  previous=json.loads(meta(db,'health_watch_issues','{}'))
  for key,message in current.items():
-  if key not in previous:
+  if not key.startswith('source:') and key not in previous:
    emit(db,'health:'+key+':'+str(now),'⚠️ Screenwatch needs attention\n\n'+message+'\n\nOpen the dashboard for current status. The last good results are retained.',alert_id='__health__')
  for key in previous.keys()-current.keys():
+  if key.startswith('source:'):continue
   emit(db,'recovery:'+key+':'+str(now),'✅ Screenwatch recovered\n\nThe previously reported issue has cleared: '+previous[key],alert_id='__health__')
  setmeta(db,'health_watch_issues',json.dumps(current));setmeta(db,'health_watch_heartbeat',now);db.commit()
  return current
