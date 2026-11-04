@@ -153,7 +153,9 @@ class Monitor:
                 job=next_job(db,now)
                 if not job:self.stop.wait(1);continue
                 try:
-                    started=time.time();data=get_json(job['url'])
+                    started=time.time()
+                    setmeta(db,'listing_check_started',started);db.commit()
+                    data=get_json(job['url'])
                     if job['kind']=='catalog':
                         listings=movies(data);initialized=bool(meta(db,'catalog_initialized'))
                         for movie in listings:
@@ -181,6 +183,8 @@ class Monitor:
                         setmeta(db,'source_cooldown_duration',delay)
                     record_check(db,'listings',job['id'],now,message)
                     db.commit();logging.warning('%s: %s',job['kind'],message)
+                finally:
+                    setmeta(db,'listing_check_started','0');db.commit()
                 self.stop.wait(2)
         finally:db.close()
     def run(self,seconds=0):
