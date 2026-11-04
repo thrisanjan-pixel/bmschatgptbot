@@ -58,17 +58,20 @@ def rules(db):
         message=db.execute('SELECT text FROM outbox WHERE alert_id=? ORDER BY created DESC LIMIT 1',(rule['id'],)).fetchone()
         link=re.search(r'https://in\.bookmyshow\.com/movies/hyderabad/seat-layout/[A-Za-z0-9/]+',message[0]) if message else None
         rule['booking_url']=link[0] if link else ''
-        checked=0;error='';due=0
+        checked=0;error='';due=0;waiting_for_bookings=False
         if p['row_show'] and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='row_layouts'").fetchone():
             layout=db.execute('SELECT checked,error,due FROM row_layouts WHERE show_id=?',(p['row_show'],)).fetchone()
             if layout:checked,error,due=layout
         elif not p['row_show']:
-            jobs=[r for r in db.execute('SELECT payload,checked,error,due FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
+            jobs=[r for r in db.execute('SELECT id,payload,checked,error,due FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
             checked=max((r['checked'] for r in jobs),default=0)
             error=next((r['error'] for r in jobs if r['error']),'')
             due=min((r['due'] for r in jobs),default=0)
+            waiting_for_bookings = bool(jobs) and all(
+                meta(db, 'waiting_show:'+r['id']) == '1' for r in jobs
+            )
         delivery=db.execute('SELECT count(*),coalesce(max(attempts),0) FROM outbox WHERE alert_id=? AND delivered=0',(rule['id'],)).fetchone()
-        health='Source unavailable' if error else 'Checks delayed' if checked and time.time()-checked>180 else 'Watching seats' if p['row_show'] else 'Watching availability' if checked else 'Waiting for listings'
+        health='Source unavailable' if error else 'Checks delayed' if checked and time.time()-checked>180 else 'Watching seats' if p['row_show'] else 'Waiting for bookings' if waiting_for_bookings else 'Watching availability' if checked else 'Waiting for listings'
         rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
         keys=[p['row_show']] if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
         source='rows' if p['row_show'] else 'listings'
