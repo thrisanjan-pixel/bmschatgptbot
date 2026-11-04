@@ -82,7 +82,8 @@ def schedule_active(db,now,interval=30):
     db.commit()
 
 def next_job(db,now):
-    if float(meta(db,'seat_cooldown_until','0'))>now:return None
+    if max(float(meta(db,'seat_cooldown_until','0')),
+           float(meta(db,'seat_next_request_at','0')))>now:return None
     active=sorted({r['preferences']['row_show'] for r in prefs.active(db) if r['preferences']['row_show']})
     slots=','.join('?' for _ in active) or "''"
     return db.execute(f"""SELECT * FROM row_layouts WHERE due>0 AND due<=?
@@ -98,7 +99,10 @@ def main():
     signal.signal(signal.SIGTERM,halt);signal.signal(signal.SIGINT,halt)
     while not stop:
         now=time.time()
-        schedule_active(db,now,30 if os.environ.get('BMS_PUBLIC')=='1' else 60)
+        cloud = os.environ.get('BMS_PUBLIC')=='1'
+        last_limit = float(meta(db,'seat_last_rate_limit','0'))
+        recovering = bool(last_limit and now-last_limit<900)
+        schedule_active(db,now,60 if recovering or not cloud else 30)
         setmeta(db,'row_reader_heartbeat',now);db.commit()
         job=next_job(db,now)
         if not job:time.sleep(1);continue
@@ -107,7 +111,10 @@ def main():
             db.execute("UPDATE row_layouts SET due=0,error='Showtime has expired' WHERE show_id=?",(job['show_id'],));db.commit();continue
         show=json.loads(row[0])
         try:
-            if os.environ.get('BMS_PUBLIC')=='1':
+            if cloud:
+                # Persist request spacing so restarting cannot release a burst.
+                setmeta(db,'seat_next_request_at',now+(30 if recovering else 10))
+                db.commit()
                 from cloud_row_reader import read
                 result=read(show)
             else:
@@ -123,6 +130,7 @@ def main():
             if getattr(e,'status',0)==429:
                 retry_at=time.time()+max(300,e.retry)
                 setmeta(db,'seat_cooldown_until',retry_at)
+                setmeta(db,'seat_last_rate_limit',time.time())
             record_check(db,'rows',show['id'],now,message)
             db.execute('UPDATE row_layouts SET error=?,due=? WHERE show_id=?',(message,retry_at,job['show_id']))
             db.commit()
