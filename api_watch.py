@@ -5,6 +5,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import signal
 import threading
@@ -20,6 +21,20 @@ def schedule(db,event,day,title,notify=False):
     if db.execute('SELECT 1 FROM jobs WHERE id=?',('discovery:'+url,)).fetchone():return
     enqueue(db,'discovery',url,{'event':event,'date':day,'movie':title,'notify_first':notify},end_day(day) if day else 0)
 
+def register_movie(db, url, title=None):
+    from urllib.parse import urlsplit
+    parts = urlsplit(url.strip())
+    match = re.fullmatch(r'/movies/hyderabad/([a-zA-Z0-9-]+)/(ET[0-9]+)/*', parts.path)
+    if parts.scheme != 'https' or parts.netloc != 'in.bookmyshow.com' or not match:
+        raise ValueError('Paste a Hyderabad BookMyShow movie page link')
+    slug, event = match.groups()
+    canonical = f'https://in.bookmyshow.com/movies/hyderabad/{slug}/{event}'
+    existing = db.execute('SELECT title FROM inventory WHERE url=?', (canonical,)).fetchone()
+    title = existing[0] if existing else (title or slug.replace('-', ' ').title())
+    db.execute('INSERT OR IGNORE INTO inventory VALUES(?,?,?)', (canonical, title, time.time()))
+    schedule(db, event, '', title, notify=True)
+    return title
+
 def ingest(db,job,data):
     args=json.loads(job['payload']);result=parse(data,args['event'],args['date'])
     key='api:'+args['event']+':'+result['day'];row=db.execute('SELECT payload FROM snapshots WHERE id=?',(key,)).fetchone()
@@ -34,7 +49,7 @@ def ingest(db,job,data):
             if prefs.get('row_show'):continue
             groups={}
             for identity,show in current.items():
-                if not preferences.matches(show,prefs):continue
+                if not preferences.matches(show,prefs) and not preferences.matches({**show,'movie':args['movie']},prefs):continue
                 change=None
                 if identity not in old and prefs['new_shows']:
                     change='New show · '+show['time']
@@ -85,6 +100,7 @@ def ingest(db,job,data):
 
 def seed(db,previous_db=None):
     enqueue(db,'catalog',CATALOG,{})
+    register_movie(db,'https://in.bookmyshow.com/movies/hyderabad/ene-repeat/ET00506990','ENE Repeat')
     if previous_db and Path(previous_db).exists() and not meta(db,'imported_inventory'):
         old=connect(previous_db)
         try:

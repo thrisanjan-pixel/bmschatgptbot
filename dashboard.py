@@ -211,6 +211,11 @@ def handler(path, public=False):
                     db=connect(path)
                     requested=data.pop('alert_id',None)
                     action=data.pop('action','')
+                    if action=='register_movie':
+                        if set(data)!={'url'} or not isinstance(data['url'],str):raise ValueError('Provide a BookMyShow movie link')
+                        from api_watch import register_movie
+                        title=register_movie(db,data['url']);db.commit()
+                        self.reply(json.dumps({'title':title}));return
                     if action=='delete':
                         if data:raise ValueError('Invalid delete request')
                         preferences.delete(db,requested)

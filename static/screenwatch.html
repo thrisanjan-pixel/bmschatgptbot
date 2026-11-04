@@ -226,6 +226,21 @@ function picker(key,saved=[]){
   if(key==='movies'){input.placeholder='Upcoming movie title';add.textContent='Track title';menu.append(el('p','filter-hint','Enter the BookMyShow title to watch for its first Hyderabad bookings.'))}
   const addFuture=()=>{const value=key==='dates'?input.value.replaceAll('-',''):input.value.trim();if(!value)return;let option=[...list.querySelectorAll('input')].find(i=>norm(i.value)===norm(value));if(!option)option=addOption({value,label:labelValue(key,value),custom:true});option.checked=true;input.value='';search.value='';selectionChanged(key);panel.open=false};add.onclick=addFuture;input.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();addFuture()}};custom.append(input,add);menu.append(custom);
  }
+ if(key==='movies'){
+  const linkRow=el('div','future-option-add'),link=el('input'),register=el('button','button','Add link'),feedback=el('p','filter-hint');
+  link.type='url';link.placeholder='Paste Hyderabad BookMyShow movie link';link.setAttribute('aria-label','BookMyShow movie link');register.type='button';feedback.setAttribute('role','status');
+  register.onclick=async()=>{
+   register.disabled=true;
+   try{
+    const response=await fetch('/api/watch',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':watchData.csrf},body:JSON.stringify({action:'register_movie',url:link.value})});
+    const data=await response.json();if(!response.ok)throw Error(data.error||'Could not add movie');
+    const option=[...list.querySelectorAll('input')].find(i=>norm(i.value)===norm(data.title))||addOption({value:data.title,label:data.title,custom:true});
+    option.checked=true;search.value='';selectionChanged(key);panel.open=false;
+   }catch(error){feedback.textContent=error.message}
+   finally{register.disabled=false}
+  };
+  linkRow.append(link,register);menu.append(linkRow,feedback);
+ }
  const hint=el('div','filter-hint');hint.id='hint-'+key;menu.append(hint);panel.append(summary,menu);
  search.oninput=()=>{for(const item of list.querySelectorAll('label'))item.hidden=!norm(item.textContent).includes(norm(search.value))};
  list.onchange=()=>{search.value='';selectionChanged(key);panel.open=false};
