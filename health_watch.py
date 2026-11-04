@@ -22,12 +22,11 @@ def problems(db,now):
  if row_rules and now-float(meta(db,'row_reader_heartbeat','0'))>120:issues['row-worker']='The seat reader has stopped reporting its heartbeat.'
  for rule in rules:
   h=rule['health'];last=h['last_success'] or rule['created']
-  if now-last>300:
-   key='source:'+ (rule['preferences']['row_show'] or rule['id'])
-   if not rule['preferences']['row_show'] and float(meta(db,'source_cooldown','0'))>now:
-    issues[key]='BookMyShow listing checks are in cooldown. No successful check for '+', '.join(rule['preferences']['movies'])+' in over 5 minutes.'
-    continue
-   issues[key]='No successful check for '+', '.join(rule['preferences']['movies'])+' in over 5 minutes. '+('The source is returning errors.' if h['error'] else 'Checks may be stalled or delayed.')
+  if now-last>900:
+   target = rule['preferences']['row_show'] or '|'.join(sorted(prefs.normalized(m) for m in rule['preferences']['movies']))
+   key='source:'+target
+   detail=' Latest check: '+h['error']+'.' if h['error'] else ''
+   issues[key]='No successful check for '+', '.join(rule['preferences']['movies'])+' in over 15 minutes.'+detail
  pending=db.execute('SELECT min(created),max(attempts) FROM outbox WHERE delivered=0 AND alert_id<>?',('__health__',)).fetchone()
  if pending[0] and now-pending[0]>180 and pending[1]:issues['telegram']='Telegram delivery has failed and messages are waiting for retry. This warning also depends on Telegram recovering.'
  hosting=hosting_status(now)
@@ -40,10 +39,9 @@ def check(db,now=None):
  current=problems(db,now)
  previous=json.loads(meta(db,'health_watch_issues','{}'))
  for key,message in current.items():
-  if not key.startswith('source:') and key not in previous:
+  if key not in previous:
    emit(db,'health:'+key+':'+str(now),'⚠️ Screenwatch needs attention\n\n'+message+'\n\nOpen the dashboard for current status. The last good results are retained.',alert_id='__health__')
  for key in previous.keys()-current.keys():
-  if key.startswith('source:'):continue
   emit(db,'recovery:'+key+':'+str(now),'✅ Screenwatch recovered\n\nThe previously reported issue has cleared: '+previous[key],alert_id='__health__')
  setmeta(db,'health_watch_issues',json.dumps(current));setmeta(db,'health_watch_heartbeat',now);db.commit()
  return current

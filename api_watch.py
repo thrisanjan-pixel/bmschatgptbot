@@ -129,7 +129,15 @@ def seed(db,previous_db=None):
 def poll_interval(db,job):
     if job['kind']=='catalog':return 600
     movie=json.loads(job['payload']).get('movie','')
-    return 30 if any(preferences.normalized(movie) in {preferences.normalized(m) for m in rule['preferences']['movies']} for rule in preferences.active(db)) else 120
+    watched = any(preferences.normalized(movie) in {preferences.normalized(m) for m in rule['preferences']['movies']} for rule in preferences.active(db))
+    if not watched:
+        return 120
+    streak = int(meta(db,'listing_success_streak:'+job['id'],'0'))
+    if time.time()-float(meta(db,'source_cooldown','0')) < 300:
+        return 30
+    if streak >= 5:
+        return 15
+    return 20 if streak >= 2 else 30
 
 def next_job(db,now):
     movies=sorted({preferences.normalized(m) for r in preferences.active(db) for m in r['preferences']['movies']})
@@ -169,11 +177,14 @@ class Monitor:
                         setmeta(db,'upcoming_event:'+json.loads(job['payload'])['event'],'1')
                         setmeta(db,'api_last_success',time.time())
                     else:ingest(db,job,data)
+                    streak_key='listing_success_streak:'+job['id']
+                    setmeta(db,streak_key,min(5,int(meta(db,streak_key,'0'))+1))
                     db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(time.time(),time.time()+poll_interval(db,job),job['id']))
                     record_check(db,'listings',job['id'],started)
                     db.commit();logging.info('%s checked',job['kind'])
                 except Exception as error:
-                    db.rollback();delay=max(300,getattr(error,'retry',300))
+                    db.rollback();delay=getattr(error,'retry',300)
+                    setmeta(db,'listing_success_streak:'+job['id'],0)
                     message=str(error) if isinstance(error,ReadError) else type(error).__name__
                     db.execute('UPDATE jobs SET due=?,error=? WHERE id=?',(time.time()+delay,message,job['id']))
                     if getattr(error,'status',0) in (403,429) or getattr(error,'status',0)>=500:

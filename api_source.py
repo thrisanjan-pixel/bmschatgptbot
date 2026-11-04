@@ -1,5 +1,6 @@
 """Browser-free public reads. Showtime structure informed by aviiciii/bms-ticket-notifier (MIT; see third_party/)."""
 import datetime as dt
+from email.utils import parsedate_to_datetime
 import json
 import re
 import urllib.error
@@ -30,6 +31,19 @@ def nodes(value):
     elif isinstance(value,list):
         for child in value:yield from nodes(child)
 
+def retry_delay(status, header=None):
+    minimum = 60 if 500 <= status <= 599 else 300
+    if not header:
+        return minimum
+    if header.isdigit():
+        return max(minimum, int(header))
+    try:
+        retry_at = parsedate_to_datetime(header)
+        return max(minimum, int((retry_at - dt.datetime.now(dt.timezone.utc)).total_seconds()) + 1)
+    except (TypeError, ValueError, OverflowError):
+        return minimum
+
+
 def get_json(url):
     p=urllib.parse.urlparse(url)
     if p.scheme!='https' or p.netloc not in ('in.bookmyshow.com','in-cdn.bmscdn.com'):raise ReadError('Invalid source host')
@@ -39,9 +53,9 @@ def get_json(url):
         with urllib.request.urlopen(req,timeout=25) as response:return json.load(response)
     except urllib.error.HTTPError as error:
         status=error.code
-        retry=error.headers.get('Retry-After','300')
+        retry=retry_delay(status,error.headers.get('Retry-After'))
         error.close()
-        raise ReadError(f'Source HTTP {status}',status,max(300,int(retry) if retry.isdigit() else 300)) from None
+        raise ReadError(f'Source HTTP {status}',status,retry) from None
     except (OSError,ValueError,urllib.error.URLError):raise ReadError('Source connection or JSON error') from None
 
 def movies(data):
