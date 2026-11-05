@@ -67,8 +67,10 @@ def ingest(db,job,data):
                 if prefs['new_shows'] and ((upcoming and open_categories and not was_bookable) or (not upcoming and identity not in old)):
                     change = ('Booking open · ' if upcoming else 'New show · ') + show['time']
                 elif identity in old and prefs['availability']:
+                    # A seat type opens when it was not bookable at the last check: sold out ('0'),
+                    # blocked ('4') or not listed yet for this show.
                     opened = [preferences.with_price(show,category['name']) for code, category in show['categories'].items()
-                              if code in open_categories and code in before and before[code]['status']=='0']
+                              if code in open_categories and before.get(code,{}).get('status') not in ('1','2','3')]
                     if opened:
                         change = 'Category now available · ' + show['time'] + ' · ' + ', '.join(opened)
                 if change:

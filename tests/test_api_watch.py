@@ -57,6 +57,15 @@ class ApiTests(unittest.TestCase):
         for status in ('3','0','3'):ingest(self.db,self.job,response(status=status))
         self.assertEqual(coverage(self.db)['pending_alerts'],2)
         self.assertIn('Category now available',self.db.execute('SELECT text FROM outbox LIMIT 1').fetchone()[0])
+    def test_blocked_or_newly_listed_category_opening_alerts(self):
+        ingest(self.db,self.job,response(status='4'))
+        ingest(self.db,self.job,response(status='1'))
+        self.assertEqual(coverage(self.db)['pending_alerts'],1)
+        added=response(status='1');cats=added['data']['showtimeWidgets'][0]['data'][0]['data'][0]['showtimes'][0]['additionalData']['categories']
+        cats.append({'priceCode':'2','priceDesc':'Gold.','availStatus':'2','curPrice':'250'})
+        ingest(self.db,self.job,added)
+        self.assertEqual(coverage(self.db)['pending_alerts'],2)
+        self.assertTrue(any('Gold. (₹250)' in r[0] for r in self.db.execute('SELECT text FROM outbox')))
     def test_default_and_explicit_date_do_not_duplicate(self):
         ingest(self.db,self.job,response())
         other=dict(self.job,id='default',payload=json.dumps({'event':EVENT,'date':'','movie':'Test Movie','notify_first':False}))
