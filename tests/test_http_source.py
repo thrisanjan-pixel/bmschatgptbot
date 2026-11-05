@@ -12,11 +12,11 @@ class SourceBudgetTests(unittest.TestCase):
  def test_seat_budget_is_shared_across_screens_and_survives_restart(self):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000)
   self.db.close();self.db=connect(self.path)
-  with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1500)
-  self.assertEqual(error.exception.until,1600)
-  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1600)
+  with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1100)
+  self.assertEqual(error.exception.until,1120)
+  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1120)
  def test_rolling_hour_cap_counts_every_attempt(self):
-  for n in range(6):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000+n*600)
+  for n in range(30):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000+n*120)
   with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4599)
   self.assertEqual(error.exception.until,4600)
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4600)
