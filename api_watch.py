@@ -139,8 +139,7 @@ def seed(db,previous_db=None):
 def poll_interval(db,job):
     if job['kind']=='catalog':return 600
     movie=json.loads(job['payload']).get('movie','')
-    watched = preferences.normalized(movie) in set(watched_movies(db))
-    if not watched:
+    if not is_watched(json.loads(job['payload']),wanted_dates(db)):
         return 120
     # Keep a conservative target until real source access is stable.
     return 60
@@ -151,15 +150,37 @@ def watched_movies(db):
                    for m in rule['preferences']['movies'] if not rule['preferences']['row_show']})
 
 
+def wanted_dates(db):
+    """Movie -> dates that showtime alerts ask for, or None when any date counts."""
+    wanted={}
+    for rule in preferences.active(db):
+        p=rule['preferences']
+        if p['row_show']:continue
+        for movie in p['movies']:
+            key=preferences.normalized(movie)
+            wanted[key]=None if not p['dates'] or (key in wanted and wanted[key] is None) else wanted.get(key,set())|set(p['dates'])
+    return wanted
+
+
+def is_watched(payload,wanted):
+    # A dated listing no alert asks for is background work, so it cannot crowd out
+    # the listings alerts depend on. Undated listings still find new dates.
+    movie=preferences.normalized(payload.get('movie',''))
+    if movie not in wanted:return False
+    day=payload.get('date','')
+    return wanted[movie] is None or not day or day in wanted[movie]
+
+
 def next_job(db, now):
-    movies = watched_movies(db)
+    wanted = wanted_dates(db)
+    movies = [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if is_watched(json.loads(r['payload']),wanted)]
     slots = ','.join('?' for _ in movies) or "''"
     cooldown_until = float(meta(db, 'source_cooldown', '0'))
     recovering = bool(cooldown_until and 0 <= now - cooldown_until < 60)
     background_recent = now-float(meta(db,'listing_background_attempt','0')) < 60
     background_paused = float(meta(db, 'background_cooldown_until', '0')) > now
     return db.execute(f"""WITH eligible AS (
-        SELECT *, lower(trim(json_extract(payload,'$.movie'))) IN ({slots}) AS watched
+        SELECT *, id IN ({slots}) AS watched
         FROM jobs WHERE due<=? AND (expires=0 OR expires>?)
       )
       SELECT * FROM eligible WHERE watched OR (NOT ? AND NOT ?)
@@ -228,7 +249,7 @@ class Monitor:
         try:
             started=time.time()
             setmeta(db,'listing_check_started',started)
-            if preferences.normalized(json.loads(job['payload']).get('movie','')) not in set(watched_movies(db)):
+            if not is_watched(json.loads(job['payload']),wanted_dates(db)):
                 setmeta(db,'listing_background_attempt',started)
             db.commit()
             data=get_json(job['url'])

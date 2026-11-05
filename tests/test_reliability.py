@@ -34,6 +34,16 @@ class ReliabilityTests(unittest.TestCase):
    self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'movie','https://example.test/'+name,json.dumps({'movie':movie}),due))
   self.db.commit();self.assertEqual(api_watch.next_job(self.db,1000)['id'],'active')
   self.db.execute("UPDATE jobs SET due=600 WHERE id='background'");self.db.commit();self.assertEqual(api_watch.next_job(self.db,1000)['id'],'background')
+ def test_dates_no_alert_asks_for_do_not_crowd_out_other_alerts(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Watched'],'dates':['20261106'],'enabled':True},create=True)
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Second'],'enabled':True},create=True)
+  for name,movie,day,due in [('other-date','Watched','20261110',980),('alert-date','Watched','20261106',990),('undated','Watched','',991),('second','Second','',995)]:
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'discovery','https://example.test/'+name,json.dumps({'movie':movie,'date':day}),due))
+  self.db.commit();order=[]
+  for _ in range(4):
+   job=api_watch.next_job(self.db,1000);order.append(job['id']);self.db.execute('UPDATE jobs SET due=5000 WHERE id=?',(job['id'],));self.db.commit()
+  self.assertEqual(order[:3],['alert-date','undated','second'])
+  self.assertEqual(api_watch.poll_interval(self.db,{'kind':'discovery','payload':json.dumps({'movie':'Watched','date':'20261110'})}),120)
  def test_duplicate_row_rules_share_one_queued_read(self):
   from tests.test_rows import RowTests
   fixture=RowTests();fixture.setUp()
