@@ -76,7 +76,8 @@ def rules(db):
         budget=float(meta(db,'seat_budget_until' if p['row_show'] else 'listing_budget_until','0'))
         if max(cooldown,budget)>now:due=max(due,cooldown,budget)
         delivery=db.execute('SELECT count(*),coalesce(max(attempts),0) FROM outbox WHERE alert_id=? AND delivered=0',(rule['id'],)).fetchone()
-        health='Source unavailable' if error else 'Waiting for request budget' if budget>now else 'Checks delayed' if checked and cooldown<=now and time.time()-checked>(max(180,240*row_count) if p['row_show'] else 180) else 'Watching seats' if p['row_show'] else 'Waiting for bookings' if waiting_for_bookings else 'Watching availability' if checked else 'Waiting for listings'
+        # Routine 1-minute spacing is normal; only a long budget wait is worth showing.
+        health='Source unavailable' if error else 'Waiting for request budget' if budget>now+300 else 'Checks delayed' if checked and cooldown<=now and time.time()-checked>(max(180,240*row_count) if p['row_show'] else 180) else 'Watching seats' if p['row_show'] else 'Waiting for bookings' if waiting_for_bookings else 'Watching availability' if checked else 'Waiting for listings'
         rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'retry_until':max(cooldown,budget) if max(cooldown,budget)>now else 0,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
         keys=[p['row_show']] if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
         source='rows' if p['row_show'] else 'listings'
