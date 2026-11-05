@@ -112,6 +112,15 @@ class MonitorResilienceTests(unittest.TestCase):
   check.calls=0
   with patch.object(monitor,'check',side_effect=check),patch.object(monitor.stop,'wait'):monitor.worker()
   self.assertTrue(monitor.stop.is_set())
+ def test_budget_wait_keeps_the_job_queue_order(self):
+  from http_source import SourceWait
+  self.db.execute("INSERT INTO jobs(id,kind,url,payload,due) VALUES('j','discovery','https://example.test/j','{}',100)");self.db.commit()
+  monitor=api_watch.Monitor(self.path);until=time.time()+40
+  with patch('api_watch.get_json',side_effect=SourceWait(until)),patch.object(monitor.stop,'wait'):monitor.check(self.db)
+  self.assertEqual(self.db.execute("SELECT due FROM jobs WHERE id='j'").fetchone()[0],100)
+  self.assertEqual(float(api_watch.meta(self.db,'listing_budget_until')),until)
+  with patch('api_watch.next_job') as pick,patch.object(monitor.stop,'wait'):monitor.check(self.db)
+  pick.assert_not_called()
  def test_bad_initial_availability_does_not_block_delivery(self):
   prefs.save(self.db,{**prefs.defaults(),'movies':['Movie'],'enabled':True});emit(self.db,'queued','queued',alert_id='x');self.db.commit()
   monitor=api_watch.Monitor(self.path)

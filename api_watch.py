@@ -243,6 +243,9 @@ class Monitor:
     def check(self,db):
         cooldown=float(meta(db,'source_cooldown','0'))
         if cooldown>time.time():self.stop.wait(min(1,cooldown-time.time()));return
+        # Pick a job only once the request budget is free, so waiting never reshuffles the queue.
+        budget=float(meta(db,'listing_budget_until','0'))
+        if budget>time.time():self.stop.wait(min(1,budget-time.time()));return
         now=time.time()
         job=next_job(db,now)
         if not job:self.stop.wait(1);return
@@ -274,7 +277,7 @@ class Monitor:
         except Exception as error:
             db.rollback()
             if isinstance(error,SourceWait):
-                db.execute('UPDATE jobs SET due=? WHERE id=?',(error.until,job['id']))
+                # Leave the job's place in the queue alone; only the budget waits.
                 setmeta(db,'listing_budget_until',error.until);db.commit()
             else:
                 message=record_listing_failure(db,job,error,started,time.time())
