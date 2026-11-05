@@ -26,7 +26,7 @@ def render(show,data,highlight_rows=()):
     draw.text((44,34),'BOOKMYSHOW · SEAT AVAILABILITY',font=bold,fill='#64748b')
     draw.text((44,58),str(show.get('movie','Movie')),font=bold,fill='#111827')
     try:date=datetime.strptime(show.get('date',''),'%Y%m%d').strftime('%d %b %Y')
-    except ValueError:date=show.get('date','')
+    except (TypeError,ValueError):date=str(show.get('date') or '')
     draw.text((44,82),f"{show.get('venue','')}  ·  {date}  ·  {show.get('time','')}",font=regular,fill='#475569')
     draw.rounded_rectangle((44,106,61,123),radius=4,fill='#35a879')
     draw.text((70,107),'Available',font=regular,fill='#334155')

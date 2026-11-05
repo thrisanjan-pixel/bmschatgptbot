@@ -118,18 +118,21 @@ def prime_availability(db):
             found=[]
             for show in shows:
                 if not matches(show,p):continue
-                opened=sorted({category['name'] for category in show['categories'].values()
+                opened=sorted({str(category['name']) for category in show['categories'].values()
                     if category['status'] in ('1','2','3') and
                     category_matches(category['name'],p)})
-                if opened:found.append((show,opened))
+                # A stored show without a valid seat-layout identity cannot carry an exact link.
+                try:link=seat_layout_url(show)
+                except Exception:continue
+                if opened:found.append((show,opened,link))
             if not found and not any(matches(show,p) for show in shows):continue
             if found and not db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone():
                 lines=[]
-                for show,opened in found[:3]:
-                    lines.append(show['venue']+' · '+show['date']+' · '+show['time']+'\n'+
-                        ', '.join(opened)+'\n'+seat_layout_url(show))
+                for show,opened,link in found[:3]:
+                    lines.append(' · '.join(str(show.get(key) or '') for key in ('venue','date','time'))+'\n'+
+                        ', '.join(opened)+'\n'+link)
                 extra=f'\n\n{len(found)-3} more matching showtimes are open.' if len(found)>3 else ''
-                message='🎬 '+found[0][0]['movie']+'\nSeats already available for this alert:\n\n'+\
+                message='🎬 '+str(found[0][0].get('movie') or '')+'\nSeats already available for this alert:\n\n'+\
                     '\n\n'.join(lines)+extra
                 emit(db,'initial:'+rule['id']+':'+signature,message[:3900],alert_id=rule['id'])
                 db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(time.time(),rule['id']))
@@ -182,19 +185,28 @@ def matches(show,p):
         if p[key] and (value not in p[key] if key in ('cinemas','dates') else normalized(value) not in {normalized(v) for v in p[key]}):return False
     if p['categories'] and not any(category_matches(c['name'],p) for c in show['categories'].values()):return False
     if p['time_from'] or p['time_to']:
-        try:clock=dt.datetime.strptime(show['time'].strip(),'%I:%M %p').strftime('%H:%M')
+        try:clock=dt.datetime.strptime(str(show.get('time') or '').strip(),'%I:%M %p').strftime('%H:%M')
         except ValueError:return False
         if p['time_from'] and clock<p['time_from']:return False
         if p['time_to'] and clock>p['time_to']:return False
     return True
 
-def archive_pending(db,alert_id=None):
+def suppressed_table(db):
     db.execute('CREATE TABLE IF NOT EXISTS suppressed_outbox AS SELECT *, CAST(0 AS REAL) AS suppressed_at FROM outbox WHERE 0')
     if 'alert_id' not in {row[1] for row in db.execute('PRAGMA table_info(suppressed_outbox)')}:
         try:db.execute("ALTER TABLE suppressed_outbox ADD COLUMN alert_id TEXT DEFAULT ''")
         except sqlite3.OperationalError as error:
             if 'duplicate column name' not in str(error):raise
-    fields='id,text,photo,created,delivered,attempts,next_try,alert_id,suppressed_at'
+    return 'id,text,photo,created,delivered,attempts,next_try,alert_id,suppressed_at'
+
+def archive_message(db,message_id):
+    """Move one message Telegram keeps rejecting out of the queue, keeping it for inspection."""
+    fields=suppressed_table(db)
+    db.execute(f'INSERT INTO suppressed_outbox({fields}) SELECT id,text,photo,created,delivered,attempts+1,next_try,alert_id,? FROM outbox WHERE id=? AND delivered=0',(time.time(),message_id))
+    db.execute('DELETE FROM outbox WHERE id=? AND delivered=0',(message_id,))
+
+def archive_pending(db,alert_id=None):
+    fields=suppressed_table(db)
     if alert_id:
         db.execute(f'INSERT INTO suppressed_outbox({fields}) SELECT id,text,photo,created,delivered,attempts,next_try,alert_id,? FROM outbox WHERE delivered=0 AND alert_id=?',(time.time(),alert_id))
         db.execute('DELETE FROM outbox WHERE delivered=0 AND alert_id=?',(alert_id,))

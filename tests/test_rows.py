@@ -29,6 +29,13 @@ class RowTests(unittest.TestCase):
   row_watch.ingest(self.db,self.show,changed)
   self.assertIn('Gold / A: 3',self.db.execute('select text from outbox').fetchone()[0])
   row_watch.ingest(self.db,self.show,changed);self.assertEqual(self.db.execute('select count(*) from outbox').fetchone()[0],1)
+ def test_alert_text_orders_seats_numerically_and_formats_date(self):
+  self.configure()
+  changed=copy.deepcopy(self.result);changed['available']+=[{'row_id':'Gold / A','seat':s} for s in ('25','2','1','3')]
+  row_watch.ingest(self.db,self.show,changed)
+  text=self.db.execute('select text from outbox').fetchone()[0]
+  self.assertIn('Gold / A: 1, 2, 3, 25',text);self.assertIn(row_watch.show_date(self.show),text)
+  self.assertNotIn('📅 '+self.show['date'],text);self.assertTrue(text.rstrip().endswith(self.show['url']))
  def test_invalid_rows_and_wrong_show_filters_rejected(self):
   self.configure();p=prefs.read(self.db)
   for updates in ({'rows':['Gold / Z']},{'movies':['Other']},{'row_show':'missing'}):

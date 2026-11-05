@@ -59,7 +59,10 @@ def _areas(show,timeout):
         name=show['categories'].get(code,{}).get('name')
         if area and name:areas[area]=name
     if not areas:raise ValueError('No matching seat categories in metadata')
-    _area_cache[key]=(time.time(),areas)
+    now=time.time()
+    # Drop stale entries so a long-running worker does not keep every past show.
+    for old in [k for k,v in _area_cache.items() if now-v[0]>=600]:del _area_cache[old]
+    _area_cache[key]=(now,areas)
     return areas
 
 
@@ -173,5 +176,5 @@ def read(show,timeout=20):
         try:return parse_layout(show,result['strData'],{})
         except CategoryMappingError:
             return parse_layout(show,result['strData'],_areas(show,timeout))
-    except (KeyError,TypeError,json.JSONDecodeError) as error:
+    except (KeyError,TypeError,AttributeError,json.JSONDecodeError) as error:
         raise ValueError('Seat source response changed') from error

@@ -1,5 +1,6 @@
 """Durable on-demand row loads and polling of one selected show."""
-import argparse,json,os,signal,subprocess,sys,time
+import argparse,json,os,re,signal,subprocess,sys,time
+from datetime import datetime
 from pathlib import Path
 from store import connect,meta,setmeta,emit,record_check
 import watch_preferences as prefs
@@ -35,6 +36,16 @@ def run_reader(show,timeout=75):
         process.communicate()
         raise ValueError('Seat layout timed out. Try loading it again later.') from None
 
+def seat_order(seat):
+    """Order seat labels as people read them: 1, 2, 3, 25 rather than 1, 2, 25, 3."""
+    return [(0,int(part),'') if part.isdigit() else (1,0,part) for part in re.findall(r'\d+|\D+',str(seat))]
+
+
+def show_date(show):
+    try:return datetime.strptime(show.get('date',''),'%Y%m%d').strftime('%d %b %Y')
+    except (TypeError,ValueError):return show.get('date','')
+
+
 def ingest(db,show,result):
     schema(db);old=get(db,show['id']);previous=old['data']
     known={r['id']:r for r in result['rows']};known.update({r['id']:r for r in previous.get('rows',[]) if r['id'] not in known});result['rows']=list(known.values())
@@ -65,11 +76,17 @@ def ingest(db,show,result):
             pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone()
             if now-rule['last_alert']>=p['interval_minutes']*60 and not pending:
                 opened_rows=sorted({s['row_id'] for s in added})
-                lines=['• '+r+': '+', '.join(s['seat'] for s in added if s['row_id']==r) for r in opened_rows]
-                message=f"🎟 Seats now available · Row{'s' if len(opened_rows)>1 else ''} {', '.join(opened_rows)}\n\n🎬 {show['movie']}\n📍 {show['venue']}\n📅 {show['date']} · {show['time']}\n\n"+'\n'.join(lines)+f"\n\n{result['url']}"
-                from seat_map import render
-                photo=render(show,result,opened_rows)
-                emit(db,'row:'+rule['id']+':'+show['id']+':'+str(time.time_ns()),message[:950],photo,alert_id=rule['id'])
+                lines=['• '+r+': '+', '.join(sorted((s['seat'] for s in added if s['row_id']==r),key=seat_order)) for r in opened_rows]
+                message=f"🎟 Seats now available · Row{'s' if len(opened_rows)>1 else ''} {', '.join(opened_rows)}\n\n🎬 {show['movie']}\n📍 {show['venue']}\n📅 {show_date(show)} · {show['time']}\n\n"+'\n'.join(lines)
+                # Shorten the seat list, never the exact booking link at the end.
+                link=f"\n\n{result['url']}";limit=950-len(link)
+                if len(message)>limit:message=message[:limit-1].rstrip()+'…'
+                message+=link
+                try:
+                    from seat_map import render
+                    photo=render(show,result,opened_rows)
+                except Exception:photo=None  # The text alert still carries every detail.
+                emit(db,'row:'+rule['id']+':'+show['id']+':'+str(time.time_ns()),message,photo,alert_id=rule['id'])
                 db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,rule['id']))
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
                     (rule['id'],signature,json.dumps(sorted(current))))
@@ -108,45 +125,56 @@ def main():
         stop=True
     signal.signal(signal.SIGTERM,halt);signal.signal(signal.SIGINT,halt)
     while not stop:
-        now=time.time()
-        cloud = os.environ.get('BMS_PUBLIC')=='1'
-        interval,spacing=poll_policy(db,now,cloud)
-        schedule_active(db,now,interval)
-        setmeta(db,'row_reader_heartbeat',now);db.commit()
-        job=next_job(db,now)
-        if not job:time.sleep(1);continue
-        row=db.execute('SELECT payload FROM sessions WHERE id=? AND cutoff>?',(job['show_id'],now)).fetchone()
-        if not row:
-            db.execute("UPDATE row_layouts SET due=0,error='Showtime has expired' WHERE show_id=?",(job['show_id'],));db.commit();continue
-        show=json.loads(row[0])
-        try:
-            if cloud:
-                # Persist request spacing so restarting cannot release a burst.
-                setmeta(db,'seat_next_request_at',now+spacing)
-                db.commit()
-                from cloud_row_reader import read
-                result=read(show)
-            else:
-                run=run_reader(show)
-                payload=json.loads(run.stdout)
-                if run.returncode or payload.get('error'):raise ValueError(payload.get('error','Seat read failed'))
-                result=payload['data']
-            ingest(db,show,result)
-            record_check(db,'rows',show['id'],now);db.commit()
-        except Exception as e:
-            if isinstance(e,SourceWait):
-                db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(e.until,job['show_id']))
-                setmeta(db,'seat_budget_until',e.until);db.commit();continue
-            message=(str(e).partition(chr(10))[0] or type(e).__name__)[:200]
-            if getattr(e,'diagnostic',None):
-                setmeta(db,'seat_last_refusal',json.dumps({**e.diagnostic,'at':time.time()}))
-            retry_at=time.time()+300
-            if getattr(e,'status',0)==429:
-                retry_at=time.time()+max(300,e.retry)
-                setmeta(db,'seat_cooldown_until',retry_at)
-                setmeta(db,'seat_last_rate_limit',time.time())
-            record_check(db,'rows',show['id'],now,message)
-            db.execute('UPDATE row_layouts SET error=?,due=? WHERE show_id=?',(message,retry_at,job['show_id']))
-            db.commit()
+        try:step(db)
+        except Exception as error:
+            # A locked database or unexpected state must not end the worker; retry shortly.
+            try:db.rollback()
+            except Exception:pass
+            print(f'row_watch: {type(error).__name__}; retrying in 5 seconds',flush=True)
+            time.sleep(5)
     db.close()
+
+def step(db):
+    now=time.time()
+    cloud = os.environ.get('BMS_PUBLIC')=='1'
+    interval,spacing=poll_policy(db,now,cloud)
+    schedule_active(db,now,interval)
+    setmeta(db,'row_reader_heartbeat',now);db.commit()
+    job=next_job(db,now)
+    if not job:time.sleep(1);return
+    row=db.execute('SELECT payload FROM sessions WHERE id=? AND cutoff>?',(job['show_id'],now)).fetchone()
+    if not row:
+        db.execute("UPDATE row_layouts SET due=0,error='Showtime has expired' WHERE show_id=?",(job['show_id'],));db.commit();return
+    show=json.loads(row[0])
+    try:
+        if cloud:
+            # Persist request spacing so restarting cannot release a burst.
+            setmeta(db,'seat_next_request_at',now+spacing)
+            db.commit()
+            from cloud_row_reader import read
+            result=read(show)
+        else:
+            run=run_reader(show)
+            payload=json.loads(run.stdout)
+            if run.returncode or payload.get('error'):raise ValueError(payload.get('error','Seat read failed'))
+            result=payload['data']
+        ingest(db,show,result)
+        record_check(db,'rows',show['id'],now);db.commit()
+    except Exception as e:
+        # Discard any partial alert state from a failed ingest before recording the failure.
+        db.rollback()
+        if isinstance(e,SourceWait):
+            db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(e.until,job['show_id']))
+            setmeta(db,'seat_budget_until',e.until);db.commit();return
+        message=(str(e).partition(chr(10))[0] or type(e).__name__)[:200]
+        if getattr(e,'diagnostic',None):
+            setmeta(db,'seat_last_refusal',json.dumps({**e.diagnostic,'at':time.time()}))
+        retry_at=time.time()+300
+        if getattr(e,'status',0)==429:
+            retry_at=time.time()+max(300,e.retry)
+            setmeta(db,'seat_cooldown_until',retry_at)
+            setmeta(db,'seat_last_rate_limit',time.time())
+        record_check(db,'rows',show['id'],now,message)
+        db.execute('UPDATE row_layouts SET error=?,due=? WHERE show_id=?',(message,retry_at,job['show_id']))
+        db.commit()
 if __name__=='__main__':main()

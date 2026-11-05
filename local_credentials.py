@@ -11,14 +11,15 @@ def location():
 
 
 def load():
-    if not all(os.environ.get(k) for k in KEYS) and location().exists():
+    from telegram import credential
+    if not all(credential(k) for k in KEYS) and location().exists():
         try:
-            values=json.loads(location().read_text())
+            values=json.loads(location().read_text(encoding='utf-8-sig'))
             if not all(isinstance(values.get(k),str) and values[k] for k in KEYS):return False
         except (OSError,ValueError,AttributeError):return False
         for key in KEYS:
-            if not os.environ.get(key):os.environ[key]=values[key]
-    return all(os.environ.get(k) for k in KEYS)
+            if not credential(key):os.environ[key]=values[key]
+    return all(credential(k) for k in KEYS)
 
 
 def save(values):

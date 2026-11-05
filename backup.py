@@ -84,6 +84,29 @@ def prune_backups(folder, count=BACKUP_COUNT, budget=BACKUP_BUDGET):
  return {'count':kept,'bytes':total,'removed_bytes':removed}
 
 
+EXPIRED_DAYS=2
+
+
+def prune_expired(db,now):
+ # Past showtimes otherwise accumulate forever (about 8 MB a week), slowing every
+ # options read and eventually pushing the backup over its 32 MB limit.
+ # Showtimes a saved row alert points at are kept for its history.
+ import datetime as dt
+ from api_source import IST
+ prefs.ensure(db);limit=now-EXPIRED_DAYS*86400
+ kept="SELECT json_extract(payload,'$.row_show') FROM alerts WHERE coalesce(json_extract(payload,'$.row_show'),'')<>''"
+ db.execute('DELETE FROM sessions WHERE cutoff<? AND id NOT IN ('+kept+')',(limit,))
+ if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='row_layouts'").fetchone():
+  db.execute('DELETE FROM row_layouts WHERE show_id NOT IN (SELECT id FROM sessions) AND show_id NOT IN ('+kept+')')
+ for (job,) in db.execute('SELECT id FROM jobs WHERE expires>0 AND expires<?',(limit,)).fetchall():
+  db.execute('DELETE FROM meta WHERE key IN (?,?)',('waiting_show:'+job,'listing_success_streak:'+job))
+ db.execute('DELETE FROM jobs WHERE expires>0 AND expires<?',(limit,))
+ day=dt.datetime.fromtimestamp(limit,IST).strftime('%Y%m%d')
+ old="id GLOB 'api:*:[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]' AND substr(id,-8)<?"
+ db.execute("DELETE FROM meta WHERE key IN (SELECT 'revision:'||id FROM snapshots WHERE "+old+')',(day,))
+ db.execute('DELETE FROM snapshots WHERE '+old,(day,))
+
+
 def cleanup_history(db,now):
  if now-float(meta(db,'last_history_cleanup','0'))<3600:return
  # Preserve undelivered messages and every saved rule/baseline.
@@ -92,6 +115,7 @@ def cleanup_history(db,now):
  db.execute('DELETE FROM metric_history WHERE at<?',(now-7*86400,))
  db.execute('DELETE FROM check_intervals WHERE at<?',(now-7*86400,))
  db.execute('DELETE FROM check_stats WHERE last_attempt<?',(now-30*86400,))
+ prune_expired(db,now)
  setmeta(db,'last_history_cleanup',now);db.commit()
  # Deleted SQLite pages are reused. Avoid VACUUM's full-size temporary copy.
  db.execute('PRAGMA wal_checkpoint(PASSIVE)').fetchall()

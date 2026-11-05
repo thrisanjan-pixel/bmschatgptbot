@@ -1,5 +1,6 @@
 """Credentials are read at runtime and never included in error messages."""
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -7,17 +8,33 @@ import urllib.request
 import uuid
 
 
+FAILED_ATTEMPTS = 5
+
+
+def credential(key):
+    """Environment value without surrounding whitespace or a copied U+FEFF byte-order mark."""
+    return (os.environ.get(key) or '').strip().strip('﻿').strip()
+
+
+def configured():
+    return bool(credential('TELEGRAM_BOT_TOKEN') and credential('TELEGRAM_CHAT_ID'))
+
+
 class DeliveryError(RuntimeError):
-    def __init__(self, code=0, retry=30):
+    def __init__(self, code=0, retry=30, reason=''):
         super().__init__(f'Telegram delivery failed (HTTP {code})')
+        try:self.code=int(code)
+        except (ValueError,TypeError,OverflowError):self.code=0
         try:self.retry=max(30,min(86400,int(retry)))
         except (ValueError,TypeError,OverflowError):self.retry=30
+        # Telegram's own description, never the token, URL or chat id.
+        self.reason=' '.join(str(reason or '').split())[:120]
 
 
 def request(method, data, photo=None):
-    token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    token = credential('TELEGRAM_BOT_TOKEN')
     if not token:
-        raise DeliveryError()
+        raise DeliveryError(reason='bot token is not configured')
     if photo is not None:
         boundary = uuid.uuid4().hex
         parts = []
@@ -34,34 +51,57 @@ def request(method, data, photo=None):
                                      data=body, headers={'Content-Type': content_type})
         with urllib.request.urlopen(req, timeout=30) as response:
             result = json.load(response)
-        if not isinstance(result,dict):raise DeliveryError()
+        if not isinstance(result,dict):raise DeliveryError(reason='malformed response')
         if not result.get('ok'):
-            raise DeliveryError(result.get('error_code', 0), result.get('parameters', {}).get('retry_after', 30))
-        if 'result' not in result:raise DeliveryError()
+            parameters = result.get('parameters') if isinstance(result.get('parameters'), dict) else {}
+            raise DeliveryError(result.get('error_code', 0), parameters.get('retry_after', 30), result.get('description', ''))
+        if 'result' not in result:raise DeliveryError(reason='malformed response')
         return result['result']
+    except DeliveryError:
+        raise
     except urllib.error.HTTPError as error:
-        retry = 30
+        retry = 30;reason = ''
         try:
-            retry = json.load(error).get('parameters', {}).get('retry_after', 30)
-        except (ValueError, OSError):
+            detail = json.load(error)
+            parameters = detail.get('parameters') if isinstance(detail.get('parameters'), dict) else {}
+            retry = parameters.get('retry_after', 30);reason = detail.get('description', '')
+        except (ValueError, OSError, AttributeError):
             pass
-        raise DeliveryError(error.code, retry) from None
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError, TypeError):
-        raise DeliveryError() from None
+        finally:
+            error.close()
+        raise DeliveryError(error.code, retry, reason) from None
+    except Exception as error:
+        # Includes http.client.IncompleteRead and other non-OSError transport failures.
+        raise DeliveryError(reason=type(error).__name__) from None
 
 
 def send(text, photo=None):
-    chat = os.environ.get('TELEGRAM_CHAT_ID')
+    chat = credential('TELEGRAM_CHAT_ID')
     if not chat:
-        raise DeliveryError()
-    if photo is not None:
-        # Telegram captions have a shorter limit than messages.
-        if len(text) > 1000:
-            request('sendMessage', {'chat_id': chat, 'text': text[:4000], 'disable_web_page_preview': True})
-            text = 'Current public seat map · Hyderabad'
+        raise DeliveryError(reason='chat id is not configured')
+    message = {'chat_id': chat, 'text': text[:4000], 'disable_web_page_preview': True}
+    if photo is None:
+        request('sendMessage', message);return
+    if len(text) > 1000:
+        # Telegram captions have a shorter limit. The full text (with its booking
+        # link) goes first; the map is optional, so its failure is not retried.
+        request('sendMessage', message)
+        try:request('sendPhoto', {'chat_id': chat, 'caption': 'Current public seat map · Hyderabad'}, photo)
+        except DeliveryError as error:logging.warning('Telegram seat map skipped: HTTP %s', error.code)
+        return
+    try:
         request('sendPhoto', {'chat_id': chat, 'caption': text}, photo)
-    else:
-        request('sendMessage', {'chat_id': chat, 'text': text[:4000], 'disable_web_page_preview': True})
+    except DeliveryError as error:
+        # Rate limits and missing setup apply to every method; honour them.
+        if error.code == 429 or not configured():raise
+        logging.warning('Telegram photo failed (HTTP %s); sending text only', error.code)
+        request('sendMessage', message)
+
+
+def permanent(error):
+    """A message Telegram rejects itself, not a setup, rate-limit or network problem."""
+    reason = error.reason.casefold()
+    return error.code == 400 and 'chat' not in reason and 'token' not in reason
 
 
 def drain(db, commit=True, system_only=False):
@@ -73,8 +113,16 @@ def drain(db, commit=True, system_only=False):
         return None
     try:
         send(row['text'], row['photo'])
-    except DeliveryError as error:
-        db.execute('UPDATE outbox SET attempts=attempts+1,next_try=? WHERE id=?', (now+max(30,error.retry),row['id']))
+    except Exception as error:
+        if not isinstance(error, DeliveryError):error = DeliveryError(reason=type(error).__name__)
+        logging.warning('Telegram delivery failed: HTTP %s, retry in %ss, attempt %s%s', error.code, error.retry,
+                        row['attempts']+1, ' ('+error.reason+')' if error.reason else '')
+        if permanent(error) and row['attempts']+1 >= FAILED_ATTEMPTS:
+            # Keep the text for inspection, but stop it holding back later alerts for this rule.
+            from watch_preferences import archive_message
+            archive_message(db, row['id'])
+        else:
+            db.execute('UPDATE outbox SET attempts=attempts+1,next_try=? WHERE id=?', (now+max(30,error.retry),row['id']))
         delivered_id=None
     else:
         db.execute('UPDATE outbox SET delivered=? WHERE id=?', (time.time(), row['id']))

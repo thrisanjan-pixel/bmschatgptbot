@@ -122,7 +122,7 @@ def parse(data,event,requested_day='',now=None):
                 text=n.get('text','')
                 if isinstance(text,str) and '•' in text:language=text
     for n in nodes(body.get('bottomSheetData',{}).get('format-selector',{})):
-        if n.get('styleId')=='bottomsheet-subtitle':film=n.get('text','')
+        if n.get('styleId')=='bottomsheet-subtitle':film=str(n.get('text') or '')
         for key in ('eventCode','eventcode'):
             value=n.get(key)
             if re.fullmatch(r'ET\d+',str(value)):variants.add(value)
@@ -161,10 +161,11 @@ def parse(data,event,requested_day='',now=None):
                         if status not in ('0','1','2','3','4'):raise ReadError('Unknown category availability')
                         key=str(c.get('priceCode') or c.get('priceDesc') or '')
                         if not key:raise ReadError('Unknown seat category')
-                        categories[key]={'name':c.get('priceDesc',key),'status':status,'price':str(c.get('curPrice',''))}
+                        categories[key]={'name':str(c.get('priceDesc') or key),'status':status,'price':str(c.get('curPrice') or '')}
                     key=f'{code}:{day}:{session}:{event}'
-                    shows[key]={'id':key,'event':event,'session':session,'venue_code':code,'venue':venue.get('venueName',code),
-                        'date':day,'movie':film,'language':language,'format':raw.get('screenAttr') or item.get('attributes',''),
-                        'time':raw.get('title') or item.get('showTime',''),'cutoff':cutoff,'categories':categories,
+                    # Upstream nulls become text so alerts and filters never fail on a missing label.
+                    shows[key]={'id':key,'event':event,'session':session,'venue_code':code,'venue':str(venue.get('venueName') or code),
+                        'date':day,'movie':film,'language':language,'format':str(raw.get('screenAttr') or item.get('attributes') or ''),
+                        'time':str(raw.get('title') or item.get('showTime') or ''),'cutoff':cutoff,'categories':categories,
                         'url':booking or f'{BASE}/movies/hyderabad/movie/buytickets/{event}/{day}'}
     return {'day':day,'dates':sorted(dates),'variants':sorted(variants),'shows':shows,'film':film}

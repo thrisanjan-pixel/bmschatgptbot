@@ -203,77 +203,96 @@ class Monitor:
         db=connect(self.path)
         try:
             while not self.stop.is_set():
-                cooldown=float(meta(db,'source_cooldown','0'))
-                if cooldown>time.time():self.stop.wait(min(1,cooldown-time.time()));continue
-                now=time.time()
-                job=next_job(db,now)
-                if not job:self.stop.wait(1);continue
-                try:
-                    started=time.time()
-                    setmeta(db,'listing_check_started',started)
-                    if preferences.normalized(json.loads(job['payload']).get('movie','')) not in set(watched_movies(db)):
-                        setmeta(db,'listing_background_attempt',started)
-                    db.commit()
-                    data=get_json(job['url'])
-                    if job['kind']=='catalog':
-                        listings=movies(data);initialized=bool(meta(db,'catalog_initialized'))
-                        for movie in listings:
-                            db.execute('INSERT OR REPLACE INTO inventory VALUES(?,?,?)',(movie['url'],movie['title'],now))
-                            setmeta(db,'poster:'+movie['url'],movie['image'])
-                            schedule(db,movie['event'],'',movie['title'],initialized)
-                        setmeta(db,'catalog_initialized','1');setmeta(db,'catalog_last_success',now)
-                    elif no_regional_shows(data):
-                        # Keep prior show state and wait for a verified showtime payload.
-                        setmeta(db,'waiting_show:'+job['id'],'1')
-                        setmeta(db,'upcoming_event:'+json.loads(job['payload'])['event'],'1')
-                        setmeta(db,'api_last_success',time.time())
-                    else:ingest(db,job,data)
-                    streak_key='listing_success_streak:'+job['id']
-                    setmeta(db,streak_key,min(5,int(meta(db,streak_key,'0'))+1))
-                    db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(time.time(),time.time()+poll_interval(db,job),job['id']))
-                    record_check(db,'listings',job['id'],started)
-                    db.commit();logging.info('%s checked',job['kind'])
+                try:self.check(db)
                 except Exception as error:
-                    db.rollback()
-                    if isinstance(error,SourceWait):
-                        db.execute('UPDATE jobs SET due=? WHERE id=?',(error.until,job['id']))
-                        setmeta(db,'listing_budget_until',error.until);db.commit()
-                    else:
-                        message=record_listing_failure(db,job,error,started,time.time())
-                        db.commit();logging.warning('%s: %s',job['kind'],message)
-                finally:
-                    setmeta(db,'listing_check_started','0');db.commit()
-                self.stop.wait(2)
+                    # A locked database must not end the only listing worker; retry shortly.
+                    try:db.rollback()
+                    except Exception:pass
+                    logging.warning('listing worker: %s; retrying',type(error).__name__);self.stop.wait(5)
         finally:db.close()
+    def check(self,db):
+        cooldown=float(meta(db,'source_cooldown','0'))
+        if cooldown>time.time():self.stop.wait(min(1,cooldown-time.time()));return
+        now=time.time()
+        job=next_job(db,now)
+        if not job:self.stop.wait(1);return
+        try:
+            started=time.time()
+            setmeta(db,'listing_check_started',started)
+            if preferences.normalized(json.loads(job['payload']).get('movie','')) not in set(watched_movies(db)):
+                setmeta(db,'listing_background_attempt',started)
+            db.commit()
+            data=get_json(job['url'])
+            if job['kind']=='catalog':
+                listings=movies(data);initialized=bool(meta(db,'catalog_initialized'))
+                for movie in listings:
+                    db.execute('INSERT OR REPLACE INTO inventory VALUES(?,?,?)',(movie['url'],movie['title'],now))
+                    setmeta(db,'poster:'+movie['url'],movie['image'])
+                    schedule(db,movie['event'],'',movie['title'],initialized)
+                setmeta(db,'catalog_initialized','1');setmeta(db,'catalog_last_success',now)
+            elif no_regional_shows(data):
+                # Keep prior show state and wait for a verified showtime payload.
+                setmeta(db,'waiting_show:'+job['id'],'1')
+                setmeta(db,'upcoming_event:'+json.loads(job['payload'])['event'],'1')
+                setmeta(db,'api_last_success',time.time())
+            else:ingest(db,job,data)
+            streak_key='listing_success_streak:'+job['id']
+            setmeta(db,streak_key,min(5,int(meta(db,streak_key,'0'))+1))
+            db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(time.time(),time.time()+poll_interval(db,job),job['id']))
+            record_check(db,'listings',job['id'],started)
+            db.commit();logging.info('%s checked',job['kind'])
+        except Exception as error:
+            db.rollback()
+            if isinstance(error,SourceWait):
+                db.execute('UPDATE jobs SET due=? WHERE id=?',(error.until,job['id']))
+                setmeta(db,'listing_budget_until',error.until);db.commit()
+            else:
+                message=record_listing_failure(db,job,error,started,time.time())
+                db.commit();logging.warning('%s: %s',job['kind'],message)
+        finally:
+            setmeta(db,'listing_check_started','0');db.commit()
+        self.stop.wait(2)
     def run(self,seconds=0):
         db=connect(self.path);thread=threading.Thread(target=self.worker,daemon=True);thread.start();start=time.monotonic()
         try:
             while not self.stop.is_set() and (not seconds or time.monotonic()-start<seconds):
                 if not thread.is_alive():raise RuntimeError('HTTP worker stopped')
-                running=preferences.active(db)
-                muted=meta(db,'notifications_paused','0')=='1' or not running
-                ready=not muted and not self.dry_run and load()
-                setmeta(db,'notifications_mode','paused' if muted else 'enabled' if ready else 'disabled' if self.dry_run else 'waiting for local setup')
-                setmeta(db,'city_state','cooldown' if float(meta(db,'source_cooldown','0'))>time.time() else 'running')
-                setmeta(db,'city_heartbeat',time.time());setmeta(db,'monitor_mode','api')
-                bucket=int(time.time()//900)*900
-                if not db.execute('SELECT 1 FROM metric_history WHERE at=?',(bucket,)).fetchone():
-                    totals=coverage(db)
-                    db.execute('INSERT INTO metric_history VALUES(?,?,?,?)',(bucket,totals['movies'],totals['venues'],totals['sessions']))
-                db.commit()
-                if ready:
-                    # Serialize sending with preference saves: after a pause is saved,
-                    # no new delivery can begin using an earlier settings read.
-                    db.execute('BEGIN IMMEDIATE')
-                    running=preferences.active(db)
-                    if running and meta(db,'notifications_paused','0')!='1':
-                        preferences.prime_availability(db)
-                        delivered_id=drain(db,commit=False)
-                        if delivered_id:preferences.delivered(db,delivered_id)
-                    db.commit()
-                self.stop.wait(1)
+                try:self.tick(db)
+                except Exception as error:
+                    # Keep heartbeats and delivery alive through a locked database or bad stored row.
+                    try:db.rollback()
+                    except Exception:pass
+                    logging.warning('monitor loop: %s; retrying',type(error).__name__);self.stop.wait(5)
         finally:
             self.stop.set();thread.join(timeout=30);setmeta(db,'city_state','stopped');db.commit();db.close()
+    def tick(self,db):
+        running=preferences.active(db)
+        muted=meta(db,'notifications_paused','0')=='1' or not running
+        ready=not muted and not self.dry_run and load()
+        setmeta(db,'notifications_mode','paused' if muted else 'enabled' if ready else 'disabled' if self.dry_run else 'waiting for local setup')
+        setmeta(db,'city_state','cooldown' if float(meta(db,'source_cooldown','0'))>time.time() else 'running')
+        setmeta(db,'city_heartbeat',time.time());setmeta(db,'monitor_mode','api')
+        bucket=int(time.time()//900)*900
+        if not db.execute('SELECT 1 FROM metric_history WHERE at=?',(bucket,)).fetchone():
+            totals=coverage(db)
+            db.execute('INSERT INTO metric_history VALUES(?,?,?,?)',(bucket,totals['movies'],totals['venues'],totals['sessions']))
+        db.commit()
+        if ready:
+            # Serialize sending with preference saves: after a pause is saved,
+            # no new delivery can begin using an earlier settings read.
+            db.execute('BEGIN IMMEDIATE')
+            running=preferences.active(db)
+            if running and meta(db,'notifications_paused','0')!='1':
+                # A bad stored showtime must not hold back delivery of queued alerts.
+                db.execute('SAVEPOINT prime')
+                try:preferences.prime_availability(db)
+                except Exception as error:
+                    db.execute('ROLLBACK TO prime');logging.warning('initial availability check: %s',type(error).__name__)
+                db.execute('RELEASE prime')
+                delivered_id=drain(db,commit=False)
+                if delivered_id:preferences.delivered(db,delivered_id)
+            db.commit()
+        self.stop.wait(1)
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--db',default=os.environ.get('BMS_DB','runtime/api.sqlite3'))
