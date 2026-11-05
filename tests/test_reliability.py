@@ -99,6 +99,14 @@ class ReliabilityTests(unittest.TestCase):
    self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'discovery','https://example.test/'+name,json.dumps({'movie':'Epic','event':name}),due))
   setmeta(self.db,'listing_background_attempt',995);self.db.commit()
   self.assertEqual([r['id'] for r in api_watch.listing_order(self.db,1000)],['oldest','recent','new'])
+ def test_alert_reports_latest_listing_check_not_an_old_failure(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
+  for name,error in [('old','Source HTTP 403'),('fresh','')]:
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,checked,error) VALUES(?,?,?,?,?,?)',(name,'discovery','https://example.test/'+name,json.dumps({'movie':'Epic'}),900,error))
+  record_check(self.db,'listings','old',100,'Source HTTP 403',now=100);record_check(self.db,'listings','fresh',900,now=900);self.db.commit()
+  self.assertEqual(prefs.rules(self.db)[0]['health']['error'],'')
+  record_check(self.db,'listings','old',950,'Source HTTP 403',now=950);self.db.commit()
+  self.assertEqual(prefs.rules(self.db)[0]['health']['error'],'Source HTTP 403')
  def test_duplicate_row_rules_share_one_queued_read(self):
   from tests.test_rows import RowTests
   fixture=RowTests();fixture.setUp()

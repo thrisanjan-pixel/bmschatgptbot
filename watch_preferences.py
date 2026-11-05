@@ -75,7 +75,11 @@ def rules(db):
         elif not p['row_show']:
             jobs=[r for r in db.execute('SELECT id,payload,checked,error,due FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
             checked=max((r['checked'] for r in jobs),default=0)
-            error=next((r['error'] for r in jobs if r['error']),'')
+            # Report the latest listing check, not an old failure on any of the movie's listings.
+            ids=[r['id'] for r in jobs];latest=None
+            if ids and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='check_stats'").fetchone():
+                latest=db.execute(f"SELECT error FROM check_stats WHERE source='listings' AND job_key IN ({','.join('?'*len(ids))}) ORDER BY last_attempt DESC LIMIT 1",ids).fetchone()
+            error=latest[0] if latest else next((r['error'] for r in jobs if r['error']),'')
             due=min((r['due'] for r in jobs),default=0)
             waiting_for_bookings = bool(jobs) and all(
                 meta(db, 'waiting_show:'+r['id']) == '1' for r in jobs
