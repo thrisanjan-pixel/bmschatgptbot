@@ -34,6 +34,12 @@ The application has five threaded browser workers: catalogue, movie details, sho
 
 Modules: city_watch.py (scheduler), source.py (normal Chromium/TLS), parsers.py (native data validation), seats.py (read-only accessibility category/row filters), store.py (state/outbox), telegram.py (text/images), dashboard.py + static/index.html (private dashboard). supervise.py restarts local worker/dashboard children. Requirements pin Playwright 1.62.0. Tests are in tests/test_tracker.py. Dockerfile/railway.toml configure a single background worker; deploy/ also has Debian systemd assets.
 
+### Listing queue order (5 Nov 2026)
+
+Listing requests to in.bookmyshow.com are one a minute. `api_watch.next_job` picks: an overdue background listing at most once every 180 s (`BACKGROUND_SPACING`), otherwise alert listings, with the alert movie checked longest ago going first. Dated listings outside every alert's dates count as background. While the request budget waits, the worker picks no job, so waiting never reorders the queue. A broad alert (many formats × dates) shares the budget: each of its listings is checked less often. `/api/status` → `reliability.listing_queue` shows the alert listings with due, last check and error.
+
+Row alerts can set `party_size` (2–10): they alert only when that many seats are free side by side in the chosen rows, and name the most central block. Seat-type lookups wait out a gap of 15 s or less instead of dropping the seat read.
+
 ## Validation already completed, with limits
 
 - 21 rebuilt behavioral tests passed. They cover identity/cutoff validation, automatic dates/variants, silent baselines, new shows, seat releases in partly available rows, repeated release transitions, delivery retry, restart persistence and failed-source preservation.
