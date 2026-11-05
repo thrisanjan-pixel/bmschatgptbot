@@ -21,6 +21,14 @@ class RowTests(unittest.TestCase):
  def configure(self):
   row_watch.ingest(self.db,self.show,copy.deepcopy(self.result))
   prefs.save(self.db,{**prefs.defaults(),'movies':['Movie'],'categories':['Gold'],'row_show':self.show['id'],'rows':['Gold / A'],'enabled':True})
+ def test_new_showtime_jumps_queue_and_reports_source_wait(self):
+  now=time.time()
+  self.db.execute("INSERT INTO row_layouts(show_id,payload,checked,due) VALUES('alert-show','{}',?,?)",(now-900,now-800))
+  self.db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(now-10,self.show['id']));self.db.commit()
+  self.assertEqual(row_watch.next_job(self.db,now)['show_id'],self.show['id'])
+  setmeta(self.db,'seat_budget_until',now+300);self.db.commit()
+  self.assertIsNone(row_watch.next_job(self.db,now))
+  self.assertEqual(row_watch.get(self.db,self.show['id'])['next_read'],now+300)
  def test_specific_row_release_and_silent_baseline(self):
   self.configure();self.assertEqual(self.db.execute('select count(*) from outbox').fetchone()[0],0)
   changed=copy.deepcopy(self.result);changed['available'].append({'row_id':'Gold / B','seat':'2'})

@@ -19,9 +19,17 @@ def request(db,show_id):
     db.execute("INSERT INTO row_layouts(show_id,payload,due) VALUES(?,'{}',?) ON CONFLICT(show_id) DO UPDATE SET due=CASE WHEN checked<? AND (due<=? OR error='') THEN excluded.due ELSE due END",(show_id,now,now-interval,now))
     db.commit()
 
+def source_ready_at(db):
+    """Earliest time the seat source may be asked again (budget, spacing or cooldown)."""
+    return max(float(meta(db,key,'0')) for key in ('seat_cooldown_until','seat_next_request_at','seat_budget_until'))
+
 def get(db,show_id):
     schema(db);row=db.execute('SELECT * FROM row_layouts WHERE show_id=?',(show_id,)).fetchone()
-    return {**dict(row),'data':json.loads(row['payload'])} if row else {'show_id':show_id,'checked':0,'error':'','data':{}}
+    if not row:return {'show_id':show_id,'checked':0,'error':'','data':{},'due':0,'next_read':0}
+    result={**dict(row),'data':json.loads(row['payload'])}
+    # Tell the page when a queued read can really start, so it can show the wait.
+    result['next_read']=max(row['due'],source_ready_at(db)) if row['due'] else 0
+    return result
 
 def run_reader(show,timeout=75):
     command=['xvfb-run','-a',sys.executable,str(Path(__file__).with_name('row_reader.py'))]
@@ -109,12 +117,13 @@ def poll_policy(db,now,cloud=True):
 
 
 def next_job(db,now):
-    if max(float(meta(db,'seat_cooldown_until','0')),
-           float(meta(db,'seat_next_request_at','0')))>now:return None
+    if source_ready_at(db)>now:return None
     active=sorted({r['preferences']['row_show'] for r in prefs.active(db) if r['preferences']['row_show']})
     slots=','.join('?' for _ in active) or "''"
+    # A showtime nobody has seen yet (someone is waiting on the page) goes first;
+    # routine alert refreshes would otherwise take every slot of the source budget.
     return db.execute(f"""SELECT * FROM row_layouts WHERE due>0 AND due<=?
-      ORDER BY CASE WHEN due<? THEN 0 WHEN show_id IN ({slots}) THEN 1 ELSE 2 END,due LIMIT 1""",(now,now-90,*active)).fetchone()
+      ORDER BY CASE WHEN checked=0 AND error='' THEN 0 WHEN due<? THEN 1 WHEN show_id IN ({slots}) THEN 2 ELSE 3 END,due LIMIT 1""",(now,now-90,*active)).fetchone()
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--db',required=True);args=parser.parse_args()
