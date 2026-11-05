@@ -24,6 +24,11 @@ class SourceBudgetTests(unittest.TestCase):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1200)
   self.db.execute("INSERT INTO source_hosts VALUES('services-in.bookmyshow.com',9999)");self.db.commit()
   with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4700,manual=True)
+ def test_seat_metadata_lane_is_not_starved_by_listing_checks(self):
+  for n in range(5):source.reserve(self.db,'https://in.bookmyshow.com/api/x',1000+n*60)
+  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/x',1250)
+  source.reserve(self.db,'https://in.bookmyshow.com/api/x',1250,metadata=True)
+  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/x',1255,metadata=True)
  def test_rolling_hour_cap_counts_every_attempt(self):
   for n in range(60):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000+n*60)
   with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4599)

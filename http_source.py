@@ -13,6 +13,9 @@ POLICIES={'services-in.bookmyshow.com':(60,60),'in.bookmyshow.com':(60,60),'in-c
 # Seat loads someone asked for on the page: a small separate budget, so they run at once
 # without taking slots from alert checks. Source cooldowns (429) still apply.
 MANUAL={'services-in.bookmyshow.com':(10,10),'in.bookmyshow.com':(10,10)}
+# Seat-category lookups for alert seat reads. Listing checks use every in.bookmyshow.com
+# slot, so these need their own small lane or alert seat reads never finish.
+METADATA={'in.bookmyshow.com':(20,10)}
 
 
 def carry_over(db,raw,now=None):
@@ -40,7 +43,7 @@ def schema(db):
         db.execute('ALTER TABLE source_requests ADD COLUMN manual INTEGER DEFAULT 0')
 
 
-def reserve(db,url,now=None,manual=False):
+def reserve(db,url,now=None,manual=False,metadata=False):
     now=time.time() if now is None else now
     parts=urlsplit(url)
     policies=POLICIES
@@ -48,14 +51,15 @@ def reserve(db,url,now=None,manual=False):
     schema(db);db.commit();db.execute('BEGIN IMMEDIATE')
     try:
         manual=bool(manual and parts.netloc in MANUAL)
-        limit,gap=(MANUAL if manual else policies)[parts.netloc]
+        lane=1 if manual else 2 if metadata and parts.netloc in METADATA else 0
+        limit,gap=(policies,MANUAL,METADATA)[lane][parts.netloc]
         row=db.execute('SELECT not_before FROM source_hosts WHERE host=?',(parts.netloc,)).fetchone()
-        count,oldest=db.execute('SELECT count(*),min(at) FROM source_requests WHERE host=? AND at>? AND manual=?',(parts.netloc,now-3600,int(manual))).fetchone()
-        # Manual reads keep their gap from any read; alert reads only from other alert reads.
-        last=db.execute('SELECT max(at) FROM source_requests WHERE host=? AND at>?'+('' if manual else ' AND manual=0'),(parts.netloc,now-3600)).fetchone()[0]
+        count,oldest=db.execute('SELECT count(*),min(at) FROM source_requests WHERE host=? AND at>? AND manual=?',(parts.netloc,now-3600,lane)).fetchone()
+        # Manual and metadata reads keep their gap from any read; alert reads only from other alert reads.
+        last=db.execute('SELECT max(at) FROM source_requests WHERE host=? AND at>?'+('' if lane else ' AND manual=0'),(parts.netloc,now-3600)).fetchone()[0]
         until=max(row[0] if row else 0,(last+gap) if last is not None else 0,(oldest+3600) if count>=limit else 0)
         if until>now:raise SourceWait(until)
-        cursor=db.execute('INSERT INTO source_requests(at,host,endpoint,manual) VALUES(?,?,?,?)',(now,parts.netloc,parts.path,int(manual)))
+        cursor=db.execute('INSERT INTO source_requests(at,host,endpoint,manual) VALUES(?,?,?,?)',(now,parts.netloc,parts.path,lane))
         db.execute('DELETE FROM source_requests WHERE at<?',(now-7*86400,))
         db.commit();return cursor.lastrowid
     except Exception:db.rollback();raise
@@ -73,11 +77,11 @@ def finish(db,request_id,status,headers=None,outcome='response'):
     db.commit()
 
 
-def open_request(request,timeout=25,manual=False):
+def open_request(request,timeout=25,manual=False,metadata=False):
     if os.environ.get('BMS_REQUEST_BUDGET')!='1':return urllib.request.urlopen(request,timeout=timeout)
     db=connect(os.environ['BMS_DB'])
     try:
-        request_id=reserve(db,request.full_url,manual=manual)
+        request_id=reserve(db,request.full_url,manual=manual,metadata=metadata)
         try:
             response=urllib.request.urlopen(request,timeout=timeout)
         except urllib.error.HTTPError as error:

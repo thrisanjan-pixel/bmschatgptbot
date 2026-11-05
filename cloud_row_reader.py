@@ -19,6 +19,7 @@ ENDPOINT='https://services-in.bookmyshow.com/doTrans.aspx'
 LAYOUT_KEY=b'kYp3s6v9y$B&E)H+MbQeThWmZq4t7w!z'
 MAX_LAYOUT_BYTES=2_000_000
 _area_cache={}
+AREA_TTL=6*3600  # Seat categories of a showtime rarely change.
 
 class CategoryMappingError(ValueError):
     pass
@@ -36,7 +37,7 @@ class SeatHTTPError(ValueError):
 def _areas(show,timeout,manual=False):
     key=(show['event'],show['venue_code'],show['date'],show['session'])
     cached=_area_cache.get(key)
-    if cached and time.time()-cached[0]<600:return cached[1]
+    if cached and time.time()-cached[0]<AREA_TTL:return cached[1]
     query=urllib.parse.urlencode({'eventCode':show['event'],'dateCode':show['date'],
         'regionCode':'HYD','venueCode':show['venue_code']})
     url='https://in.bookmyshow.com/api/movies-data/seatlayout/v1/primary?'+query
@@ -44,7 +45,7 @@ def _areas(show,timeout,manual=False):
         'x-app-code':'WEB','x-region-code':'HYD','x-region-slug':'hyderabad',
         'x-platform-code':'DESKTOP-WEB','x-location-selection':'manual'})
     try:
-        with open_request(request,timeout=timeout,manual=manual) as response:data=json.load(response)['data']
+        with open_request(request,timeout=timeout,manual=manual,metadata=True) as response:data=json.load(response)['data']
     except urllib.error.HTTPError as error:raise SeatHTTPError('Seat metadata', error) from None
     except (urllib.error.URLError,TimeoutError,ValueError,KeyError) as error:
         raise ValueError('Seat metadata unavailable') from error
@@ -61,7 +62,7 @@ def _areas(show,timeout,manual=False):
     if not areas:raise ValueError('No matching seat categories in metadata')
     now=time.time()
     # Drop stale entries so a long-running worker does not keep every past show.
-    for old in [k for k,v in _area_cache.items() if now-v[0]>=600]:del _area_cache[old]
+    for old in [k for k,v in _area_cache.items() if now-v[0]>=AREA_TTL]:del _area_cache[old]
     _area_cache[key]=(now,areas)
     return areas
 

@@ -161,7 +161,7 @@ class SeatReaderTests(unittest.TestCase):
   with patch('cloud_row_reader.open_request',return_value=io.BytesIO(b'[]')):
    with self.assertRaisesRegex(ValueError,'Seat source response changed'):cloud_row_reader.read(show)
  def test_area_cache_drops_stale_entries(self):
-  cloud_row_reader._area_cache.clear();cloud_row_reader._area_cache[('old',)]=(time.time()-700,{})
+  cloud_row_reader._area_cache.clear();cloud_row_reader._area_cache[('old',)]=(time.time()-cloud_row_reader.AREA_TTL-100,{})
   show={'event':'ET00000001','venue_code':'TEST','date':'20261110','session':'1','categories':{'1':{'name':'Gold'}}}
   data={'data':{'eventData':{'eventCode':'ET00000001'},'venue':{'venueCode':'TEST'},'showTimes':[{'sessionId':'1','categories':[{'priceCode':'1','areaCatCode':'7'}]}]}}
   with patch('cloud_row_reader.open_request',return_value=io.BytesIO(json.dumps(data).encode())):
