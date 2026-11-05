@@ -12,7 +12,7 @@ class SourceWait(RuntimeError):
 POLICIES={'services-in.bookmyshow.com':(60,60),'in.bookmyshow.com':(60,60),'in-cdn.bmscdn.com':(6,600)}
 # Seat loads someone asked for on the page: a small separate budget, so they run at once
 # without taking slots from alert checks. Source cooldowns (429) still apply.
-MANUAL={'services-in.bookmyshow.com':(10,10)}
+MANUAL={'services-in.bookmyshow.com':(10,10),'in.bookmyshow.com':(10,10)}
 
 
 def carry_over(db,raw,now=None):

@@ -33,7 +33,7 @@ class SeatHTTPError(ValueError):
         error.close()
 
 
-def _areas(show,timeout):
+def _areas(show,timeout,manual=False):
     key=(show['event'],show['venue_code'],show['date'],show['session'])
     cached=_area_cache.get(key)
     if cached and time.time()-cached[0]<600:return cached[1]
@@ -44,7 +44,7 @@ def _areas(show,timeout):
         'x-app-code':'WEB','x-region-code':'HYD','x-region-slug':'hyderabad',
         'x-platform-code':'DESKTOP-WEB','x-location-selection':'manual'})
     try:
-        with open_request(request,timeout=timeout) as response:data=json.load(response)['data']
+        with open_request(request,timeout=timeout,manual=manual) as response:data=json.load(response)['data']
     except urllib.error.HTTPError as error:raise SeatHTTPError('Seat metadata', error) from None
     except (urllib.error.URLError,TimeoutError,ValueError,KeyError) as error:
         raise ValueError('Seat metadata unavailable') from error
@@ -175,6 +175,6 @@ def read(show,timeout=20,manual=False):
         # may be blocked even while the live layout endpoint works.
         try:return parse_layout(show,result['strData'],{})
         except CategoryMappingError:
-            return parse_layout(show,result['strData'],_areas(show,timeout))
+            return parse_layout(show,result['strData'],_areas(show,timeout,manual))
     except (KeyError,TypeError,AttributeError,json.JSONDecodeError) as error:
         raise ValueError('Seat source response changed') from error

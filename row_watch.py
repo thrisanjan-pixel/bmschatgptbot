@@ -223,8 +223,11 @@ def step(db):
         # Discard any partial alert state from a failed ingest before recording the failure.
         db.rollback()
         if isinstance(e,SourceWait):
-            # Manual budget used up: the load joins the normal queue instead.
-            if manual:db.execute('UPDATE row_layouts SET manual=0 WHERE show_id=?',(job['show_id'],));db.commit();return
+            # A short manual wait (10 s gap) retries soon; a used-up manual budget joins the normal queue.
+            if manual:
+                if e.until-time.time()<=60:db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(e.until,job['show_id']))
+                else:db.execute('UPDATE row_layouts SET manual=0 WHERE show_id=?',(job['show_id'],))
+                db.commit();return
             db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(e.until,job['show_id']))
             setmeta(db,'seat_budget_until',e.until);db.commit();return
         message=(str(e).partition(chr(10))[0] or type(e).__name__)[:200]
