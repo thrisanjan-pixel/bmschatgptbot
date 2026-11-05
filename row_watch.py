@@ -72,6 +72,11 @@ def show_date(show):
 
 def ingest(db,show,result):
     schema(db);old=get(db,show['id']);previous=old['data']
+    # Seats open now that were taken at the last good read; the first read marks none.
+    if previous.get('seats'):
+        was_open={(s['row_id'],s['seat']) for s in previous.get('available',[])}
+        result['new']=[s for s in result['available'] if (s['row_id'],s['seat']) not in was_open]
+    else:result['new']=[]
     known={r['id']:r for r in result['rows']};known.update({r['id']:r for r in previous.get('rows',[]) if r['id'] not in known});result['rows']=list(known.values())
     if meta(db,'notifications_paused','0')!='1':
         seen_signatures=set()
@@ -100,8 +105,12 @@ def ingest(db,show,result):
             pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone()
             if now-rule['last_alert']>=p['interval_minutes']*60 and not pending:
                 opened_rows=sorted({s['row_id'] for s in added})
-                lines=['• '+r+': '+', '.join(sorted((s['seat'] for s in added if s['row_id']==r),key=seat_order)) for r in opened_rows]
-                message=f"🎟 Seats now available · Row{'s' if len(opened_rows)>1 else ''} {', '.join(opened_rows)}\n\n🎬 {show['movie']}\n📍 {show['venue']}\n📅 {show_date(show)} · {show['time']}\n\n"+'\n'.join(lines)
+                lines=[]
+                for r in opened_rows:
+                    seats=sorted((s['seat'] for s in added if s['row_id']==r),key=seat_order)
+                    price=prefs.price_text(show,r.rsplit(' / ',1)[0])
+                    lines.append('• '+r+': '+', '.join(seats)+f"  ({len(seats)} seat{'s' if len(seats)>1 else ''}{' · '+price+' each' if price else ''})")
+                message=f"🎟 {len(added)} seat{'s' if len(added)>1 else ''} now available · Row{'s' if len(opened_rows)>1 else ''} {', '.join(opened_rows)}\n\n🎬 {show['movie']}\n📍 {show['venue']}\n📅 {show_date(show)} · {show['time']}\n\n"+'\n'.join(lines)
                 # Shorten the seat list, never the exact booking link at the end.
                 link=f"\n\n{result['url']}";limit=950-len(link)
                 if len(message)>limit:message=message[:limit-1].rstrip()+'…'

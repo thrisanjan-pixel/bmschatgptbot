@@ -81,6 +81,15 @@ class RowTests(unittest.TestCase):
   text=self.db.execute('select text from outbox').fetchone()[0]
   self.assertIn('Gold / A: 1, 2, 3, 25',text);self.assertIn(row_watch.show_date(self.show),text)
   self.assertNotIn('📅 '+self.show['date'],text);self.assertTrue(text.rstrip().endswith(self.show['url']))
+  self.assertIn('4 seats now available',text);self.assertIn('(4 seats · ₹200 each)',text)
+ def test_seat_read_marks_only_seats_opened_since_last_read(self):
+  first=copy.deepcopy(self.result);first['seats']=[{'row_id':'Gold / B','seat':'1','available':True}]
+  row_watch.ingest(self.db,self.show,copy.deepcopy(first))
+  self.assertEqual(row_watch.get(self.db,self.show['id'])['data']['new'],[])
+  first['available'].append({'row_id':'Gold / A','seat':'3'});row_watch.ingest(self.db,self.show,first)
+  self.assertEqual(row_watch.get(self.db,self.show['id'])['data']['new'],[{'row_id':'Gold / A','seat':'3'}])
+ def test_listing_alert_shows_seat_type_price(self):
+  self.assertEqual(prefs.with_price(self.show,'gold'),'gold (₹200)');self.assertEqual(prefs.with_price(self.show,'Silver'),'Silver')
  def test_invalid_rows_and_wrong_show_filters_rejected(self):
   self.configure();p=prefs.read(self.db)
   for updates in ({'rows':['Gold / Z']},{'movies':['Other']},{'row_show':'missing'}):

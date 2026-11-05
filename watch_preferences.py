@@ -16,6 +16,16 @@ VENUE_SCREENS={
 }
 
 def normalized(value):return ' '.join(str(value).casefold().split())
+def price_text(show,name):
+    """Listed ticket price for a seat type, e.g. '₹350', or '' when BookMyShow gives none."""
+    for category in show.get('categories',{}).values():
+        if normalized(category.get('name',''))==normalized(name):
+            try:value=float(category.get('price') or 0)
+            except (TypeError,ValueError):return ''
+            return f'₹{value:g}' if value>0 else ''
+    return ''
+def with_price(show,name):
+    price=price_text(show,name);return f'{name} ({price})' if price else str(name)
 def category_matches(name,p):return not p['categories'] or normalized(name) in {normalized(v) for v in p['categories']}
 def format_matches(actual,wanted):
     actual=normalized(actual);wanted=normalized(wanted)
@@ -132,7 +142,7 @@ def prime_availability(db):
                 lines=[]
                 for show,opened,link in found[:3]:
                     lines.append(' · '.join(str(show.get(key) or '') for key in ('venue','date','time'))+'\n'+
-                        ', '.join(opened)+'\n'+link)
+                        ', '.join(with_price(show,name) for name in opened)+'\n'+link)
                 extra=f'\n\n{len(found)-3} more matching showtimes are open.' if len(found)>3 else ''
                 message='🎬 '+str(found[0][0].get('movie') or '')+'\nSeats already available for this alert:\n\n'+\
                     '\n\n'.join(lines)+extra
