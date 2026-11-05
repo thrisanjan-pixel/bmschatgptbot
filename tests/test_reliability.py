@@ -51,6 +51,16 @@ class ReliabilityTests(unittest.TestCase):
   self.db.execute("INSERT INTO jobs(id,kind,url,payload,due,checked) VALUES('small','discovery','https://example.test/s',?,990,500)",(json.dumps({'movie':'Small','date':''}),))
   self.db.execute("UPDATE jobs SET checked=900 WHERE id='big0'");setmeta(self.db,'listing_background_attempt',995);self.db.commit()
   self.assertEqual(api_watch.next_job(self.db,1000)['id'],'small')
+ def test_versions_that_never_played_on_the_alert_screen_are_background(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'screens':['DOLBY CINEMA'],'enabled':True},create=True)
+  for session,event,language,screen in [('1','ETDOLBY','Telugu • DOLBY CINEMA 3D','DOLBY CINEMA'),('2','ET2D','Telugu • 2D','LASER 4K ATMOS')]:
+   self.db.execute('INSERT INTO sessions VALUES(?,?,?,1)',(session,json.dumps({'event':event,'language':language,'format':screen}),9e9))
+  self.db.commit();wanted=api_watch.wanted_dates(self.db)
+  self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'ETDOLBY','date':''},wanted))
+  self.assertFalse(api_watch.is_watched({'movie':'Epic','event':'ET2D','date':''},wanted))
+  self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'ETNEW','date':''},wanted))
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
+  self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'ET2D','date':''},api_watch.wanted_dates(self.db)))
  def test_duplicate_row_rules_share_one_queued_read(self):
   from tests.test_rows import RowTests
   fixture=RowTests();fixture.setUp()

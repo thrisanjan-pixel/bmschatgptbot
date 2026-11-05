@@ -154,24 +154,34 @@ BACKGROUND_SPACING=180
 
 
 def wanted_dates(db):
-    """Movie -> dates that showtime alerts ask for, or None when any date counts."""
-    wanted={}
+    """What showtime alerts need: per movie, each alert's dates (None = any date) and
+    its language, format and screen filters, plus what each known version has shown."""
+    movies={}
     for rule in preferences.active(db):
         p=rule['preferences']
         if p['row_show']:continue
+        probe={**preferences.defaults(),**{k:p[k] for k in ('languages','formats','screens')}}
         for movie in p['movies']:
-            key=preferences.normalized(movie)
-            wanted[key]=None if not p['dates'] or (key in wanted and wanted[key] is None) else wanted.get(key,set())|set(p['dates'])
-    return wanted
+            movies.setdefault(preferences.normalized(movie),[]).append((set(p['dates']) or None,probe))
+    profiles={}
+    for event,language,screen in db.execute("""SELECT DISTINCT json_extract(payload,'$.event'),
+            json_extract(payload,'$.language'),json_extract(payload,'$.format') FROM sessions"""):
+        profiles.setdefault(event,[]).append({'movie':'','venue_code':'','date':'','categories':{},
+            'language':language or '','format':screen or ''})
+    return {'movies':movies,'profiles':profiles}
 
 
 def is_watched(payload,wanted):
-    # A dated listing no alert asks for is background work, so it cannot crowd out
-    # the listings alerts depend on. Undated listings still find new dates.
-    movie=preferences.normalized(payload.get('movie',''))
-    if movie not in wanted:return False
-    day=payload.get('date','')
-    return wanted[movie] is None or not day or day in wanted[movie]
+    # Background work cannot crowd out the listings alerts depend on. A listing is
+    # background when no alert asks for its date, or when its version (event) has
+    # only ever shown in languages, formats or screens no alert asks for. Versions
+    # with no showtimes seen yet, and undated listings, still count.
+    entries=wanted['movies'].get(preferences.normalized(payload.get('movie','')))
+    if not entries:return False
+    day=payload.get('date','');shows=wanted['profiles'].get(payload.get('event'))
+    return any((dates is None or not day or day in dates) and
+               (not shows or any(preferences.matches(show,probe) for show in shows))
+               for dates,probe in entries)
 
 
 def next_job(db, now):
