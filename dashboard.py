@@ -50,7 +50,6 @@ def status(path):
                 'last_success':float(meta(db,'api_last_success',meta(db,'catalog_last_success','0'))),
                 'recent_alerts':[dict(r) for r in db.execute('SELECT text,created,delivered,attempts,alert_id FROM outbox ORDER BY created DESC LIMIT 12')],
                 'delivered_alerts':db.execute('SELECT count(*) FROM outbox WHERE delivered>0').fetchone()[0],
-                'shows':[json.loads(r[0]) for r in db.execute('SELECT payload FROM sessions WHERE active=1 AND cutoff>? ORDER BY cutoff LIMIT 300',(time.time(),))],
                 'movie_details':[{'title':r['title'],'url':r['url'],'image':meta(db,'poster:'+r['url'])} for r in db.execute('SELECT title,url FROM inventory ORDER BY title')],
                 'notifications_mode':meta(db,'notifications_mode','unknown'),
                 'telegram_setup_test_at':float(meta(db,'telegram_setup_test_at','0')),
@@ -322,6 +321,7 @@ def handler(path, public=False):
                 self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Disposition','attachment; filename="screenwatch-backup.json"');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
             elif urlsplit(self.path).path=='/api/watch':
                 if not public and not self.local_host():self.reply('Local access only.',403);return
+                import row_watch
                 db=connect(path)
                 try:
                     alert_id=parse_qs(urlsplit(self.path).query).get('id',[''])[0]
@@ -333,7 +333,8 @@ def handler(path, public=False):
                         'alerts':alerts,'options':preferences.options(db),'csrf':csrf,
                         'skipped':int(meta(db,'watch_skipped','0')),
                         'completed':selected['completed'] if selected else 0,
-                        'rows_supported':os.environ.get('BMS_ROWS_ENABLED')=='1'}).encode()
+                        'rows_supported':os.environ.get('BMS_ROWS_ENABLED')=='1',
+                        'seat_ready_at':row_watch.source_ready_at(db)}).encode()
                 finally:db.close()
                 content_type='application/json'
             elif self.path=='/api/status':
