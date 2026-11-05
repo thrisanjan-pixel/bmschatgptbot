@@ -1,0 +1,44 @@
+import io,os,tempfile,time,unittest,urllib.request,urllib.error
+from pathlib import Path
+from unittest.mock import patch
+from email.message import Message
+from store import connect
+import http_source as source
+
+class SourceBudgetTests(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.path=str(Path(self.tmp.name)/'state.db');self.db=connect(self.path)
+ def tearDown(self):self.db.close();self.tmp.cleanup()
+ def test_seat_budget_is_shared_across_screens_and_survives_restart(self):
+  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000)
+  self.db.close();self.db=connect(self.path)
+  with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1500)
+  self.assertEqual(error.exception.until,1600)
+  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1600)
+ def test_rolling_hour_cap_counts_every_attempt(self):
+  for n in range(6):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000+n*600)
+  with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4599)
+  self.assertEqual(error.exception.until,4600)
+  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4600)
+ def test_retry_after_persists_and_logs_only_safe_response_fields(self):
+  key=source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx?private=ignored',1000)
+  headers=Message();headers['Retry-After']='33792';headers['CF-Ray']='test-ray';headers['Set-Cookie']='private'
+  with patch('http_source.time.time',return_value=1000):source.finish(self.db,key,429,headers)
+  with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',2000)
+  self.assertEqual(error.exception.until,34792)
+  row=dict(self.db.execute('SELECT * FROM source_requests').fetchone())
+  self.assertEqual(row['endpoint'],'/doTrans.aspx');self.assertEqual(row['cf_ray'],'test-ray');self.assertNotIn('private',str(row))
+ def test_listing_and_seat_hosts_have_independent_budgets(self):
+  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000)
+  source.reserve(self.db,'https://in.bookmyshow.com/api/test',1000)
+  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/test',1059)
+  source.reserve(self.db,'https://in.bookmyshow.com/api/test',1060)
+ def test_budget_denial_sends_no_network_request(self):
+  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',time.time())
+  with patch.dict(os.environ,{'BMS_REQUEST_BUDGET':'1','BMS_DB':self.path}),patch('urllib.request.urlopen') as call:
+   with self.assertRaises(source.SourceWait):source.open_request(urllib.request.Request('https://services-in.bookmyshow.com/doTrans.aspx'))
+  call.assert_not_called()
+ def test_default_retains_standard_client(self):
+  with patch.dict(os.environ,{'BMS_REQUEST_BUDGET':''}),patch('urllib.request.urlopen',return_value=io.BytesIO(b'ok')) as call:
+   self.assertEqual(source.open_request(urllib.request.Request('https://in.bookmyshow.com/test')).read(),b'ok')
+   call.assert_called_once()

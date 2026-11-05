@@ -16,3 +16,13 @@ Railway billing is not connected. The dashboard explicitly reports unknown allow
 A single operator-approved read of the active AMB screening from the Railway container returned HTTP 429. The source response included Retry-After: 33792, Server: cloudflare, Content-Type: application/json; charset=utf-8. This confirms a current source rate limit, rather than only a stale local timer. The response retry was persisted and repeated manual reads were stopped. Temporary Railway SSH credentials were revoked afterward.
 
 Seat polling now targets 60 seconds per screening with at least 30 seconds between cloud layout reads. For 15 minutes after a source restriction expires, targets slow to 120 seconds per screening and at least 60 seconds between reads. The recovery window starts after the restriction ends, so long retry periods do not skip it. These are scheduling targets, not guaranteed successful read intervals. Shared reads remain deduplicated across row alerts. No proxy rotation or automatic cooldown resets are used.
+
+
+## TLS-client comparison — 5 November 2026
+
+A single source-eligible listing request previously refused with HTTP 403 returned HTTP 200 and a validated native showtime response using curl_cffi 0.13.0 with its Safari TLS profile from the same Railway container. That result does not prove that all refusals were fingerprint-related or that the seat rate limit has cleared. The experimental compatible client is not activated in production. The deployed client retains urllib and source refusals are honored. It preserves HTTP status and Retry-After, disables redirects and limits responses to 8 MiB. The old custom User-Agent is omitted so the library can use headers matching its TLS profile. Production metadata reports whether persistent request budgeting is enabled. The existing seat source wait is retained, and fresh row access remains unverified until another permitted read.
+
+
+## Persistent source budgets
+
+Production reserves every source request transactionally in SQLite before dispatch. Seat-layout host requests are limited to six per rolling hour with at least 600 seconds between calls. Listing host requests are limited to sixty per rolling hour with at least sixty seconds between calls; catalogue requests are limited to six per rolling hour. Refused and failed attempts consume the budget. HTTP 429 Retry-After is stored as an absolute not-before time and survives restarts. Budget deferrals are not recorded as failed upstream checks. The request log keeps seven days of host, endpoint path, time, HTTP status, Retry-After and CF-Ray. Cookies, credentials, request bodies and response bodies are not logged. These initial experimental budgets are not claimed to be BookMyShow-approved limits or proof of reliable access.

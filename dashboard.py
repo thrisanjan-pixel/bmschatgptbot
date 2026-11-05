@@ -27,12 +27,15 @@ def status(path):
         if time.time()-heartbeat>90:state='stale'
         from health_watch import hosting_status
         health_issues=json.loads(meta(db,'health_watch_issues','{}'))
-        return {'reliability':{'checks':[dict(r) for r in db.execute('SELECT * FROM check_stats ORDER BY last_attempt DESC LIMIT 100')],
+        return {'reliability':{'requests':[dict(r) for r in db.execute('SELECT at,host,endpoint,status,retry_after,cf_ray,outcome FROM source_requests ORDER BY at DESC LIMIT 12')] if db.execute("SELECT 1 FROM sqlite_master WHERE name='source_requests'").fetchone() else [],'checks':[dict(r) for r in db.execute('SELECT * FROM check_stats ORDER BY last_attempt DESC LIMIT 100')],
                 'issues':health_issues,'health_heartbeat':float(meta(db,'health_watch_heartbeat','0')),
                 'row_heartbeat':float(meta(db,'row_reader_heartbeat','0')),
                 'delivery':dict(db.execute("SELECT count(*) AS pending,coalesce(max(attempts),0) AS attempts,coalesce(min(created),0) AS oldest FROM outbox WHERE delivered=0").fetchone()),
                 'storage':json.loads(meta(db,'storage_usage','{}')),'backup_error':meta(db,'backup_error',''),'last_backup':float(meta(db,'last_backup','0')),'hosting':hosting_status(),'external_monitor_configured':False},'state':state,'heartbeat':heartbeat,'cooldown_until':float(meta(db,'source_cooldown','0')),
                 'seat_cooldown_until':float(meta(db,'seat_cooldown_until','0')),
+                'source_budget_enabled':os.environ.get('BMS_REQUEST_BUDGET')=='1',
+                'seat_budget_until':float(meta(db,'seat_budget_until','0')),
+                'listing_budget_until':float(meta(db,'listing_budget_until','0')),
                 'source_refusals':{kind:json.loads(meta(db,kind+'_last_refusal','{}')) for kind in ('listing','seat')},
                 'background_cooldown_until':float(meta(db,'background_cooldown_until','0')),
                 'listing_check_started':float(meta(db,'listing_check_started','0')),

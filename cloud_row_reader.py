@@ -7,6 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from http_source import open_request
 
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -43,7 +44,7 @@ def _areas(show,timeout):
         'x-app-code':'WEB','x-region-code':'HYD','x-region-slug':'hyderabad',
         'x-platform-code':'DESKTOP-WEB','x-location-selection':'manual'})
     try:
-        with urllib.request.urlopen(request,timeout=timeout) as response:data=json.load(response)['data']
+        with open_request(request,timeout=timeout) as response:data=json.load(response)['data']
     except urllib.error.HTTPError as error:raise SeatHTTPError('Seat metadata', error) from None
     except (urllib.error.URLError,TimeoutError,ValueError,KeyError) as error:
         raise ValueError('Seat metadata unavailable') from error
@@ -156,7 +157,7 @@ def read(show,timeout=20):
         'x-location-selection':'manual','Referer':url}
     request=urllib.request.Request(ENDPOINT,body,headers)
     try:
-        with urllib.request.urlopen(request,timeout=timeout) as response:
+        with open_request(request,timeout=timeout) as response:
             raw=response.read(MAX_LAYOUT_BYTES+1)
             if len(raw)>MAX_LAYOUT_BYTES:raise ValueError('Seat response is too large')
     except urllib.error.HTTPError as error:

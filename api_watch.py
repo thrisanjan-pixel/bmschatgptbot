@@ -11,6 +11,7 @@ import signal
 import threading
 import time
 from api_source import CATALOG,ReadError,end_day,get_json,movies,no_regional_shows,parse,seat_layout_url,show_url,today
+from http_source import SourceWait
 from local_credentials import load
 from store import connect,coverage,emit,enqueue,meta,setmeta,record_check
 from telegram import drain,send
@@ -234,8 +235,12 @@ class Monitor:
                     db.commit();logging.info('%s checked',job['kind'])
                 except Exception as error:
                     db.rollback()
-                    message=record_listing_failure(db,job,error,started,time.time())
-                    db.commit();logging.warning('%s: %s',job['kind'],message)
+                    if isinstance(error,SourceWait):
+                        db.execute('UPDATE jobs SET due=? WHERE id=?',(error.until,job['id']))
+                        setmeta(db,'listing_budget_until',error.until);db.commit()
+                    else:
+                        message=record_listing_failure(db,job,error,started,time.time())
+                        db.commit();logging.warning('%s: %s',job['kind'],message)
                 finally:
                     setmeta(db,'listing_check_started','0');db.commit()
                 self.stop.wait(2)

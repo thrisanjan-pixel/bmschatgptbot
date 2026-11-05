@@ -6,6 +6,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from http_source import open_request
 from zoneinfo import ZoneInfo
 
 IST=ZoneInfo('Asia/Kolkata')
@@ -59,7 +60,7 @@ def get_json(url):
     req=urllib.request.Request(url,headers={'User-Agent':'BMSLocalNotifier/0.1','Accept':'application/json',
         'x-app-code':'WEB','x-region-code':'HYD','x-region-slug':'hyderabad','x-platform-code':'DESKTOP-WEB','x-location-selection':'manual'})
     try:
-        with urllib.request.urlopen(req,timeout=25) as response:return json.load(response)
+        with open_request(req,timeout=25) as response:return json.load(response)
     except urllib.error.HTTPError as error:
         status=error.code
         retry=retry_delay(status,error.headers.get('Retry-After') if error.headers else None)

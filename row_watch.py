@@ -3,6 +3,7 @@ import argparse,json,os,signal,subprocess,sys,time
 from pathlib import Path
 from store import connect,meta,setmeta,emit,record_check
 import watch_preferences as prefs
+from http_source import SourceWait
 
 def schema(db):
     db.execute("CREATE TABLE IF NOT EXISTS row_layouts(show_id TEXT PRIMARY KEY,payload TEXT,checked REAL DEFAULT 0,error TEXT DEFAULT '',due REAL DEFAULT 0)")
@@ -133,6 +134,9 @@ def main():
             ingest(db,show,result)
             record_check(db,'rows',show['id'],now);db.commit()
         except Exception as e:
+            if isinstance(e,SourceWait):
+                db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(e.until,job['show_id']))
+                setmeta(db,'seat_budget_until',e.until);db.commit();continue
             message=(str(e).partition(chr(10))[0] or type(e).__name__)[:200]
             if getattr(e,'diagnostic',None):
                 setmeta(db,'seat_last_refusal',json.dumps({**e.diagnostic,'at':time.time()}))
