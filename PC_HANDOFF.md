@@ -2,6 +2,20 @@
 
 This document transfers project context from a cloud Codex conversation. It is a handoff summary, not a full chat transcript. Read it, README.md and deploy/RAILWAY.md before continuing. The user wants the assistant to perform the work, with minimal repeated questions.
 
+## Current state (5 Nov 2026, Claude Code session)
+
+This section supersedes the older sections below where they conflict. Those sections are kept as history.
+
+- **Hosting:** the old Railway account was removed. Everything now runs on the user's new Railway account: project f7f005f3-75dc-4261-8901-49fc54bd222f, service 18cc5ac2-77e9-4aac-b0d5-d33350495df3, environment production, volume mounted at /data. Public dashboard: https://bmschatgptbot-production.up.railway.app (password protected). Restart policy is ALWAYS.
+- **Railway CLI:** `runtime/railway-cli/node_modules/@railway/cli/bin/railway.exe` (browserless login is done). The deploy folder is a copy of the Dockerfile's files plus requirements-cloud.txt, Dockerfile, railway.toml, static/screenwatch.html and deploy/railway-entrypoint.sh. Run `railway up --ci --detach` from that folder. A variable change needs `railway redeploy --yes` to take effect.
+- **Credentials:** Telegram and dashboard values are set as Railway variables via a PowerShell 5.1 port of APPLY_CREDENTIALS.ps1. The port sets `[Console]::InputEncoding` to UTF-8 without BOM, because a BOM broke the Telegram token. Never print or paste the values.
+- **Verified live:** all three active alerts read seats with HTTP 200, and Telegram delivered alerts with the seat image and the exact show link. One alert (Ramayana, 5 Nov showtime) is paused because that showtime is no longer listed.
+- **Source limits:** request budgets live in http_source.py (services-in 6/hour with a 600 s gap, in.bookmyshow.com 60/hour with a 60 s gap, CDN 6/hour). Deadlines carry across deployments through `BMS_SOURCE_NOT_BEFORE` (http_source.carry_over). Do not try to evade BookMyShow or Cloudflare blocks: no TLS impersonation, proxies, IP rotation or header spoofing.
+- **Code:** main is at 43f9243 on https://github.com/thrisanjan-pixel/bmschatgptbot. PR #1 (railway-fixes) is merged, and the remote branch `railway-fixes` can be deleted. Recent fixes: worker resilience, Telegram fallbacks, dashboard wording and phone usability, deadline carry-over, and real Cinemas counts in API mode. The Cinemas trend fills in after about two 15-minute samples.
+- **Tests on Windows:** `PYTHONPATH=. python runtime/run-checks.py` (needs the tzdata and cryptography packages; run-checks.py is gitignored).
+- **GitHub access:** git push and fetch work. GitHub CLI 2.103.3 is installed at `C:\Program Files\GitHub CLI\gh.exe` but is not signed in. The user enabled the official github plugin on claude.ai. It loads only in a new session, so check PRs from a new session.
+- **Next steps:** confirm the github plugin works in the new session, delete the merged `railway-fixes` branch if the user agrees, and check that the Cinemas trend replaced "Collecting history".
+
 ## Goal and decisions already made
 
 - Build a BookMyShow tracking bot like showting.in/dashboard for **ALL Hyderabad movies and cinemas**, with automatic discovery as listings change. The final ALL instruction supersedes an earlier shortlist discussion; do not ask for cinemas/movies again.
