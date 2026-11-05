@@ -176,7 +176,14 @@ def is_watched(payload,wanted):
 
 def next_job(db, now):
     wanted = wanted_dates(db)
-    movies = [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if is_watched(json.loads(r['payload']),wanted)]
+    jobs = [(r['id'],json.loads(r['payload']),r['checked']) for r in db.execute('SELECT id,payload,checked FROM jobs')]
+    movies = [job_id for job_id,payload,_ in jobs if is_watched(payload,wanted)]
+    # Movies take turns: the alert movie checked longest ago goes next, so a movie
+    # with many date and format listings cannot crowd out one with a single listing.
+    last_checked = {}
+    for job_id,payload,checked in jobs:
+        key = preferences.normalized(payload.get('movie',''))
+        last_checked[key] = max(last_checked.get(key,0),checked or 0)
     slots = ','.join('?' for _ in movies) or "''"
     cooldown_until = float(meta(db, 'source_cooldown', '0'))
     recovering = bool(cooldown_until and 0 <= now - cooldown_until < 60)
@@ -184,14 +191,18 @@ def next_job(db, now):
     # work every turn. Give it at most one turn in three.
     background_recent = now-float(meta(db,'listing_background_attempt','0')) < BACKGROUND_SPACING
     background_paused = float(meta(db, 'background_cooldown_until', '0')) > now
-    return db.execute(f"""WITH eligible AS (
+    rows = db.execute(f"""WITH eligible AS (
         SELECT *, id IN ({slots}) AS watched
         FROM jobs WHERE due<=? AND (expires=0 OR expires>?)
       )
-      SELECT * FROM eligible WHERE watched OR (NOT ? AND NOT ?)
-      ORDER BY CASE WHEN NOT ? AND due>0 AND due<? THEN 0
-        WHEN watched THEN 1 ELSE 2 END,due,checked LIMIT 1""",
-      (*movies, now, now, background_paused, background_recent, recovering or background_recent, now-300)).fetchone()
+      SELECT *, CASE WHEN NOT ? AND due>0 AND due<? THEN 0
+        WHEN watched THEN 1 ELSE 2 END AS rank
+      FROM eligible WHERE watched OR (NOT ? AND NOT ?)""",
+      (*movies, now, now, recovering or background_recent, now-300, background_paused, background_recent)).fetchall()
+    def order(row):
+        turn = last_checked.get(preferences.normalized(json.loads(row['payload']).get('movie','')),0) if row['watched'] else -1
+        return (row['rank'], turn, row['due'], row['checked'])
+    return min(rows, key=order, default=None)
 
 
 def record_listing_failure(db, job, error, started, now):

@@ -44,6 +44,13 @@ class ReliabilityTests(unittest.TestCase):
    job=api_watch.next_job(self.db,1000);order.append(job['id']);self.db.execute('UPDATE jobs SET due=5000 WHERE id=?',(job['id'],));self.db.commit()
   self.assertEqual(order[:3],['alert-date','undated','second'])
   self.assertEqual(api_watch.poll_interval(self.db,{'kind':'discovery','payload':json.dumps({'movie':'Watched','date':'20261110'})}),120)
+ def test_movie_with_many_listings_does_not_starve_another_alert_movie(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Big'],'enabled':True},create=True)
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Small'],'enabled':True},create=True)
+  for i in range(10):self.db.execute('INSERT INTO jobs(id,kind,url,payload,due,checked) VALUES(?,?,?,?,0,0)',('big'+str(i),'discovery','https://example.test/b'+str(i),json.dumps({'movie':'Big','date':''})))
+  self.db.execute("INSERT INTO jobs(id,kind,url,payload,due,checked) VALUES('small','discovery','https://example.test/s',?,990,500)",(json.dumps({'movie':'Small','date':''}),))
+  self.db.execute("UPDATE jobs SET checked=900 WHERE id='big0'");setmeta(self.db,'listing_background_attempt',995);self.db.commit()
+  self.assertEqual(api_watch.next_job(self.db,1000)['id'],'small')
  def test_duplicate_row_rules_share_one_queued_read(self):
   from tests.test_rows import RowTests
   fixture=RowTests();fixture.setUp()
