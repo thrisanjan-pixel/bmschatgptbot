@@ -1,5 +1,5 @@
 """Persistent source request budgets and safe HTTP outcome logging."""
-import os,time,urllib.request,urllib.error
+import math,os,time,urllib.request,urllib.error
 from urllib.parse import urlsplit
 from store import connect
 
@@ -7,6 +7,26 @@ class SourceWait(RuntimeError):
     def __init__(self,until):
         self.until=until
         super().__init__('Waiting for the permitted source request budget')
+
+
+POLICIES={'services-in.bookmyshow.com':(6,600),'in.bookmyshow.com':(60,60),'in-cdn.bmscdn.com':(6,600)}
+
+
+def carry_over(db,raw,now=None):
+    """Apply source deadlines recorded by a previous deployment. Only extends waits."""
+    from store import meta,setmeta
+    now=time.time() if now is None else now
+    schema(db);applied={}
+    for item in filter(None,(part.strip() for part in (raw or '').split(','))):
+        host,_,value=item.partition('=')
+        until=float(value)
+        if host not in POLICIES or not math.isfinite(until):raise ValueError('Invalid carried-over source deadline')
+        if until<=now:continue
+        db.execute('INSERT INTO source_hosts VALUES(?,?) ON CONFLICT(host) DO UPDATE SET not_before=max(not_before,excluded.not_before)',(host,until))
+        if host=='services-in.bookmyshow.com':
+            setmeta(db,'seat_cooldown_until',max(until,float(meta(db,'seat_cooldown_until','0'))))
+        applied[host]=until
+    db.commit();return applied
 
 
 def schema(db):
@@ -18,7 +38,7 @@ def schema(db):
 def reserve(db,url,now=None):
     now=time.time() if now is None else now
     parts=urlsplit(url)
-    policies={'services-in.bookmyshow.com':(6,600),'in.bookmyshow.com':(60,60),'in-cdn.bmscdn.com':(6,600)}
+    policies=POLICIES
     if parts.scheme!='https' or parts.netloc not in policies:raise ValueError('Invalid source host')
     schema(db);db.commit();db.execute('BEGIN IMMEDIATE')
     try:

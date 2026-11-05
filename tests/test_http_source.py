@@ -28,6 +28,17 @@ class SourceBudgetTests(unittest.TestCase):
   self.assertEqual(error.exception.until,34792)
   row=dict(self.db.execute('SELECT * FROM source_requests').fetchone())
   self.assertEqual(row['endpoint'],'/doTrans.aspx');self.assertEqual(row['cf_ray'],'test-ray');self.assertNotIn('private',str(row))
+ def test_carried_over_deadline_blocks_seat_reads_and_only_extends_waits(self):
+  from store import meta
+  applied=source.carry_over(self.db,'services-in.bookmyshow.com=5000,in.bookmyshow.com=500',1000)
+  self.assertEqual(applied,{'services-in.bookmyshow.com':5000.0})
+  self.assertEqual(float(meta(self.db,'seat_cooldown_until')),5000)
+  with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4999)
+  self.assertEqual(error.exception.until,5000)
+  source.carry_over(self.db,'services-in.bookmyshow.com=3000',1000)
+  self.assertEqual(float(meta(self.db,'seat_cooldown_until')),5000)
+  for bad in ('example.com=5000','services-in.bookmyshow.com=nan','services-in.bookmyshow.com=inf'):
+   with self.assertRaises(ValueError):source.carry_over(self.db,bad,1000)
  def test_listing_and_seat_hosts_have_independent_budgets(self):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000)
   source.reserve(self.db,'https://in.bookmyshow.com/api/test',1000)

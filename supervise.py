@@ -25,6 +25,12 @@ def main():
     lock=open(str(db)+'.supervisor.lock','a')
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:raise SystemExit('Development supervisor already running')
+    if os.environ.get('BMS_SOURCE_NOT_BEFORE'):
+        from store import connect
+        from http_source import carry_over
+        state=connect(str(db))
+        try:print(f'Carried over source deadlines: {carry_over(state,os.environ["BMS_SOURCE_NOT_BEFORE"])}',flush=True)
+        finally:state.close()
     stop=threading.Event()
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:stop.set())
     processes={}
