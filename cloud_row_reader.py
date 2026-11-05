@@ -145,7 +145,7 @@ def parse_layout(show,encoded,category_areas):
             'url':seat_layout_url(show)}
 
 
-def read(show,timeout=20):
+def read(show,timeout=20,manual=False):
     url=seat_layout_url(show)
     boundary='----Screenwatch'+secrets.token_hex(12)
     fields={'strAppCode':'WEB','lngTransactionIdentifier':'0','strCommand':'GETSEATLAYOUT',
@@ -160,7 +160,7 @@ def read(show,timeout=20):
         'x-location-selection':'manual','Referer':url}
     request=urllib.request.Request(ENDPOINT,body,headers)
     try:
-        with open_request(request,timeout=timeout) as response:
+        with open_request(request,timeout=timeout,manual=manual) as response:
             raw=response.read(MAX_LAYOUT_BYTES+1)
             if len(raw)>MAX_LAYOUT_BYTES:raise ValueError('Seat response is too large')
     except urllib.error.HTTPError as error:

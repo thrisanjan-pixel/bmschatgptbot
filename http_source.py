@@ -10,6 +10,9 @@ class SourceWait(RuntimeError):
 
 
 POLICIES={'services-in.bookmyshow.com':(60,60),'in.bookmyshow.com':(60,60),'in-cdn.bmscdn.com':(6,600)}
+# Seat loads someone asked for on the page: a small separate budget, so they run at once
+# without taking slots from alert checks. Source cooldowns (429) still apply.
+MANUAL={'services-in.bookmyshow.com':(10,10)}
 
 
 def carry_over(db,raw,now=None):
@@ -33,21 +36,26 @@ def schema(db):
     db.execute('CREATE TABLE IF NOT EXISTS source_hosts(host TEXT PRIMARY KEY,not_before REAL DEFAULT 0)')
     db.execute("CREATE TABLE IF NOT EXISTS source_requests(id INTEGER PRIMARY KEY,at REAL,host TEXT,endpoint TEXT,status INTEGER DEFAULT 0,retry_after TEXT DEFAULT '',cf_ray TEXT DEFAULT '',outcome TEXT DEFAULT 'pending')")
     db.execute('CREATE INDEX IF NOT EXISTS source_request_host_time ON source_requests(host,at)')
+    if 'manual' not in {r[1] for r in db.execute('PRAGMA table_info(source_requests)')}:
+        db.execute('ALTER TABLE source_requests ADD COLUMN manual INTEGER DEFAULT 0')
 
 
-def reserve(db,url,now=None):
+def reserve(db,url,now=None,manual=False):
     now=time.time() if now is None else now
     parts=urlsplit(url)
     policies=POLICIES
     if parts.scheme!='https' or parts.netloc not in policies:raise ValueError('Invalid source host')
     schema(db);db.commit();db.execute('BEGIN IMMEDIATE')
     try:
-        limit,gap=policies[parts.netloc]
+        manual=bool(manual and parts.netloc in MANUAL)
+        limit,gap=(MANUAL if manual else policies)[parts.netloc]
         row=db.execute('SELECT not_before FROM source_hosts WHERE host=?',(parts.netloc,)).fetchone()
-        count,oldest,last=db.execute('SELECT count(*),min(at),max(at) FROM source_requests WHERE host=? AND at>?',(parts.netloc,now-3600)).fetchone()
+        count,oldest=db.execute('SELECT count(*),min(at) FROM source_requests WHERE host=? AND at>? AND manual=?',(parts.netloc,now-3600,int(manual))).fetchone()
+        # Manual reads keep their gap from any read; alert reads only from other alert reads.
+        last=db.execute('SELECT max(at) FROM source_requests WHERE host=? AND at>?'+('' if manual else ' AND manual=0'),(parts.netloc,now-3600)).fetchone()[0]
         until=max(row[0] if row else 0,(last+gap) if last is not None else 0,(oldest+3600) if count>=limit else 0)
         if until>now:raise SourceWait(until)
-        cursor=db.execute('INSERT INTO source_requests(at,host,endpoint) VALUES(?,?,?)',(now,parts.netloc,parts.path))
+        cursor=db.execute('INSERT INTO source_requests(at,host,endpoint,manual) VALUES(?,?,?,?)',(now,parts.netloc,parts.path,int(manual)))
         db.execute('DELETE FROM source_requests WHERE at<?',(now-7*86400,))
         db.commit();return cursor.lastrowid
     except Exception:db.rollback();raise
@@ -65,11 +73,11 @@ def finish(db,request_id,status,headers=None,outcome='response'):
     db.commit()
 
 
-def open_request(request,timeout=25):
+def open_request(request,timeout=25,manual=False):
     if os.environ.get('BMS_REQUEST_BUDGET')!='1':return urllib.request.urlopen(request,timeout=timeout)
     db=connect(os.environ['BMS_DB'])
     try:
-        request_id=reserve(db,request.full_url)
+        request_id=reserve(db,request.full_url,manual=manual)
         try:
             response=urllib.request.urlopen(request,timeout=timeout)
         except urllib.error.HTTPError as error:

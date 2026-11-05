@@ -9,6 +9,9 @@ from http_source import SourceWait
 def schema(db):
     db.execute("CREATE TABLE IF NOT EXISTS row_layouts(show_id TEXT PRIMARY KEY,payload TEXT,checked REAL DEFAULT 0,error TEXT DEFAULT '',due REAL DEFAULT 0)")
     db.execute("CREATE TABLE IF NOT EXISTS row_alert_state(alert_id TEXT PRIMARY KEY,signature TEXT NOT NULL,available TEXT NOT NULL)")
+    # manual=1: someone pressed Load seat rows; it runs at once on the manual budget.
+    if 'manual' not in {r[1] for r in db.execute('PRAGMA table_info(row_layouts)')}:
+        db.execute('ALTER TABLE row_layouts ADD COLUMN manual INTEGER DEFAULT 0')
 
 def request(db,show_id):
     schema(db)
@@ -17,6 +20,7 @@ def request(db,show_id):
     now=time.time()
     interval,_=poll_policy(db,now,os.environ.get('BMS_PUBLIC')=='1')
     db.execute("INSERT INTO row_layouts(show_id,payload,due) VALUES(?,'{}',?) ON CONFLICT(show_id) DO UPDATE SET due=CASE WHEN checked<? AND (due<=? OR error='') THEN excluded.due ELSE due END",(show_id,now,now-interval,now))
+    db.execute('UPDATE row_layouts SET manual=1 WHERE show_id=? AND due>0 AND due<=?',(show_id,now))
     db.commit()
 
 def source_ready_at(db):
@@ -39,7 +43,8 @@ def get(db,show_id):
     if not row:return {'show_id':show_id,'checked':0,'error':'','data':{},'due':0,'next_read':0}
     result={**dict(row),'data':json.loads(row['payload'])}
     # Tell the page when a queued read can really start, so it can show the wait.
-    result['next_read']=max(row['due'],source_ready_at(db)) if row['due'] else 0
+    ready=float(meta(db,'seat_cooldown_until','0')) if row['manual'] else source_ready_at(db)
+    result['next_read']=max(row['due'],ready) if row['due'] else 0
     return result
 
 def run_reader(show,timeout=75):
@@ -109,7 +114,7 @@ def ingest(db,show,result):
                 db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,rule['id']))
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
                     (rule['id'],signature,json.dumps(sorted(current))))
-    db.execute('UPDATE row_layouts SET payload=?,checked=?,error=?,due=0 WHERE show_id=?',(json.dumps(result),time.time(),'',show['id']));db.commit()
+    db.execute('UPDATE row_layouts SET payload=?,checked=?,error=?,due=0,manual=0 WHERE show_id=?',(json.dumps(result),time.time(),'',show['id']));db.commit()
 
 def schedule_active(db,now,interval=30):
     if meta(db,'notifications_paused','0')=='1':return
@@ -147,21 +152,27 @@ def queue(db,now=None,spacing=60):
     schema(db);now=time.time() if now is None else now
     order,params,active=queue_order(db,now)
     rows=db.execute(f"""SELECT r.show_id,r.due,r.checked,s.payload FROM row_layouts r LEFT JOIN sessions s ON s.id=r.show_id
-      WHERE r.due>0 ORDER BY CASE WHEN r.due<=? THEN 0 ELSE 1 END,{order}""",(now,*params)).fetchall()
-    slot=max(now,source_ready_at(db));items=[]
+      WHERE r.due>0 ORDER BY CASE WHEN r.manual=1 AND r.due<=? THEN 0 WHEN r.due<=? THEN 1 ELSE 2 END,{order}""",(now,now,*params)).fetchall()
+    slot=max(now,source_ready_at(db));items=[];instant=manual_job(db,now)
     for row in rows:
         show=json.loads(row['payload'] or '{}')
-        start=max(slot,row['due']);slot=start+spacing
+        if instant and row['show_id']==instant['show_id']:start=now
+        else:start=max(slot,row['due']);slot=start+spacing
         items.append({'show_id':row['show_id'],'movie':show.get('movie',''),'venue':show.get('venue',''),
             'date':show_date(show),'time':show.get('time',''),'alert':row['show_id'] in active,
             'refresh':bool(row['checked']),'eta':start})
     return items
 
+def manual_job(db,now):
+    """A Load seat rows request that may run now, outside the alert queue."""
+    if float(meta(db,'seat_cooldown_until','0'))>now:return None
+    return db.execute('SELECT * FROM row_layouts WHERE manual=1 AND due>0 AND due<=? ORDER BY due LIMIT 1',(now,)).fetchone()
+
 def dequeue(db,show_id):
     """Drop a queued seat read. Alert showtimes keep polling until their alert is paused."""
     schema(db)
     if show_id in queue_order(db,time.time())[2]:raise ValueError('This showtime belongs to an active alert. Pause the alert to stop its seat checks.')
-    db.execute('UPDATE row_layouts SET due=0 WHERE show_id=?',(show_id,));db.commit()
+    db.execute('UPDATE row_layouts SET due=0,manual=0 WHERE show_id=?',(show_id,));db.commit()
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--db',required=True);args=parser.parse_args()
@@ -187,19 +198,20 @@ def step(db):
     interval,spacing=poll_policy(db,now,cloud)
     schedule_active(db,now,interval)
     setmeta(db,'row_reader_heartbeat',now);db.commit()
-    job=next_job(db,now)
+    job=manual_job(db,now) if cloud else None;manual=bool(job)
+    job=job or next_job(db,now)
     if not job:time.sleep(1);return
     row=db.execute('SELECT payload FROM sessions WHERE id=? AND cutoff>?',(job['show_id'],now)).fetchone()
     if not row:
-        db.execute("UPDATE row_layouts SET due=0,error='Showtime has expired' WHERE show_id=?",(job['show_id'],));db.commit();return
+        db.execute("UPDATE row_layouts SET due=0,manual=0,error='Showtime has expired' WHERE show_id=?",(job['show_id'],));db.commit();return
     show=json.loads(row[0])
     try:
         if cloud:
             # Persist request spacing so restarting cannot release a burst.
-            setmeta(db,'seat_next_request_at',now+spacing)
+            if not manual:setmeta(db,'seat_next_request_at',now+spacing)
             db.commit()
             from cloud_row_reader import read
-            result=read(show)
+            result=read(show,manual=True) if manual else read(show)
         else:
             run=run_reader(show)
             payload=json.loads(run.stdout)
@@ -211,6 +223,8 @@ def step(db):
         # Discard any partial alert state from a failed ingest before recording the failure.
         db.rollback()
         if isinstance(e,SourceWait):
+            # Manual budget used up: the load joins the normal queue instead.
+            if manual:db.execute('UPDATE row_layouts SET manual=0 WHERE show_id=?',(job['show_id'],));db.commit();return
             db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(e.until,job['show_id']))
             setmeta(db,'seat_budget_until',e.until);db.commit();return
         message=(str(e).partition(chr(10))[0] or type(e).__name__)[:200]
@@ -222,6 +236,6 @@ def step(db):
             setmeta(db,'seat_cooldown_until',retry_at)
             setmeta(db,'seat_last_rate_limit',time.time())
         record_check(db,'rows',show['id'],now,message)
-        db.execute('UPDATE row_layouts SET error=?,due=? WHERE show_id=?',(message,retry_at,job['show_id']))
+        db.execute('UPDATE row_layouts SET error=?,due=?,manual=0 WHERE show_id=?',(message,retry_at,job['show_id']))
         db.commit()
 if __name__=='__main__':main()

@@ -24,7 +24,7 @@ class RowTests(unittest.TestCase):
  def test_new_showtime_jumps_queue_and_reports_source_wait(self):
   now=time.time()
   self.db.execute("INSERT INTO row_layouts(show_id,payload,checked,due) VALUES('alert-show','{}',?,?)",(now-900,now-800))
-  self.db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(now-10,self.show['id']));self.db.commit()
+  self.db.execute('UPDATE row_layouts SET due=?,manual=0 WHERE show_id=?',(now-10,self.show['id']));self.db.commit()
   self.assertEqual(row_watch.next_job(self.db,now)['show_id'],self.show['id'])
   setmeta(self.db,'seat_budget_until',now+300);self.db.commit()
   self.assertIsNone(row_watch.next_job(self.db,now))
@@ -46,6 +46,19 @@ class RowTests(unittest.TestCase):
   with self.assertRaises(ValueError):row_watch.dequeue(self.db,self.show['id'])
   row_watch.dequeue(self.db,'browsed')
   self.assertEqual([q['show_id'] for q in row_watch.queue(self.db,now)],[self.show['id']])
+ def test_load_seat_rows_runs_at_once_outside_the_alert_queue(self):
+  now=time.time();setmeta(self.db,'seat_next_request_at',now+50);self.db.commit()
+  self.assertIsNone(row_watch.next_job(self.db,now+1))
+  self.assertEqual(row_watch.manual_job(self.db,now+1)['show_id'],self.show['id'])
+  self.assertLess(row_watch.get(self.db,self.show['id'])['next_read'],now+5)
+  with patch.dict(os.environ,{'BMS_PUBLIC':'1'}),patch('cloud_row_reader.read',return_value=copy.deepcopy(self.result)) as read:
+   row_watch.step(self.db)
+  self.assertTrue(read.call_args.kwargs['manual'])
+  self.assertEqual(float(meta(self.db,'seat_next_request_at')),now+50)
+  self.assertEqual(self.db.execute('SELECT manual,due FROM row_layouts WHERE show_id=?',(self.show['id'],)).fetchone()[:],(0,0))
+  setmeta(self.db,'seat_cooldown_until',time.time()+600);self.db.commit()
+  self.db.execute('UPDATE row_layouts SET due=?,manual=1',(time.time(),));self.db.commit()
+  self.assertIsNone(row_watch.manual_job(self.db,time.time()+1))
  def test_retry_now_clears_saved_seat_waits(self):
   now=time.time()
   for key in ('seat_cooldown_until','seat_budget_until','seat_next_request_at'):setmeta(self.db,key,now+5000)
