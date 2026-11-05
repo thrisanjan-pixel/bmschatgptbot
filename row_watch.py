@@ -126,6 +126,8 @@ def main():
             record_check(db,'rows',show['id'],now);db.commit()
         except Exception as e:
             message=(str(e).partition(chr(10))[0] or type(e).__name__)[:200]
+            if getattr(e,'diagnostic',None):
+                setmeta(db,'seat_last_refusal',json.dumps({**e.diagnostic,'at':time.time()}))
             retry_at=time.time()+300
             if getattr(e,'status',0)==429:
                 retry_at=time.time()+max(300,e.retry)

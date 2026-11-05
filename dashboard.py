@@ -33,6 +33,7 @@ def status(path):
                 'delivery':dict(db.execute("SELECT count(*) AS pending,coalesce(max(attempts),0) AS attempts,coalesce(min(created),0) AS oldest FROM outbox WHERE delivered=0").fetchone()),
                 'backup_error':meta(db,'backup_error',''),'last_backup':float(meta(db,'last_backup','0')),'hosting':hosting_status(),'external_monitor_configured':False},'state':state,'heartbeat':heartbeat,'cooldown_until':float(meta(db,'source_cooldown','0')),
                 'seat_cooldown_until':float(meta(db,'seat_cooldown_until','0')),
+                'source_refusals':{kind:json.loads(meta(db,kind+'_last_refusal','{}')) for kind in ('listing','seat')},
                 'background_cooldown_until':float(meta(db,'background_cooldown_until','0')),
                 'listing_check_started':float(meta(db,'listing_check_started','0')),
                 'cooldown_started':float(meta(db,'source_cooldown_started','0')),

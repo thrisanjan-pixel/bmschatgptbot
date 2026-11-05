@@ -10,7 +10,7 @@ import urllib.request
 
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from api_source import retry_delay, seat_layout_url
+from api_source import retry_delay, seat_layout_url, refusal_details
 
 ENDPOINT='https://services-in.bookmyshow.com/doTrans.aspx'
 # This key is published in BookMyShow's seat-layout client bundle. If it changes,
@@ -26,6 +26,7 @@ class CategoryMappingError(ValueError):
 class SeatHTTPError(ValueError):
     def __init__(self, source, error):
         super().__init__(f'{source} HTTP {error.code}')
+        self.diagnostic = refusal_details(error)
         self.status = error.code
         self.retry = retry_delay(error.code, error.headers.get('Retry-After') if error.headers else None)
         error.close()

@@ -31,10 +31,19 @@ def nodes(value):
     elif isinstance(value,list):
         for child in value:yield from nodes(child)
 
+def refusal_details(error):
+    # Never persist cookies, authorization headers or response bodies.
+    allowed=('Retry-After','Server','Content-Type','CF-Mitigated')
+    headers={key: str(error.headers.get(key))[:160] for key in allowed
+             if error.headers and error.headers.get(key) is not None}
+    return {'status':error.code,'headers':headers}
+
+
 def retry_delay(status, header=None):
     minimum = {403: 180}.get(status, 60 if 500 <= status <= 599 else 300)
     if not header:
         return minimum
+    header=header.strip()
     if header.isdigit():
         return max(minimum, int(header))
     try:
@@ -53,9 +62,11 @@ def get_json(url):
         with urllib.request.urlopen(req,timeout=25) as response:return json.load(response)
     except urllib.error.HTTPError as error:
         status=error.code
-        retry=retry_delay(status,error.headers.get('Retry-After'))
+        retry=retry_delay(status,error.headers.get('Retry-After') if error.headers else None)
+        failure=ReadError(f'Source HTTP {status}',status,retry)
+        failure.diagnostic=refusal_details(error)
         error.close()
-        raise ReadError(f'Source HTTP {status}',status,retry) from None
+        raise failure from None
     except (OSError,ValueError,urllib.error.URLError):raise ReadError('Source connection or JSON error') from None
 
 def movies(data):

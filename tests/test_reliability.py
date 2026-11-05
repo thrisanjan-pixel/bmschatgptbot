@@ -92,3 +92,40 @@ class ReliabilityTests(unittest.TestCase):
    self.assertEqual(rule['health']['next_check'],now+36000)
    self.assertEqual(rule['health']['retry_until'],now+36000)
   finally:f.tearDown()
+
+ def test_background_request_budget_applies_even_when_no_alert_is_due(self):
+  self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',('background','movie','https://example.test/other',json.dumps({'movie':'Other'}),100))
+  setmeta(self.db,'listing_background_attempt',990);self.db.commit()
+  self.assertIsNone(api_watch.next_job(self.db,1000))
+  self.assertEqual(api_watch.next_job(self.db,1051)['id'],'background')
+
+ def test_row_alert_does_not_promote_movie_discovery_to_listing_watch(self):
+  from tests.test_rows import RowTests
+  f=RowTests();f.setUp()
+  try:
+   f.configure()
+   self.assertEqual(api_watch.watched_movies(f.db),[])
+   job={'kind':'discovery','payload':json.dumps({'movie':'Movie'})}
+   self.assertEqual(api_watch.poll_interval(f.db,job),120)
+  finally:f.tearDown()
+
+ def test_three_denied_jobs_cannot_pause_other_movies(self):
+  from api_source import ReadError
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Denied','Other'],'enabled':True})
+  for i in range(3):
+   key='denied'+str(i)
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(key,'movie','https://example.test/'+key,json.dumps({'movie':'Denied'}),1))
+   job=self.db.execute('SELECT * FROM jobs WHERE id=?',(key,)).fetchone()
+   api_watch.record_listing_failure(self.db,job,ReadError('Source HTTP 403',403,180),1000+i,1000+i)
+  self.assertEqual(float(api_watch.meta(self.db,'source_cooldown','0')),0)
+  api_watch.record_listing_failure(self.db,job,ReadError('Source HTTP 429',429,600),1010,1010)
+  self.assertEqual(float(api_watch.meta(self.db,'source_cooldown','0')),1610)
+
+ def test_refusal_diagnostics_never_include_cookies_or_body(self):
+  from api_source import get_json,ReadError,retry_delay
+  import io,urllib.error
+  error=urllib.error.HTTPError('https://in.bookmyshow.com/test',429,'limited',{'Retry-After':' 600 ','Set-Cookie':'private','Server':'test'},io.BytesIO(b'private body'))
+  with patch('api_source.urllib.request.urlopen',side_effect=error):
+   with self.assertRaises(ReadError) as failure:get_json('https://in.bookmyshow.com/test')
+  self.assertEqual(failure.exception.retry,600)
+  self.assertEqual(failure.exception.diagnostic,{'status':429,'headers':{'Retry-After':' 600 ','Server':'test'}})
