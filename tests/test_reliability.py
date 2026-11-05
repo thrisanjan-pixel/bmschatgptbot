@@ -147,3 +147,16 @@ class ReliabilityTests(unittest.TestCase):
 
  def test_normal_seat_policy_is_conservative_without_a_previous_restriction(self):
   self.assertEqual(row_watch.poll_policy(self.db,1000),(60,30))
+
+
+class HealthScalingTests(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.db=connect(str(Path(self.tmp.name)/'state.db'))
+ def tearDown(self):self.db.close();self.tmp.cleanup()
+ def test_row_alert_threshold_scales_and_waits_out_cooldown(self):
+  now=100000.0;setmeta(self.db,'health_watch_started',1);setmeta(self.db,'city_heartbeat',now);setmeta(self.db,'row_reader_heartbeat',now)
+  rules=[{'preferences':{**prefs.defaults(),'row_show':f's{i}','movies':['M']},'health':{'last_success':now-1000,'error':''},'created':0} for i in range(5)]
+  with patch.object(prefs,'active',return_value=rules):
+   self.assertEqual(health_watch.problems(self.db,now),{})
+   rules[0]['health']['last_success']=now-3000;self.assertIn('source:s0',health_watch.problems(self.db,now))
+   setmeta(self.db,'seat_cooldown_until',now+500);self.assertEqual(health_watch.problems(self.db,now),{})

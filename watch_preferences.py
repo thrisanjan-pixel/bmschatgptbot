@@ -71,11 +71,12 @@ def rules(db):
                 meta(db, 'waiting_show:'+r['id']) == '1' for r in jobs
             )
         now=time.time()
+        row_count=db.execute("SELECT count(*) FROM alerts WHERE json_extract(payload,'$.enabled')=1 AND coalesce(json_extract(payload,'$.row_show'),'')<>''").fetchone()[0]
         cooldown=float(meta(db,'seat_cooldown_until' if p['row_show'] else 'source_cooldown','0'))
         budget=float(meta(db,'seat_budget_until' if p['row_show'] else 'listing_budget_until','0'))
         if max(cooldown,budget)>now:due=max(due,cooldown,budget)
         delivery=db.execute('SELECT count(*),coalesce(max(attempts),0) FROM outbox WHERE alert_id=? AND delivered=0',(rule['id'],)).fetchone()
-        health='Source unavailable' if error else 'Waiting for request budget' if budget>now else 'Checks delayed' if checked and time.time()-checked>180 else 'Watching seats' if p['row_show'] else 'Waiting for bookings' if waiting_for_bookings else 'Watching availability' if checked else 'Waiting for listings'
+        health='Source unavailable' if error else 'Waiting for request budget' if budget>now else 'Checks delayed' if checked and cooldown<=now and time.time()-checked>(max(180,240*row_count) if p['row_show'] else 180) else 'Watching seats' if p['row_show'] else 'Waiting for bookings' if waiting_for_bookings else 'Watching availability' if checked else 'Waiting for listings'
         rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'retry_until':max(cooldown,budget) if max(cooldown,budget)>now else 0,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
         keys=[p['row_show']] if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
         source='rows' if p['row_show'] else 'listings'
@@ -125,7 +126,7 @@ def prime_availability(db):
                 try:link=seat_layout_url(show)
                 except Exception:continue
                 if opened:found.append((show,opened,link))
-            if not found and not any(matches(show,p) for show in shows):continue
+            # Nothing to say yet, but still record state so it is not rescanned every second.
             if found and not db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone():
                 lines=[]
                 for show,opened,link in found[:3]:
@@ -238,7 +239,8 @@ def save(db,data,alert_id=None,create=False):
         if p['enabled'] and not layout['checked']:raise ValueError('Load the seat layout once before enabling row alerts')
         db.commit()
     now=time.time();db.execute('BEGIN IMMEDIATE')
-    archive_pending(db,alert_id)
+    # Only turning an alert off drops its queue; ordinary edits of an enabled alert keep it.
+    if not p['enabled']:archive_pending(db,alert_id)
     db.execute('''INSERT INTO alerts(id,payload,created,updated) VALUES(?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated=excluded.updated,completed=0''',
         (alert_id,json.dumps(p),now,now))

@@ -107,3 +107,26 @@ class PreferenceTests(unittest.TestCase):
             with urllib.request.urlopen(url) as r:self.assertEqual(json.load(r)['preferences']['movies'],['Test Movie'])
             with urllib.request.urlopen(url+'?new=1') as r:self.assertEqual(json.load(r)['preferences']['movies'],[])
         finally:server.shutdown();server.server_close();thread.join()
+
+
+class SaveAndPrimeTests(unittest.TestCase):
+    setUp=fixtures.ApiTests.setUp
+    tearDown=fixtures.ApiTests.tearDown
+    def test_ordinary_save_keeps_queue_but_disable_archives_it(self):
+        alert=prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'enabled':True})
+        emit(self.db,'q','Queued',alert_id=alert);self.db.commit()
+        prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'enabled':True,'interval_minutes':30},alert)
+        self.assertEqual(self.db.execute('select count(*) from outbox where delivered=0').fetchone()[0],1)
+        prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'enabled':False},alert)
+        self.assertEqual(self.db.execute('select count(*) from outbox where delivered=0').fetchone()[0],0)
+    def test_prime_records_state_when_no_show_matches(self):
+        prefs.save(self.db,{**prefs.defaults(),'movies':['No Such Film'],'enabled':True})
+        prefs.prime_availability(self.db)
+        self.assertEqual(self.db.execute('select count(*) from alert_initial_state').fetchone()[0],1)
+    def test_checks_delayed_honours_source_cooldown(self):
+        import time
+        prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'enabled':True})
+        self.db.execute('INSERT INTO jobs(id,kind,url,payload,checked) VALUES(?,?,?,?,?)',('j','discovery','u',json.dumps({'movie':'Test Movie'}),time.time()-300));self.db.commit()
+        self.assertEqual(prefs.rules(self.db)[0]['health']['label'],'Checks delayed')
+        setmeta(self.db,'source_cooldown',time.time()+600);self.db.commit()
+        self.assertNotEqual(prefs.rules(self.db)[0]['health']['label'],'Checks delayed')

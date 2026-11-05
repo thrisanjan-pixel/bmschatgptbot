@@ -1,4 +1,5 @@
 """Credentials are read at runtime and never included in error messages."""
+import datetime as dt
 import json
 import logging
 import os
@@ -94,6 +95,8 @@ def send(text, photo=None):
     except DeliveryError as error:
         # Rate limits and missing setup apply to every method; honour them.
         if error.code == 429 or not configured():raise
+        # No HTTP status (timeout) or 5xx: Telegram may have accepted the photo, so retry the photo, never send text too.
+        if not 400 <= error.code < 500:raise
         logging.warning('Telegram photo failed (HTTP %s); sending text only', error.code)
         request('sendMessage', message)
 
@@ -111,12 +114,20 @@ def drain(db, commit=True, system_only=False):
     row = db.execute("SELECT * FROM outbox WHERE delivered=0 AND next_try<=?"+(" AND alert_id='__health__'" if system_only else "")+" ORDER BY CASE WHEN alert_id='__health__' THEN 0 ELSE 1 END,created LIMIT 1", (now,)).fetchone()
     if not row:
         return None
+    text = row['text']
+    if now - row['created'] > 600:
+        # Queued while alerts were switched off or Telegram was down; say so instead of looking current.
+        ist = dt.datetime.fromtimestamp(row['created'], dt.timezone(dt.timedelta(hours=5, minutes=30)))
+        text = f"Delayed alert from {ist:%H:%M} IST (may be out of date)\n\n" + text
+    # Release the write lock while talking to Telegram; a crash before the mark below resends, as before.
+    db.commit()
     try:
-        send(row['text'], row['photo'])
+        send(text, row['photo'])
     except Exception as error:
         if not isinstance(error, DeliveryError):error = DeliveryError(reason=type(error).__name__)
         logging.warning('Telegram delivery failed: HTTP %s, retry in %ss, attempt %s%s', error.code, error.retry,
                         row['attempts']+1, ' ('+error.reason+')' if error.reason else '')
+        db.execute('BEGIN IMMEDIATE')
         if permanent(error) and row['attempts']+1 >= FAILED_ATTEMPTS:
             # Keep the text for inspection, but stop it holding back later alerts for this rule.
             from watch_preferences import archive_message
@@ -125,7 +136,9 @@ def drain(db, commit=True, system_only=False):
             db.execute('UPDATE outbox SET attempts=attempts+1,next_try=? WHERE id=?', (now+max(30,error.retry),row['id']))
         delivered_id=None
     else:
-        db.execute('UPDATE outbox SET delivered=? WHERE id=?', (time.time(), row['id']))
-        delivered_id=row['alert_id'] if 'alert_id' in row.keys() else ''
+        db.execute('BEGIN IMMEDIATE')
+        # The alert may have been paused or deleted (message archived) while sending.
+        marked = db.execute('UPDATE outbox SET delivered=? WHERE id=? AND delivered=0', (time.time(), row['id'])).rowcount
+        delivered_id=(row['alert_id'] if 'alert_id' in row.keys() else '') if marked else None
     if commit:db.commit()
     return delivered_id

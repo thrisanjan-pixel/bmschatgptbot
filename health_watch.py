@@ -21,16 +21,20 @@ def problems(db,now):
  row_rules=[r for r in rules if r['preferences']['row_show']]
  if row_rules and now-float(meta(db,'row_reader_heartbeat','0'))>120:issues['row-worker']='The seat reader has stopped reporting its heartbeat.'
  rate_limited_movies=set()
+ # Row reads share one 120 s gap and a 30/hour budget, so the quiet period grows with the number of row shows.
+ limit=max(900,240*len(row_rules))
+ cooling=max(float(meta(db,k,'0')) for k in ('seat_cooldown_until','seat_budget_until'))>now
  for rule in rules:
   h=rule['health'];last=h['last_success'] or rule['created']
-  if now-last>900:
+  if now-last>(limit if rule['preferences']['row_show'] else 900):
+   if rule['preferences']['row_show'] and cooling:continue
    if rule['preferences']['row_show'] and h['error'] in ('Seat source HTTP 429','Seat metadata HTTP 429'):
     rate_limited_movies.update(rule['preferences']['movies'])
     continue
    target = rule['preferences']['row_show'] or '|'.join(sorted(prefs.normalized(m) for m in rule['preferences']['movies']))
    key='source:'+target
    detail=' Latest check: '+h['error']+'.' if h['error'] else ''
-   issues[key]='No successful check for '+', '.join(rule['preferences']['movies'])+' in over 15 minutes.'+detail
+   issues[key]='No successful check for '+', '.join(rule['preferences']['movies'])+' in over '+str(int((limit if rule['preferences']['row_show'] else 900)/60))+' minutes.'+detail
  if rate_limited_movies:
   issues['seat-rate-limit']='BookMyShow rate-limited seat checks. No successful seat check in over 15 minutes for '+', '.join(sorted(rate_limited_movies))+'.'
  pending=db.execute('SELECT min(created),max(attempts) FROM outbox WHERE delivered=0 AND alert_id<>?',('__health__',)).fetchone()

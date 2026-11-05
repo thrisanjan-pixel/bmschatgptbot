@@ -2,6 +2,7 @@
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -75,12 +76,13 @@ def ingest(db,job,data):
                     group=groups.setdefault(show['venue_code'],{'show':show,'lines':[]})
                     group['lines'].append((change,seat_layout_url(show)))
             if groups:changes[rule['id']]=(rule,groups)
+    deferred=False
     if previous!=current:
-        revision=int(meta(db,'revision:'+key,'0'))+1;setmeta(db,'revision:'+key,revision)
+        revision=int(meta(db,'revision:'+key,'0'))+1
         if changes:
             date=dt.datetime.strptime(result['day'],'%Y%m%d').strftime('%d %b %Y')
             for alert_id,(rule,groups) in changes.items():
-                prefs=rule['preferences']
+                prefs=rule['preferences'];messages=[]
                 for venue,group in groups.items():
                     show=group['show']
                     heading=f"🎬 {title}\n{show['language']}\n📅 {date}\n📍 {show['venue']}\n\n"
@@ -90,14 +92,21 @@ def ingest(db,job,data):
                         if len(chunks[-1])+len(block)>2800:chunks.append('')
                         chunks[-1]+=block
                     for index,chunk in enumerate(chunks):
-                        now=time.time()
-                        pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(alert_id,)).fetchone()
-                        if now-rule['last_alert']>=prefs['interval_minutes']*60 and (not pending or prefs['interval_minutes']==0):
-                            emit(db,f'{alert_id}:{key}:{revision}:{venue}:{index}',heading+chunk,alert_id=alert_id)
-                            db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,alert_id))
-                            rule['last_alert']=now
-                        else:setmeta(db,'watch_skipped',int(meta(db,'watch_skipped','0'))+1)
-    db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',(key,json.dumps(current)))
+                        text=heading+chunk;messages.append((f'{alert_id}:{key}:{revision}:{venue}:{index}:'+hashlib.sha1(text.encode()).hexdigest()[:8],text))
+                # Already queued by an earlier deferred pass of this same baseline.
+                if all(db.execute('SELECT 1 FROM outbox WHERE id=?',(hashlib.sha256(event.encode()).hexdigest(),)).fetchone() for event,_ in messages):continue
+                now=time.time()
+                pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(alert_id,)).fetchone()
+                # The interval spaces separate ingests; one ingest's changes go out together.
+                if now-rule['last_alert']>=prefs['interval_minutes']*60 and (not pending or prefs['interval_minutes']==0):
+                    for event,text in messages:emit(db,event,text,alert_id=alert_id)
+                    db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,alert_id))
+                    rule['last_alert']=now
+                else:
+                    # Keep the old baseline so the unsent changes are found again next poll.
+                    deferred=True;setmeta(db,'watch_skipped',int(meta(db,'watch_skipped','0'))+1)
+        if not deferred:setmeta(db,'revision:'+key,revision)
+    if not deferred:db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',(key,json.dumps(current)))
     for old in db.execute('SELECT id,payload FROM sessions WHERE active=1').fetchall():
         show=json.loads(old['payload'])
         if show['event']==args['event'] and show['date']==result['day'] and old['id'] not in current:

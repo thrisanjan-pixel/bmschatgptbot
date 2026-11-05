@@ -79,3 +79,26 @@ class ApiTests(unittest.TestCase):
         bad=response();bad['data']['showtimeWidgets'][0]['data'][0]['data'][0]['showtimes'][0]['additionalData']['categories']=[]
         with self.assertRaises(ReadError):ingest(self.db,self.job,bad)
         self.assertEqual(coverage(self.db)['sessions'],1)
+
+
+class ThrottleTests(unittest.TestCase):
+    setUp=ApiTests.setUp
+    tearDown=ApiTests.tearDown
+    def test_one_ingest_delivers_every_cinema_and_interval_defers_the_next(self):
+        from watch_preferences import save
+        save(self.db,{**defaults(),'movies':['Test Movie'],'enabled':True,'once':False,'interval_minutes':10})
+        base=response();cards=base['data']['showtimeWidgets'][0]['data'][0]['data']
+        for code in ('PVR','ART'):
+            card=copy.deepcopy(cards[0]);card['additionalData']={'venueCode':code,'venueName':code+' Cinema'}
+            card['header']['redirectionUrl']=f'https://in.bookmyshow.com/cinemas/hyderabad/{code.lower()}/buytickets/{code}/{DAY}';cards.append(card)
+        ingest(self.db,self.job,base)
+        changed=copy.deepcopy(base);cs=changed['data']['showtimeWidgets'][0]['data'][0]['data']
+        cs[1]['showtimes'][0]['additionalData']['sessionId']='2';cs[2]['showtimes'][0]['additionalData']['sessionId']='3'
+        ingest(self.db,self.job,changed)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM outbox').fetchone()[0],2)
+        later=copy.deepcopy(changed);later['data']['showtimeWidgets'][0]['data'][0]['data'][0]['showtimes'][0]['additionalData']['sessionId']='4'
+        self.db.execute('UPDATE outbox SET delivered=1');self.db.commit()
+        ingest(self.db,self.job,later)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM outbox').fetchone()[0],2)
+        self.db.execute('UPDATE alerts SET last_alert=0');ingest(self.db,self.job,later)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM outbox').fetchone()[0],3)
