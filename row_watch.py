@@ -133,8 +133,9 @@ def next_job(db,now):
     slots=','.join('?' for _ in active) or "''"
     # A showtime nobody has seen yet (someone is waiting on the page) goes first;
     # routine alert refreshes would otherwise take every slot of the source budget.
+    # An alert showtime overdue by 4 minutes goes first, so browsing cannot starve it.
     return db.execute(f"""SELECT * FROM row_layouts WHERE due>0 AND due<=?
-      ORDER BY CASE WHEN checked=0 AND error='' THEN 0 WHEN due<? THEN 1 WHEN show_id IN ({slots}) THEN 2 ELSE 3 END,due LIMIT 1""",(now,now-90,*active)).fetchone()
+      ORDER BY CASE WHEN show_id IN ({slots}) AND due<? THEN 0 WHEN checked=0 AND error='' THEN 1 WHEN due<? THEN 2 WHEN show_id IN ({slots}) THEN 3 ELSE 4 END,due LIMIT 1""",(now,*active,now-240,now-90,*active)).fetchone()
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--db',required=True);args=parser.parse_args()

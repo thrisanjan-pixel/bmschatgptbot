@@ -29,6 +29,13 @@ class RowTests(unittest.TestCase):
   setmeta(self.db,'seat_budget_until',now+300);self.db.commit()
   self.assertIsNone(row_watch.next_job(self.db,now))
   self.assertEqual(row_watch.get(self.db,self.show['id'])['next_read'],now+300)
+ def test_overdue_alert_showtime_beats_new_showtimes(self):
+  self.configure();now=time.time()
+  self.db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(now-300,self.show['id']))
+  self.db.execute("INSERT INTO row_layouts(show_id,payload,due) VALUES('browsed','{}',?)",(now-10,));self.db.commit()
+  self.assertEqual(row_watch.next_job(self.db,now)['show_id'],self.show['id'])
+  self.db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(now-60,self.show['id']));self.db.commit()
+  self.assertEqual(row_watch.next_job(self.db,now)['show_id'],'browsed')
  def test_retry_now_clears_saved_seat_waits(self):
   now=time.time()
   for key in ('seat_cooldown_until','seat_budget_until','seat_next_request_at'):setmeta(self.db,key,now+5000)
