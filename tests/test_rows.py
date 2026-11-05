@@ -88,6 +88,30 @@ class RowTests(unittest.TestCase):
   self.assertEqual(row_watch.get(self.db,self.show['id'])['data']['new'],[])
   first['available'].append({'row_id':'Gold / A','seat':'3'});row_watch.ingest(self.db,self.show,first)
   self.assertEqual(row_watch.get(self.db,self.show['id'])['data']['new'],[{'row_id':'Gold / A','seat':'3'}])
+ def test_best_block_is_central_side_by_side_and_skips_aisle_gaps(self):
+  rows=[{'id':'Gold / A','category':'Gold','row':'A'},{'id':'Gold / B','category':'Gold','row':'B'}]
+  free=lambda row,numbers,total:[{'row_id':row,'seat':str(n),'available':n in numbers} for n in range(1,total+1)]
+  layout={'rows':rows,'seats':free('Gold / A',{1,2,3},10)+free('Gold / B',{3,4,5,6,7,8},10)}
+  self.assertEqual(row_watch.best_block(layout,['Gold / A','Gold / B'],3),{'row_id':'Gold / B','seats':['4','5','6']})
+  self.assertIsNone(row_watch.best_block(layout,['Gold / A'],4))
+  self.assertEqual(row_watch.best_block(layout,['Gold / A','Gold / B'],3,{('Gold / A','2')}),{'row_id':'Gold / A','seats':['1','2','3']})
+  aisle={'rows':rows[:1],'seats':[{'row_id':'Gold / A','seat':n,'available':True} for n in ('1','2','5','6')]}
+  self.assertIsNone(row_watch.best_block(aisle,['Gold / A'],3))
+  self.assertEqual(row_watch.seat_span(['11','12','13']),'11–13');self.assertEqual(row_watch.seat_span(['11','12']),'11, 12')
+ def test_party_alert_waits_for_enough_seats_together(self):
+  seats=lambda numbers:[{'row_id':'Gold / A','seat':str(n),'available':n in numbers} for n in range(1,9)]
+  def read(numbers):
+   result=copy.deepcopy(self.result);result['seats']=seats(numbers);result['available']=[{'row_id':'Gold / A','seat':str(n)} for n in sorted(numbers)]
+   row_watch.ingest(self.db,self.show,result)
+  read(set())
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Movie'],'categories':['Gold'],'row_show':self.show['id'],'rows':['Gold / A'],'party_size':3,'enabled':True,'once':False})
+  count=lambda:self.db.execute('select count(*) from outbox').fetchone()[0]
+  read({1,2,5});self.assertEqual(count(),0)
+  read({1,2,5,6});self.assertEqual(count(),0)
+  read({1,2,4,5,6});self.assertEqual(count(),1)
+  text=self.db.execute('select text from outbox').fetchone()[0]
+  self.assertIn('Best 3 together: Gold / A · seats 4–6',text)
+  with self.assertRaises(ValueError):prefs.validate({**prefs.read(self.db),'party_size':1})
  def test_listing_alert_shows_seat_type_price(self):
   self.assertEqual(prefs.with_price(self.show,'gold'),'gold (₹200)');self.assertEqual(prefs.with_price(self.show,'Silver'),'Silver')
  def test_invalid_rows_and_wrong_show_filters_rejected(self):

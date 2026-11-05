@@ -5,7 +5,7 @@ from io import BytesIO
 from PIL import Image,ImageDraw,ImageFont
 
 
-def render(show,data,highlight_rows=()):
+def render(show,data,highlight_rows=(),best_seats=()):
     seats=data.get('seats') or []
     if not seats:return None
     row_order=[row['id'] for row in data.get('rows',[])]
@@ -32,7 +32,7 @@ def render(show,data,highlight_rows=()):
     draw.text((70,107),'Available',font=regular,fill='#334155')
     draw.rounded_rectangle((164,106,181,123),radius=4,fill='#d8dee8',outline='#aeb8c8')
     draw.text((190,107),'Unavailable',font=regular,fill='#334155')
-    highlighted=set(highlight_rows);y=title_height
+    highlighted=set(highlight_rows);best=set(best_seats);y=title_height
     for row_id,row_seats in grouped.items():
         category,row=row_id.rsplit(' / ',1) if ' / ' in row_id else ('Seats',row_id)
         if row_id in highlighted:
@@ -44,11 +44,14 @@ def render(show,data,highlight_rows=()):
             fill='#35a879' if available else '#d8dee8'
             draw.rounded_rectangle((x,y,x+cell,y+cell_h),radius=3,fill=fill,
                 outline='#229267' if available else '#aeb8c8',width=1)
+            if (row_id,seat.get('seat')) in best:
+                draw.rounded_rectangle((x-2,y-2,x+cell+2,y+cell_h+2),radius=4,outline='#d97706',width=3)
             label=str(seat.get('seat',''))
             if cell>=13 and label:
                 box=draw.textbbox((0,0),label,font=regular);tw=box[2]-box[0]
                 if tw<cell:draw.text((x+(cell-tw)//2,y+4),label,font=regular,fill='#ffffff' if available else '#475569')
         y+=cell_h+row_gap
+    if best:draw.text((300,107),'Orange outline: best seats together',font=regular,fill='#b45309')
     draw.text((42,height-42),'Seat status can change before you open BookMyShow.',font=regular,fill='#64748b')
     output=BytesIO();image.save(output,format='PNG',optimize=True)
     return output.getvalue()

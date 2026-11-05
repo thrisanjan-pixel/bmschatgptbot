@@ -65,6 +65,36 @@ def seat_order(seat):
     return [(0,int(part),'') if part.isdigit() else (1,0,part) for part in re.findall(r'\d+|\D+',str(seat))]
 
 
+def best_block(result,rows,size,must_include=()):
+    """Most central run of `size` free seats side by side in the chosen rows, or None.
+
+    Seats are adjacent when they sit next to each other in the layout and, when both
+    are numbered, their numbers differ by one (so an aisle gap breaks the run).
+    With `must_include`, only blocks holding at least one of those (row, seat) pairs count."""
+    order=[r['id'] for r in result.get('rows',[]) if r['id'] in set(rows)]
+    middle=(len(order)-1)/2;best=None;wanted=set(must_include)
+    for rank,row_id in enumerate(order):
+        seats=[s for s in result.get('seats',[]) if s['row_id']==row_id]
+        run=[]
+        for index,seat in enumerate(seats):
+            if not seat.get('available'):run=[];continue
+            a,b=str(run[-1][1]['seat']) if run else '',str(seat['seat'])
+            if run and a.isdigit() and b.isdigit() and abs(int(a)-int(b))!=1:run=[]
+            run.append((index,seat))
+            if len(run)<size:continue
+            window=run[-size:]
+            if wanted and not any((row_id,s['seat']) in wanted for _,s in window):continue
+            centre=abs(sum(i for i,_ in window)/size-(len(seats)-1)/2)/max(1,len(seats))
+            score=(round(centre,3),abs(rank-middle))
+            if best is None or score<best[0]:best=(score,row_id,[s['seat'] for _,s in window])
+    return {'row_id':best[1],'seats':best[2]} if best else None
+
+
+def seat_span(seats):
+    first,last=str(seats[0]),str(seats[-1])
+    return f'{first}–{last}' if first.isdigit() and last.isdigit() and len(seats)>2 else ', '.join(map(str,seats))
+
+
 def show_date(show):
     try:return datetime.strptime(show.get('date',''),'%Y%m%d').strftime('%d %b %Y')
     except (TypeError,ValueError):return show.get('date','')
@@ -84,7 +114,7 @@ def ingest(db,show,result):
             p=rule['preferences']
             if p.get('row_show')!=show['id']:continue
             selected=set(p.get('rows',[]))
-            signature=json.dumps([show['id'],sorted(selected)])
+            signature=json.dumps([show['id'],sorted(selected)]+([p['party_size']] if p.get('party_size') else []))
             state=db.execute('SELECT signature,available FROM row_alert_state WHERE alert_id=?',(rule['id'],)).fetchone()
             before={tuple(item) for item in json.loads(state['available'])} if state and state['signature']==signature else set()
             current={(s['row_id'],s['seat']) for s in result['available'] if s['row_id'] in selected}
@@ -93,6 +123,14 @@ def ingest(db,show,result):
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',(rule['id'],signature,json.dumps(sorted(current))))
                 continue
             if not added:
+                db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
+                    (rule['id'],signature,json.dumps(sorted(current))))
+                continue
+            party=p.get('party_size',0)
+            block=best_block(result,selected,party,{(s['row_id'],s['seat']) for s in added}) if party else None
+            if party and not block:
+                # Not enough seats side by side yet; remember what is open so the seat that
+                # completes a block still counts as new.
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
                     (rule['id'],signature,json.dumps(sorted(current))))
                 continue
@@ -110,14 +148,16 @@ def ingest(db,show,result):
                     seats=sorted((s['seat'] for s in added if s['row_id']==r),key=seat_order)
                     price=prefs.price_text(show,r.rsplit(' / ',1)[0])
                     lines.append('• '+r+': '+', '.join(seats)+f"  ({len(seats)} seat{'s' if len(seats)>1 else ''}{' · '+price+' each' if price else ''})")
-                message=f"🎟 {len(added)} seat{'s' if len(added)>1 else ''} now available · Row{'s' if len(opened_rows)>1 else ''} {', '.join(opened_rows)}\n\n🎬 {show['movie']}\n📍 {show['venue']}\n📅 {show_date(show)} · {show['time']}\n\n"+'\n'.join(lines)
+                message=f"🎟 {len(added)} seat{'s' if len(added)>1 else ''} now available · Row{'s' if len(opened_rows)>1 else ''} {', '.join(opened_rows)}\n\n🎬 {show['movie']}\n📍 {show['venue']}\n📅 {show_date(show)} · {show['time']}\n\n"
+                if block:message+=f"⭐ Best {party} together: {block['row_id']} · seats {seat_span(block['seats'])}\n\n"
+                message+='\n'.join(lines)
                 # Shorten the seat list, never the exact booking link at the end.
                 link=f"\n\n{result['url']}";limit=950-len(link)
                 if len(message)>limit:message=message[:limit-1].rstrip()+'…'
                 message+=link
                 try:
                     from seat_map import render
-                    photo=render(show,result,opened_rows)
+                    photo=render(show,result,opened_rows,{(block['row_id'],s) for s in block['seats']} if block else ())
                 except Exception:photo=None  # The text alert still carries every detail.
                 emit(db,'row:'+rule['id']+':'+show['id']+':'+str(time.time_ns()),message,photo,alert_id=rule['id'])
                 db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,rule['id']))

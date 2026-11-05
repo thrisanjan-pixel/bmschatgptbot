@@ -33,7 +33,7 @@ def format_matches(actual,wanted):
     if wanted in ('imax','4dx'):return wanted in actual
     return actual==wanted
 def defaults():
-    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'notify_existing':True,'interval_minutes':10,'row_show':'','rows':[],'request_state':''}
+    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'notify_existing':True,'interval_minutes':10,'row_show':'','rows':[],'party_size':0,'request_state':''}
 
 def ensure(db):
     db.execute('''CREATE TABLE IF NOT EXISTS alerts(
@@ -180,6 +180,9 @@ def validate(data):
     if not isinstance(result['row_show'],str) or len(result['row_show'])>150:raise ValueError('Invalid row showtime')
     if not isinstance(result['rows'],list) or len(result['rows'])>200 or any(not isinstance(r,str) or len(r)>300 for r in result['rows']):raise ValueError('Invalid rows')
     if result['row_show'] and not result['rows']:raise ValueError('Load and select at least one row')
+    party=data.get('party_size',0)
+    if type(party) is not int or not (party==0 or 2<=party<=10):raise ValueError('Choose 2 to 10 seats together, or any open seat')
+    result['party_size']=party if result['row_show'] else 0
     if result['rows'] and not result['row_show']:raise ValueError('Select a specific showtime for rows')
     if result['enabled'] and (not result['movies'] or (not result['row_show'] and not (result['new_shows'] or result['availability']))):raise ValueError('Select at least one movie and an alert type before enabling')
     return result
