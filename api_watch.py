@@ -150,6 +150,9 @@ def watched_movies(db):
                    for m in rule['preferences']['movies'] if not rule['preferences']['row_show']})
 
 
+BACKGROUND_SPACING=180
+
+
 def wanted_dates(db):
     """Movie -> dates that showtime alerts ask for, or None when any date counts."""
     wanted={}
@@ -177,7 +180,9 @@ def next_job(db, now):
     slots = ','.join('?' for _ in movies) or "''"
     cooldown_until = float(meta(db, 'source_cooldown', '0'))
     recovering = bool(cooldown_until and 0 <= now - cooldown_until < 60)
-    background_recent = now-float(meta(db,'listing_background_attempt','0')) < 60
+    # Listing requests are one a minute, so a 60 s window would hand background
+    # work every turn. Give it at most one turn in three.
+    background_recent = now-float(meta(db,'listing_background_attempt','0')) < BACKGROUND_SPACING
     background_paused = float(meta(db, 'background_cooldown_until', '0')) > now
     return db.execute(f"""WITH eligible AS (
         SELECT *, id IN ({slots}) AS watched

@@ -86,7 +86,8 @@ class ReliabilityTests(unittest.TestCase):
    self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'movie','https://example.test/'+name,json.dumps({'movie':movie}),due))
   setmeta(self.db,'listing_background_attempt',990);self.db.commit()
   self.assertEqual(api_watch.next_job(self.db,1000)['id'],'active')
-  self.assertEqual(api_watch.next_job(self.db,1051)['id'],'background')
+  self.assertEqual(api_watch.next_job(self.db,1051)['id'],'active')
+  self.assertEqual(api_watch.next_job(self.db,1171)['id'],'background')
 
  def test_live_outage_is_included_in_report_without_rewriting_past_average(self):
   alert=prefs.save(self.db,{**prefs.defaults(),'movies':['Movie'],'enabled':True})
@@ -114,7 +115,8 @@ class ReliabilityTests(unittest.TestCase):
   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',('background','movie','https://example.test/other',json.dumps({'movie':'Other'}),100))
   setmeta(self.db,'listing_background_attempt',990);self.db.commit()
   self.assertIsNone(api_watch.next_job(self.db,1000))
-  self.assertEqual(api_watch.next_job(self.db,1051)['id'],'background')
+  self.assertIsNone(api_watch.next_job(self.db,1051))
+  self.assertEqual(api_watch.next_job(self.db,1171)['id'],'background')
 
  def test_row_alert_does_not_promote_movie_discovery_to_listing_watch(self):
   from tests.test_rows import RowTests
