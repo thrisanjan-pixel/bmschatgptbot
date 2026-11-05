@@ -20,6 +20,14 @@ from store import connect, coverage, meta, setmeta
 import watch_preferences as preferences
 
 
+def listing_queue(db):
+    """Read-only view of the listing jobs alerts depend on, in the order they are due."""
+    from api_watch import is_watched,wanted_dates
+    wanted=wanted_dates(db)
+    rows=[dict(id=r['id'][-60:],movie=json.loads(r['payload']).get('movie',''),date=json.loads(r['payload']).get('date',''),due=r['due'],checked=r['checked'],expires=r['expires'],error=r['error'])
+          for r in db.execute('SELECT id,payload,due,checked,expires,error FROM jobs') if is_watched(json.loads(r['payload']),wanted)]
+    return sorted(rows,key=lambda r:r['due'])[:30]
+
 def status(path):
     db=connect(path)
     try:
@@ -29,6 +37,7 @@ def status(path):
         from health_watch import hosting_status
         health_issues=json.loads(meta(db,'health_watch_issues','{}'))
         return {'reliability':{'requests':[dict(r) for r in db.execute('SELECT at,host,endpoint,status,retry_after,cf_ray,outcome FROM source_requests ORDER BY at DESC LIMIT 12')] if db.execute("SELECT 1 FROM sqlite_master WHERE name='source_requests'").fetchone() else [],'checks':[dict(r) for r in db.execute('SELECT * FROM check_stats ORDER BY last_attempt DESC LIMIT 100')],
+                'listing_queue':listing_queue(db),
                 'issues':health_issues,'health_heartbeat':float(meta(db,'health_watch_heartbeat','0')),
                 'row_heartbeat':float(meta(db,'row_reader_heartbeat','0')),
                 'delivery':dict(db.execute("SELECT count(*) AS pending,coalesce(max(attempts),0) AS attempts,coalesce(min(created),0) AS oldest FROM outbox WHERE delivered=0").fetchone()),
