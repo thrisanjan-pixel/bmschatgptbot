@@ -1,5 +1,5 @@
 """Versioned, credential-free logical recovery with non-destructive imports."""
-import json,time
+import json,time,re,shutil
 from pathlib import Path
 from urllib.parse import urlsplit
 import watch_preferences as prefs
@@ -67,12 +67,64 @@ def restore(db,raw):
  except Exception:db.rollback();raise
  return {'restored':len(added),'skipped':len(data['tables'].get('alerts',[]))-len(added),'paused':True}
 
+BACKUP_COUNT=3
+BACKUP_BUDGET=64*1024*1024
+
+
+def prune_backups(folder, count=BACKUP_COUNT, budget=BACKUP_BUDGET):
+ files=sorted((p for p in folder.iterdir() if not p.is_symlink() and p.is_file()
+               and re.fullmatch(r'screenwatch-[0-9]+[.]json',p.name)),
+              key=lambda p:int(p.stem.split('-')[-1]),reverse=True)
+ kept=0;total=0;removed=0
+ for p in files:
+  size=p.stat().st_size
+  if kept and (kept>=count or total+size>budget):
+   p.unlink();removed+=size
+  else:kept+=1;total+=size
+ return {'count':kept,'bytes':total,'removed_bytes':removed}
+
+
+def cleanup_history(db,now):
+ if now-float(meta(db,'last_history_cleanup','0'))<3600:return
+ # Preserve undelivered messages and every saved rule/baseline.
+ db.execute('UPDATE outbox SET photo=NULL WHERE delivered>0 AND delivered<? AND photo IS NOT NULL',(now-86400,))
+ db.execute('DELETE FROM outbox WHERE delivered>0 AND delivered<?',(now-7*86400,))
+ db.execute('DELETE FROM metric_history WHERE at<?',(now-7*86400,))
+ db.execute('DELETE FROM check_intervals WHERE at<?',(now-7*86400,))
+ db.execute('DELETE FROM check_stats WHERE last_attempt<?',(now-30*86400,))
+ setmeta(db,'last_history_cleanup',now);db.commit()
+ # Deleted SQLite pages are reused. Avoid VACUUM's full-size temporary copy.
+ db.execute('PRAGMA wal_checkpoint(PASSIVE)').fetchall()
+
+
 def automatic(db,path):
  now=time.time()
- if now-float(meta(db,'last_backup','0'))<3600:return
- folder=Path(path).resolve().parent/'backups';folder.mkdir(exist_ok=True)
- payload=json.dumps(export(db),ensure_ascii=False).encode()
- if len(payload)>MAX_BYTES:raise ValueError('Backup exceeds 32 MB; download a database snapshot with operator tools')
- target=folder/('screenwatch-'+str(int(now))+'.json');temporary=target.with_suffix('.tmp');temporary.write_bytes(payload);temporary.replace(target)
- for old in sorted(folder.glob('screenwatch-*.json'),key=lambda p:p.stat().st_mtime,reverse=True)[24:]:old.unlink()
- setmeta(db,'last_backup',now);db.commit()
+ folder=Path(path).resolve().parent/'backups'
+ if folder.is_symlink():raise ValueError('Backup directory cannot be a symlink')
+ folder.mkdir(exist_ok=True)
+ # Prune before the hourly check, freeing old copies immediately after rollout.
+ previous=json.loads(meta(db,'storage_usage','{}'))
+ summary=prune_backups(folder)
+ removed=summary['removed_bytes']+previous.get('removed_backup_bytes',0)
+ cleanup_history(db,now)
+ if now-float(meta(db,'last_backup','0'))>=3600:
+  payload=json.dumps(export(db),ensure_ascii=False).encode()
+  if len(payload)>MAX_BYTES:raise ValueError('Backup exceeds 32 MB; download a database snapshot with operator tools')
+  spare=prune_backups(folder,count=BACKUP_COUNT-1,budget=BACKUP_BUDGET-len(payload))
+  removed+=spare['removed_bytes']
+  if shutil.disk_usage(folder).free<len(payload)+8*1024*1024:
+   raise ValueError('Not enough free storage for a safe backup')
+  target=folder/('screenwatch-'+str(int(now))+'.json');temporary=target.with_suffix('.tmp')
+  try:temporary.write_bytes(payload);temporary.replace(target)
+  finally:
+   if temporary.exists():temporary.unlink()
+  setmeta(db,'last_backup',now)
+  summary=prune_backups(folder);removed+=summary['removed_bytes']
+ base=Path(path)
+ files=[base,Path(str(base)+'-wal'),Path(str(base)+'-shm')]
+ setmeta(db,'storage_usage',json.dumps({'at':now,'backup_count':summary['count'],
+  'backup_bytes':summary['bytes'],'backup_budget_bytes':BACKUP_BUDGET,
+  'removed_backup_bytes':removed,'database_bytes':sum(p.stat().st_size for p in files if p.exists()),
+  'filesystem_free_bytes':shutil.disk_usage(folder).free,
+  'history_days':7,'photo_days':1}))
+ db.commit()
