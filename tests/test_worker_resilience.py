@@ -167,6 +167,16 @@ class SeatReaderTests(unittest.TestCase):
   with patch('cloud_row_reader.open_request',return_value=io.BytesIO(json.dumps(data).encode())):
    self.assertEqual(cloud_row_reader._areas(show,5),{'7':'Gold'})
   self.assertNotIn(('old',),cloud_row_reader._area_cache);cloud_row_reader._area_cache.clear()
+ def test_area_lookup_waits_out_a_short_gap_but_not_a_long_one(self):
+  from http_source import SourceWait
+  show={'event':'ET00000001','venue_code':'TEST','date':'20261110','session':'2','categories':{'1':{'name':'Gold'}}}
+  data={'data':{'eventData':{'eventCode':'ET00000001'},'venue':{'venueCode':'TEST'},'showTimes':[{'sessionId':'2','categories':[{'priceCode':'1','areaCatCode':'7'}]}]}}
+  cloud_row_reader._area_cache.clear()
+  with patch('cloud_row_reader.open_request',side_effect=[SourceWait(time.time()+0.1),io.BytesIO(json.dumps(data).encode())]),patch('cloud_row_reader.time.sleep') as sleep:
+   self.assertEqual(cloud_row_reader._areas(show,5),{'7':'Gold'});sleep.assert_called_once()
+  cloud_row_reader._area_cache.clear()
+  with patch('cloud_row_reader.open_request',side_effect=SourceWait(time.time()+600)):
+   with self.assertRaises(SourceWait):cloud_row_reader._areas(show,5)
  def test_seat_map_tolerates_missing_date(self):
   png=seat_map.render({'date':None,'movie':'M'},{'rows':[{'id':'Gold / A'}],'seats':[{'row_id':'Gold / A','seat':'1','available':True}]})
   self.assertTrue(png.startswith(b'\x89PNG'))

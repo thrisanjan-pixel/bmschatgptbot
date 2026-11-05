@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from http_source import open_request
+from http_source import SourceWait, open_request
 
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -45,7 +45,14 @@ def _areas(show,timeout,manual=False):
         'x-app-code':'WEB','x-region-code':'HYD','x-region-slug':'hyderabad',
         'x-platform-code':'DESKTOP-WEB','x-location-selection':'manual'})
     try:
-        with open_request(request,timeout=timeout,manual=manual,metadata=True) as response:data=json.load(response)['data']
+        try:
+            with open_request(request,timeout=timeout,manual=manual,metadata=True) as response:data=json.load(response)['data']
+        except SourceWait as wait:
+            # Listing checks share this host on the same 60 s beat as seat reads, so the
+            # 10 s metadata gap can fall due every time. Wait out a short gap once.
+            if wait.until-time.time()>15:raise
+            time.sleep(max(0,wait.until-time.time())+0.2)
+            with open_request(request,timeout=timeout,manual=manual,metadata=True) as response:data=json.load(response)['data']
     except urllib.error.HTTPError as error:raise SeatHTTPError('Seat metadata', error) from None
     except (urllib.error.URLError,TimeoutError,ValueError,KeyError) as error:
         raise ValueError('Seat metadata unavailable') from error
