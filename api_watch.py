@@ -149,6 +149,7 @@ def next_job(db, now):
     slots = ','.join('?' for _ in movies) or "''"
     cooldown_until = float(meta(db, 'source_cooldown', '0'))
     recovering = bool(cooldown_until and 0 <= now - cooldown_until < 60)
+    background_recent = now-float(meta(db,'listing_background_attempt','0')) < 60
     background_paused = float(meta(db, 'background_cooldown_until', '0')) > now
     return db.execute(f"""WITH eligible AS (
         SELECT *, lower(trim(json_extract(payload,'$.movie'))) IN ({slots}) AS watched
@@ -157,7 +158,7 @@ def next_job(db, now):
       SELECT * FROM eligible WHERE watched OR NOT ?
       ORDER BY CASE WHEN NOT ? AND due>0 AND due<? THEN 0
         WHEN watched THEN 1 ELSE 2 END,due,checked LIMIT 1""",
-      (*movies, now, now, background_paused, recovering, now-300)).fetchone()
+      (*movies, now, now, background_paused, recovering or background_recent, now-300)).fetchone()
 
 
 def record_listing_failure(db, job, error, started, now):
@@ -212,7 +213,10 @@ class Monitor:
                 if not job:self.stop.wait(1);continue
                 try:
                     started=time.time()
-                    setmeta(db,'listing_check_started',started);db.commit()
+                    setmeta(db,'listing_check_started',started)
+                    if preferences.normalized(json.loads(job['payload']).get('movie','')) not in set(watched_movies(db)):
+                        setmeta(db,'listing_background_attempt',started)
+                    db.commit()
                     data=get_json(job['url'])
                     if job['kind']=='catalog':
                         listings=movies(data);initialized=bool(meta(db,'catalog_initialized'))

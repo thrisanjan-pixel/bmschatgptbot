@@ -70,16 +70,20 @@ def rules(db):
             waiting_for_bookings = bool(jobs) and all(
                 meta(db, 'waiting_show:'+r['id']) == '1' for r in jobs
             )
+        now=time.time()
+        cooldown=float(meta(db,'seat_cooldown_until' if p['row_show'] else 'source_cooldown','0'))
+        if cooldown>now:due=max(due,cooldown)
         delivery=db.execute('SELECT count(*),coalesce(max(attempts),0) FROM outbox WHERE alert_id=? AND delivered=0',(rule['id'],)).fetchone()
         health='Source unavailable' if error else 'Checks delayed' if checked and time.time()-checked>180 else 'Watching seats' if p['row_show'] else 'Waiting for bookings' if waiting_for_bookings else 'Watching availability' if checked else 'Waiting for listings'
-        rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
+        rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'retry_until':cooldown if cooldown>now else 0,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
         keys=[p['row_show']] if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
         source='rows' if p['row_show'] else 'listings'
         intervals=[]
         for key in keys:
             intervals.extend(r[0] for r in db.execute('SELECT gap FROM check_intervals WHERE source=? AND job_key=? AND at>=?',(source,key,max(rule['created'],time.time()-7*86400))))
         delays=db.execute('SELECT avg(delivered-created),max(delivered-created),count(*) FROM outbox WHERE alert_id=? AND delivered>0',(rule['id'],)).fetchone()
-        rule['report']={'window_days':7,'gap_samples':len(intervals),'average_gap':sum(intervals)/len(intervals) if intervals else None,'longest_gap':max(intervals) if intervals else None,'delivery_average':delays[0],'delivery_longest':delays[1],'deliveries':delays[2],'last_success':checked}
+        ongoing_gap=max(0,now-max(checked,rule['created'])) if rule['status']=='active' else None
+        rule['report']={'ongoing_gap':ongoing_gap,'longest_gap_including_current':max([*intervals,ongoing_gap] if ongoing_gap is not None else intervals,default=None),'window_days':7,'gap_samples':len(intervals),'average_gap':sum(intervals)/len(intervals) if intervals else None,'longest_gap':max(intervals) if intervals else None,'delivery_average':delays[0],'delivery_longest':delays[1],'deliveries':delays[2],'last_success':checked}
         result.append(rule)
     return result
 

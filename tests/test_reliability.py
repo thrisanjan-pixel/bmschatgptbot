@@ -62,3 +62,33 @@ class ReliabilityTests(unittest.TestCase):
    self.assertEqual(failure.exception.code,503);failure.exception.close()
    with urllib.request.urlopen(url+'/healthz') as response:self.assertEqual(response.status,200)
   finally:server.shutdown();server.server_close();thread.join()
+
+ def test_recent_background_attempt_keeps_overdue_discovery_from_starving_alert(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Watched'],'enabled':True})
+  for name,movie,due in [('background','Other',100),('active','Watched',995)]:
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'movie','https://example.test/'+name,json.dumps({'movie':movie}),due))
+  setmeta(self.db,'listing_background_attempt',990);self.db.commit()
+  self.assertEqual(api_watch.next_job(self.db,1000)['id'],'active')
+  self.assertEqual(api_watch.next_job(self.db,1051)['id'],'background')
+
+ def test_live_outage_is_included_in_report_without_rewriting_past_average(self):
+  alert=prefs.save(self.db,{**prefs.defaults(),'movies':['Movie'],'enabled':True})
+  self.db.execute('UPDATE alerts SET created=1 WHERE id=?',(alert,))
+  self.db.execute('INSERT INTO jobs(id,kind,payload,checked,due,error) VALUES(?,?,?,?,?,?)',('job','movie',json.dumps({'movie':'Movie'}),100,300,'Source HTTP 403'))
+  record_check(self.db,'listings','job',70,now=70);record_check(self.db,'listings','job',100,now=100)
+  setmeta(self.db,'source_cooldown',2000);self.db.commit()
+  with patch('watch_preferences.time.time',return_value=1000):rule=prefs.rules(self.db)[0]
+  self.assertEqual(rule['report']['average_gap'],30)
+  self.assertEqual(rule['report']['ongoing_gap'],900)
+  self.assertEqual(rule['report']['longest_gap_including_current'],900)
+  self.assertEqual(rule['health']['next_check'],2000)
+
+ def test_shared_seat_retry_applies_to_every_row_alert_status(self):
+  from tests.test_rows import RowTests
+  f=RowTests();f.setUp()
+  try:
+   f.configure();now=time.time();setmeta(f.db,'seat_cooldown_until',now+36000);f.db.commit()
+   rule=prefs.rules(f.db)[0]
+   self.assertEqual(rule['health']['next_check'],now+36000)
+   self.assertEqual(rule['health']['retry_until'],now+36000)
+  finally:f.tearDown()
