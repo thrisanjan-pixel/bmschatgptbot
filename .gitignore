@@ -6,3 +6,6 @@ __pycache__/
 *.sqlite3*
 runtime/
 node_modules/
+Recovery Copies/
+transfer/
+.railway/

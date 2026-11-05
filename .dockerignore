@@ -8,3 +8,5 @@ runtime
 transfer
 *.log
 *.tar.gz
+Recovery Copies
+.railway
