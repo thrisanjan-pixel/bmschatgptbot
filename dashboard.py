@@ -9,6 +9,7 @@ import html
 import re
 import secrets
 import sqlite3
+import telegram
 import threading
 from http.cookies import SimpleCookie, CookieError
 from urllib.parse import parse_qs,urlsplit
@@ -17,6 +18,15 @@ from pathlib import Path
 DEFAULT_DB='/workspace/booking-tracker/state.sqlite3'
 from store import connect, coverage, meta, setmeta
 import watch_preferences as preferences
+
+
+def coverage_with_venues(db):
+    """Coverage counts; API mode never fills the venues table, so derive cinemas from live sessions."""
+    result=coverage(db)
+    if not result['venues']:
+        try:result['venues']=db.execute("SELECT count(DISTINCT json_extract(payload,'$.venue_code')) FROM sessions WHERE active=1 AND cutoff>? AND json_valid(payload)",(time.time(),)).fetchone()[0]
+        except sqlite3.Error:pass
+    return result
 
 
 def status(path):
@@ -44,7 +54,7 @@ def status(path):
                 'metric_history':[dict(r) for r in db.execute('SELECT at,movies,venues,sessions FROM metric_history ORDER BY at DESC LIMIT 7')][::-1],
                 'hosted':os.environ.get('BMS_PUBLIC')=='1',
                 'telegram_enabled':meta(db,'telegram_enabled','1')=='1',
-                'telegram_configured':all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')),
+                'telegram_configured':telegram.configured(),
                 'mode':meta(db,'monitor_mode','browser'),
                 'last_success':float(meta(db,'api_last_success',meta(db,'catalog_last_success','0'))),
                 'recent_alerts':[dict(r) for r in db.execute('SELECT text,created,delivered,attempts,alert_id FROM outbox ORDER BY created DESC LIMIT 12')],
@@ -54,7 +64,7 @@ def status(path):
                 'notifications_mode':meta(db,'notifications_mode','unknown'),
                 'telegram_setup_test_at':float(meta(db,'telegram_setup_test_at','0')),
                 'source_errors':[dict(r) for r in db.execute("SELECT kind,error FROM jobs WHERE error<>'' ORDER BY due DESC LIMIT 5")],
-                'coverage':coverage(db),'catalog_last_success':float(meta(db,'catalog_last_success','0')),
+                'coverage':coverage_with_venues(db),'catalog_last_success':float(meta(db,'catalog_last_success','0')),
                 'movies':[dict(r) for r in db.execute('SELECT title,url,seen FROM inventory ORDER BY title')]}
     finally:db.close()
 
@@ -184,7 +194,7 @@ def handler(path, public=False):
                     if not 0<length<256:raise ValueError()
                     data=json.loads(self.rfile.read(length))
                     if not isinstance(data,dict) or set(data)!={'enabled'} or type(data['enabled']) is not bool:raise ValueError()
-                    if data['enabled'] and public and not all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')):raise ValueError()
+                    if data['enabled'] and public and not telegram.configured():raise ValueError()
                     db=connect(path)
                     try:
                         db.execute('BEGIN IMMEDIATE');setmeta(db,'telegram_enabled','1' if data['enabled'] else '0');db.commit()
@@ -213,7 +223,7 @@ def handler(path, public=False):
                     if not 0<length<=65536:raise ValueError('Invalid request size')
                     data=json.loads(self.rfile.read(length))
                     if not isinstance(data,dict):raise ValueError('Invalid settings')
-                    if public and data.get('enabled') and not all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')):raise ValueError('Connect Telegram before enabling alerts')
+                    if public and data.get('enabled') and not telegram.configured():raise ValueError('Connect Telegram before enabling alerts')
                     if data.get('enabled') and data.get('row_show') and os.environ.get('BMS_ROWS_ENABLED')!='1':raise ValueError('Row monitoring is unavailable on this host')
                     db=connect(path)
                     requested=data.pop('alert_id',None)
@@ -229,7 +239,7 @@ def handler(path, public=False):
                         self.reply(json.dumps({'deleted':True}));return
                     if action in ('cancel','reset','booked'):
                         if data:raise ValueError('Invalid alert action request')
-                        if action=='reset' and public and not all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')):raise ValueError('Connect Telegram before enabling alerts')
+                        if action=='reset' and public and not telegram.configured():raise ValueError('Connect Telegram before enabling alerts')
                         if action=='reset' and preferences.read(db,requested).get('row_show') and os.environ.get('BMS_ROWS_ENABLED')!='1':raise ValueError('Row monitoring is unavailable on this host')
                         saved_id=preferences.transition(db,requested,action)
                         self.reply(json.dumps({'id':saved_id}));return
