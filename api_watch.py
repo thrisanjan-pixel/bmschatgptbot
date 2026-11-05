@@ -167,7 +167,8 @@ def wanted_dates(db):
             json_extract(payload,'$.language'),json_extract(payload,'$.format') FROM sessions"""):
         profiles.setdefault(event,[]).append({'movie':'','venue_code':'','date':'','categories':{},
             'language':language or '','format':screen or ''})
-    return {'movies':movies,'profiles':profiles}
+    dated={(json.loads(r[0]).get('event'),json.loads(r[0]).get('date')) for r in db.execute("SELECT payload FROM jobs WHERE kind='discovery'")}
+    return {'movies':movies,'profiles':profiles,'dated':dated}
 
 
 def is_watched(payload,wanted):
@@ -177,8 +178,11 @@ def is_watched(payload,wanted):
     # with no showtimes seen yet, and undated listings, still count.
     entries=wanted['movies'].get(preferences.normalized(payload.get('movie','')))
     if not entries:return False
-    day=payload.get('date','');shows=wanted['profiles'].get(payload.get('event'))
-    return any((dates is None or not day or day in dates) and
+    day=payload.get('date','');event=payload.get('event');shows=wanted['profiles'].get(event)
+    # An undated listing only finds new dates; once every date an alert wants has
+    # its own listing, the undated one is background work for that alert.
+    covered=lambda dates:not day and dates is not None and all((event,d) in wanted.get('dated',()) for d in dates)
+    return any((dates is None or not day or day in dates) and not covered(dates) and
                (not shows or any(preferences.matches(show,probe) for show in shows))
                for dates,probe in entries)
 
@@ -191,14 +195,7 @@ def next_job(db, now):
 def listing_order(db, now):
     """Due listing jobs in the order the worker will take them."""
     wanted = wanted_dates(db)
-    jobs = [(r['id'],json.loads(r['payload']),r['checked']) for r in db.execute('SELECT id,payload,checked FROM jobs')]
-    movies = [job_id for job_id,payload,_ in jobs if is_watched(payload,wanted)]
-    # Movies take turns: the alert movie checked longest ago goes next, so a movie
-    # with many date and format listings cannot crowd out one with a single listing.
-    last_checked = {}
-    for job_id,payload,checked in jobs:
-        key = preferences.normalized(payload.get('movie',''))
-        last_checked[key] = max(last_checked.get(key,0),checked or 0)
+    movies = [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if is_watched(json.loads(r['payload']),wanted)]
     slots = ','.join('?' for _ in movies) or "''"
     cooldown_until = float(meta(db, 'source_cooldown', '0'))
     recovering = bool(cooldown_until and 0 <= now - cooldown_until < 60)
@@ -215,8 +212,9 @@ def listing_order(db, now):
       FROM eligible WHERE watched OR (NOT ? AND NOT ?)""",
       (*movies, now, now, recovering or background_recent, now-300, background_paused, background_recent)).fetchall()
     def order(row):
-        turn = last_checked.get(preferences.normalized(json.loads(row['payload']).get('movie','')),0) if row['watched'] else -1
-        return (row['rank'], turn, row['due'], row['checked'])
+        # Alert listings take turns by how overdue they are. A never-checked listing
+        # joins the line now instead of jumping ahead of long-overdue ones.
+        return (row['rank'], row['due'] or now, row['checked'])
     return sorted(rows, key=order)
 
 

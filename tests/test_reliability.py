@@ -42,7 +42,8 @@ class ReliabilityTests(unittest.TestCase):
   self.db.commit();order=[]
   for _ in range(4):
    job=api_watch.next_job(self.db,1000);order.append(job['id']);self.db.execute('UPDATE jobs SET due=5000 WHERE id=?',(job['id'],));self.db.commit()
-  self.assertEqual(order[:3],['alert-date','undated','second'])
+  # The undated listing is background: the alert's only date already has its own listing.
+  self.assertEqual(order[:2],['alert-date','second']);self.assertEqual(set(order[2:]),{'other-date','undated'})
   self.assertEqual(api_watch.poll_interval(self.db,{'kind':'discovery','payload':json.dumps({'movie':'Watched','date':'20261110'})}),120)
  def test_movie_with_many_listings_does_not_starve_another_alert_movie(self):
   prefs.save(self.db,{**prefs.defaults(),'movies':['Big'],'enabled':True},create=True)
@@ -85,6 +86,19 @@ class ReliabilityTests(unittest.TestCase):
   setmeta(self.db,'stale_warning_minutes','15');setmeta(self.db,'stale_warning_enabled','0');self.db.commit();self.assertEqual(stale(),[])
   setmeta(self.db,'stale_warning_minutes','7');setmeta(self.db,'stale_warning_enabled','1');self.db.commit()
   self.assertEqual(health_watch.stale_settings(self.db),{'enabled':True,'minutes':15})
+ def test_undated_listing_is_background_once_alert_dates_have_listings(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'dates':['20261106'],'enabled':True},create=True)
+  self.db.execute("INSERT INTO jobs(id,kind,url,payload) VALUES('d','discovery','https://example.test/d',?)",(json.dumps({'movie':'Epic','event':'E1','date':'20261106'}),));self.db.commit()
+  wanted=api_watch.wanted_dates(self.db)
+  self.assertFalse(api_watch.is_watched({'movie':'Epic','event':'E1','date':''},wanted))
+  self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'E2','date':''},wanted))
+  self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'E1','date':'20261106'},wanted))
+ def test_most_overdue_alert_listing_goes_first(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
+  for name,due in [('recent',990),('oldest',100),('new',0)]:
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'discovery','https://example.test/'+name,json.dumps({'movie':'Epic','event':name}),due))
+  setmeta(self.db,'listing_background_attempt',995);self.db.commit()
+  self.assertEqual([r['id'] for r in api_watch.listing_order(self.db,1000)],['oldest','recent','new'])
  def test_duplicate_row_rules_share_one_queued_read(self):
   from tests.test_rows import RowTests
   fixture=RowTests();fixture.setUp()
