@@ -20,15 +20,6 @@ from store import connect, coverage, meta, setmeta
 import watch_preferences as preferences
 
 
-def coverage_with_venues(db):
-    """Coverage counts; API mode never fills the venues table, so derive cinemas from live sessions."""
-    result=coverage(db)
-    if not result['venues']:
-        try:result['venues']=db.execute("SELECT count(DISTINCT json_extract(payload,'$.venue_code')) FROM sessions WHERE active=1 AND cutoff>? AND json_valid(payload)",(time.time(),)).fetchone()[0]
-        except sqlite3.Error:pass
-    return result
-
-
 def status(path):
     db=connect(path)
     try:
@@ -64,7 +55,7 @@ def status(path):
                 'notifications_mode':meta(db,'notifications_mode','unknown'),
                 'telegram_setup_test_at':float(meta(db,'telegram_setup_test_at','0')),
                 'source_errors':[dict(r) for r in db.execute("SELECT kind,error FROM jobs WHERE error<>'' ORDER BY due DESC LIMIT 5")],
-                'coverage':coverage_with_venues(db),'catalog_last_success':float(meta(db,'catalog_last_success','0')),
+                'coverage':coverage(db),'catalog_last_success':float(meta(db,'catalog_last_success','0')),
                 'movies':[dict(r) for r in db.execute('SELECT title,url,seen FROM inventory ORDER BY title')]}
     finally:db.close()
 

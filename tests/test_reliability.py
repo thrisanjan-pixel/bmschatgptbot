@@ -8,6 +8,13 @@ class ReliabilityTests(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.path=str(Path(self.tmp.name)/'state.db');self.db=connect(self.path)
  def tearDown(self):self.db.close();self.tmp.cleanup()
+ def test_api_mode_counts_cinemas_from_live_showtimes(self):
+  from store import coverage
+  future=time.time()+3600
+  for sid,venue,cutoff in (('a','AMBH',future),('b','AMBH',future),('c','PVR',future),('d','OLD',time.time()-60)):
+   self.db.execute('INSERT INTO sessions VALUES(?,?,?,1)',(sid,json.dumps({'venue_code':venue}),cutoff))
+  self.db.execute("INSERT INTO sessions VALUES('e','not json',?,1)",(future,))
+  self.assertEqual(coverage(self.db)['venues'],2)
  def test_timings_and_failures_survive_restart_without_erasing_success(self):
   record_check(self.db,'rows','show',98,now=100);record_check(self.db,'rows','show',128,now=130)
   record_check(self.db,'rows','show',159,'HTTP 403',now=160);self.db.commit();self.db.close();self.db=connect(self.path)

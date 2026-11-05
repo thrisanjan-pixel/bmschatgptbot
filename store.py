@@ -78,6 +78,9 @@ def coverage(db):
               'movies': db.execute('SELECT count(*) FROM inventory').fetchone()[0],
               'sessions': db.execute('SELECT count(*) FROM sessions WHERE active=1 AND cutoff>?', (now,)).fetchone()[0],
               'pending_alerts': db.execute('SELECT count(*) FROM outbox WHERE delivered=0').fetchone()[0]}
+    if not result['venues']:
+        # API mode never fills venues; count distinct cinemas across live showtimes instead.
+        result['venues'] = db.execute("SELECT count(DISTINCT json_extract(payload,'$.venue_code')) FROM sessions WHERE active=1 AND cutoff>? AND json_valid(payload)", (now,)).fetchone()[0]
     for kind in ('catalog', 'movie', 'discovery', 'venue', 'seat'):
         row = db.execute('''SELECT count(*),sum(checked>0),sum(error!=''),min(NULLIF(checked,0))
         FROM jobs WHERE kind=? AND (expires=0 OR expires>?)''', (kind, now)).fetchone()
