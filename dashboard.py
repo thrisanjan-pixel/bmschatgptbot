@@ -20,6 +20,45 @@ from store import connect, coverage, meta, setmeta
 import watch_preferences as preferences
 
 
+def check_queue(db):
+    """Live view for the dashboard: alert checks coming up next and the ones just done."""
+    import api_watch,row_watch
+    import watch_preferences as prefs
+    now=time.time();wanted=api_watch.wanted_dates(db)
+    def version(payload):
+        shows=wanted['profiles'].get(payload.get('event')) or []
+        return shows[0]['language'].replace('•','·') if shows else ''
+    def listing(row):
+        payload=json.loads(row['payload'])
+        return {'kind':'showtimes','movie':payload.get('movie',''),'date':payload.get('date',''),'detail':version(payload) or 'All versions','checked':row['checked'],'error':row['error']}
+    order=api_watch.listing_order(db,now)
+    alert_rows=[r for r in order if r['watched']]
+    later=sorted((r for r in db.execute('SELECT * FROM jobs WHERE due>? AND (expires=0 OR expires>?)',(now,now)) if api_watch.is_watched(json.loads(r['payload']),wanted)),key=lambda r:r['due'])
+    has_requests=db.execute("SELECT 1 FROM sqlite_master WHERE name='source_requests'").fetchone()
+    last=(db.execute("SELECT max(at) FROM source_requests WHERE host='in.bookmyshow.com' AND manual=0").fetchone()[0] if has_requests else 0) or 0
+    # One listing request a minute; background work takes about one turn in three.
+    step=90 if len(order)>len(alert_rows) else 60
+    at=max(now,float(meta(db,'listing_budget_until','0')),last+60);upcoming=[]
+    for row in alert_rows+later:
+        at=max(at,row['due']);upcoming.append({**listing(row),'eta':at});at+=step
+    for item in row_watch.queue(db,now):
+        upcoming.append({'kind':'seats','movie':item['movie'],'date':'','detail':' · '.join(filter(None,[item['venue'],item['date'],item['time']])),'alert':item['alert'],'eta':item['eta'],'checked':0,'error':''})
+    upcoming.sort(key=lambda item:item['eta'])
+    row_shows={r['preferences']['row_show'] for r in prefs.active(db) if r['preferences']['row_show']}
+    keys={r['id']:r for r in alert_rows+later}
+    recent=[]
+    for stat in db.execute('SELECT source,job_key,last_attempt,last_success,error FROM check_stats ORDER BY last_attempt DESC LIMIT 200'):
+        if stat['source']=='listings' and stat['job_key'] in keys:item=listing(keys[stat['job_key']])
+        elif stat['source']=='rows' and stat['job_key'] in row_shows:
+            show=db.execute('SELECT payload FROM sessions WHERE id=?',(stat['job_key'],)).fetchone()
+            show=json.loads(show[0]) if show else {}
+            item={'kind':'seats','movie':show.get('movie',''),'date':show.get('date',''),'detail':' · '.join(filter(None,[show.get('venue',''),show.get('time','')]))}
+        else:continue
+        recent.append({**item,'at':stat['last_attempt'],'ok':stat['last_success']>=stat['last_attempt'],'error':stat['error']})
+        if len(recent)>=8:break
+    return {'now':now,'upcoming':upcoming[:10],'recent':recent}
+
+
 def listing_queue(db):
     """Read-only view of the listing jobs alerts depend on, in the order they are due."""
     from api_watch import is_watched,wanted_dates
@@ -345,6 +384,12 @@ def handler(path, public=False):
                 show_id=parse_qs(urlsplit(self.path).query).get('show',[''])[0]
                 db=connect(path)
                 try:body=json.dumps(row_watch.get(db,show_id)).encode()
+                finally:db.close()
+                content_type='application/json'
+            elif self.path=='/api/check-queue':
+                if not public and not self.local_host():self.reply('Local access only.',403);return
+                db=connect(path)
+                try:body=json.dumps(check_queue(db)).encode()
                 finally:db.close()
                 content_type='application/json'
             elif self.path=='/api/seat-queue':

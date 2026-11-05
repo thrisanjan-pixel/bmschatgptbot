@@ -185,6 +185,12 @@ def is_watched(payload,wanted):
 
 
 def next_job(db, now):
+    rows = listing_order(db, now)
+    return rows[0] if rows else None
+
+
+def listing_order(db, now):
+    """Due listing jobs in the order the worker will take them."""
     wanted = wanted_dates(db)
     jobs = [(r['id'],json.loads(r['payload']),r['checked']) for r in db.execute('SELECT id,payload,checked FROM jobs')]
     movies = [job_id for job_id,payload,_ in jobs if is_watched(payload,wanted)]
@@ -212,7 +218,7 @@ def next_job(db, now):
     def order(row):
         turn = last_checked.get(preferences.normalized(json.loads(row['payload']).get('movie','')),0) if row['watched'] else -1
         return (row['rank'], turn, row['due'], row['checked'])
-    return min(rows, key=order, default=None)
+    return sorted(rows, key=order)
 
 
 def record_listing_failure(db, job, error, started, now):

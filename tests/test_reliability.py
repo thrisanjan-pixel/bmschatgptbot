@@ -61,6 +61,17 @@ class ReliabilityTests(unittest.TestCase):
   self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'ETNEW','date':''},wanted))
   prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
   self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'ET2D','date':''},api_watch.wanted_dates(self.db)))
+ def test_check_queue_lists_alert_checks_next_and_recent(self):
+  import dashboard
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
+  now=time.time()
+  for name,movie,due,checked in [('a','Epic',now-30,now-400),('b','Epic',now+500,now-100),('bg','Other',now-30,0)]:
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due,checked) VALUES(?,?,?,?,?,?)',(name,'discovery','https://example.test/'+name,json.dumps({'movie':movie,'date':'20261106','event':'ET1'}),due,checked))
+  record_check(self.db,'listings','b',now-100,now=now-100);self.db.commit()
+  data=dashboard.check_queue(self.db)
+  self.assertEqual([(i['kind'],i['movie']) for i in data['upcoming']],[('showtimes','Epic'),('showtimes','Epic')])
+  self.assertLess(data['upcoming'][0]['eta'],data['upcoming'][1]['eta'])
+  self.assertEqual([(i['movie'],i['ok']) for i in data['recent']],[('Epic',True)])
  def test_duplicate_row_rules_share_one_queued_read(self):
   from tests.test_rows import RowTests
   fixture=RowTests();fixture.setUp()
