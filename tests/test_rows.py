@@ -36,6 +36,16 @@ class RowTests(unittest.TestCase):
   self.assertEqual(row_watch.next_job(self.db,now)['show_id'],self.show['id'])
   self.db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(now-60,self.show['id']));self.db.commit()
   self.assertEqual(row_watch.next_job(self.db,now)['show_id'],'browsed')
+ def test_queue_lists_reads_in_order_and_remove_skips_alert_showtimes(self):
+  self.configure();now=time.time()
+  self.db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(now-300,self.show['id']))
+  self.db.execute("INSERT INTO row_layouts(show_id,payload,due) VALUES('browsed','{}',?)",(now-10,));self.db.commit()
+  items=row_watch.queue(self.db,now)
+  self.assertEqual([q['show_id'] for q in items],[self.show['id'],'browsed'])
+  self.assertTrue(items[0]['alert']);self.assertEqual(items[1]['eta'],items[0]['eta']+60)
+  with self.assertRaises(ValueError):row_watch.dequeue(self.db,self.show['id'])
+  row_watch.dequeue(self.db,'browsed')
+  self.assertEqual([q['show_id'] for q in row_watch.queue(self.db,now)],[self.show['id']])
  def test_retry_now_clears_saved_seat_waits(self):
   now=time.time()
   for key in ('seat_cooldown_until','seat_budget_until','seat_next_request_at'):setmeta(self.db,key,now+5000)

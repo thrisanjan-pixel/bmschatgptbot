@@ -127,15 +127,41 @@ def poll_policy(db,now,cloud=True):
     return (120,60) if cloud and recovering else (60,30) if cloud else (60,0)
 
 
-def next_job(db,now):
-    if source_ready_at(db)>now:return None
+def queue_order(db,now):
+    """ORDER BY clause and its parameters for the seat-read queue."""
     active=sorted({r['preferences']['row_show'] for r in prefs.active(db) if r['preferences']['row_show']})
     slots=','.join('?' for _ in active) or "''"
-    # A showtime nobody has seen yet (someone is waiting on the page) goes first;
+    # An alert showtime overdue by 2 minutes goes first, so browsing cannot starve it.
+    # Then a showtime nobody has seen yet (someone is waiting on the page);
     # routine alert refreshes would otherwise take every slot of the source budget.
-    # An alert showtime overdue by 4 minutes goes first, so browsing cannot starve it.
-    return db.execute(f"""SELECT * FROM row_layouts WHERE due>0 AND due<=?
-      ORDER BY CASE WHEN show_id IN ({slots}) AND due<? THEN 0 WHEN checked=0 AND error='' THEN 1 WHEN due<? THEN 2 WHEN show_id IN ({slots}) THEN 3 ELSE 4 END,due LIMIT 1""",(now,*active,now-240,now-90,*active)).fetchone()
+    order=f"CASE WHEN show_id IN ({slots}) AND due<? THEN 0 WHEN checked=0 AND error='' THEN 1 WHEN due<? THEN 2 WHEN show_id IN ({slots}) THEN 3 ELSE 4 END,due"
+    return order,(*active,now-120,now-90,*active),set(active)
+
+def next_job(db,now):
+    if source_ready_at(db)>now:return None
+    order,params,_=queue_order(db,now)
+    return db.execute(f'SELECT * FROM row_layouts WHERE due>0 AND due<=? ORDER BY {order} LIMIT 1',(now,*params)).fetchone()
+
+def queue(db,now=None,spacing=60):
+    """Queued seat reads in run order, each with an estimated start time."""
+    schema(db);now=time.time() if now is None else now
+    order,params,active=queue_order(db,now)
+    rows=db.execute(f"""SELECT r.show_id,r.due,r.checked,s.payload FROM row_layouts r LEFT JOIN sessions s ON s.id=r.show_id
+      WHERE r.due>0 ORDER BY CASE WHEN r.due<=? THEN 0 ELSE 1 END,{order}""",(now,*params)).fetchall()
+    slot=max(now,source_ready_at(db));items=[]
+    for row in rows:
+        show=json.loads(row['payload'] or '{}')
+        start=max(slot,row['due']);slot=start+spacing
+        items.append({'show_id':row['show_id'],'movie':show.get('movie',''),'venue':show.get('venue',''),
+            'date':show_date(show),'time':show.get('time',''),'alert':row['show_id'] in active,
+            'refresh':bool(row['checked']),'eta':start})
+    return items
+
+def dequeue(db,show_id):
+    """Drop a queued seat read. Alert showtimes keep polling until their alert is paused."""
+    schema(db)
+    if show_id in queue_order(db,time.time())[2]:raise ValueError('This showtime belongs to an active alert. Pause the alert to stop its seat checks.')
+    db.execute('UPDATE row_layouts SET due=0 WHERE show_id=?',(show_id,));db.commit()
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--db',required=True);args=parser.parse_args()

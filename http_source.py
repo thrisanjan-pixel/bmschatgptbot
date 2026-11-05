@@ -9,7 +9,7 @@ class SourceWait(RuntimeError):
         super().__init__('Waiting for the permitted source request budget')
 
 
-POLICIES={'services-in.bookmyshow.com':(30,120),'in.bookmyshow.com':(60,60),'in-cdn.bmscdn.com':(6,600)}
+POLICIES={'services-in.bookmyshow.com':(60,60),'in.bookmyshow.com':(60,60),'in-cdn.bmscdn.com':(6,600)}
 
 
 def carry_over(db,raw,now=None):

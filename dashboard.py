@@ -185,6 +185,22 @@ def handler(path, public=False):
                 except sqlite3.Error:self.reply('Seat reader is busy. Please retry shortly.',503);return
                 finally:db.close()
                 self.reply(json.dumps({'seat_ready_at':0}));return
+            if self.path=='/api/seat-queue':
+                if not self.authorized():return
+                if (not public and not self.local_host()) or not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<2048:raise ValueError('Invalid request')
+                    data=json.loads(self.rfile.read(length))
+                    show_id=data.get('show_id') if isinstance(data,dict) else None
+                    if not isinstance(show_id,str):raise ValueError('Choose a showtime')
+                    import row_watch
+                    db=connect(path)
+                    try:row_watch.dequeue(db,show_id);items=row_watch.queue(db)
+                    finally:db.close()
+                except sqlite3.Error:self.reply('Seat reader is busy. Please retry shortly.',503);return
+                except (ValueError,TypeError) as e:self.reply(html.escape(str(e)),400);return
+                self.reply_json({'queue':items});return
             if self.path=='/api/telegram':
                 if not self.authorized():return
                 if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return
@@ -320,6 +336,13 @@ def handler(path, public=False):
                 show_id=parse_qs(urlsplit(self.path).query).get('show',[''])[0]
                 db=connect(path)
                 try:body=json.dumps(row_watch.get(db,show_id)).encode()
+                finally:db.close()
+                content_type='application/json'
+            elif self.path=='/api/seat-queue':
+                if not public and not self.local_host():self.reply('Local access only.',403);return
+                import row_watch
+                db=connect(path)
+                try:body=json.dumps({'queue':row_watch.queue(db),'seat_ready_at':row_watch.source_ready_at(db)}).encode()
                 finally:db.close()
                 content_type='application/json'
             elif self.path=='/api/backup':
