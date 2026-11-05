@@ -176,6 +176,15 @@ def handler(path, public=False):
                 except sqlite3.Error:self.reply('Seat reader is busy. Please retry shortly.',503);return
                 except (ValueError,TypeError) as e:self.reply(html.escape(str(e)),400);return
                 self.reply('Loading real rows for this show.',202);return
+            if self.path=='/api/seat-retry':
+                if not self.authorized():return
+                if (not public and not self.local_host()) or not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return
+                import row_watch
+                db=connect(path)
+                try:row_watch.clear_source_wait(db)
+                except sqlite3.Error:self.reply('Seat reader is busy. Please retry shortly.',503);return
+                finally:db.close()
+                self.reply(json.dumps({'seat_ready_at':0}));return
             if self.path=='/api/telegram':
                 if not self.authorized():return
                 if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return

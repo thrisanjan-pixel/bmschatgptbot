@@ -23,6 +23,17 @@ def source_ready_at(db):
     """Earliest time the seat source may be asked again (budget, spacing or cooldown)."""
     return max(float(meta(db,key,'0')) for key in ('seat_cooldown_until','seat_next_request_at','seat_budget_until'))
 
+def clear_source_wait(db):
+    """User-requested retry: drop saved seat waits so the next queued read runs now.
+    The hourly request budget still applies, and a new 429 starts a new wait."""
+    schema(db);now=time.time()
+    from http_source import schema as source_schema
+    source_schema(db)
+    for key in ('seat_cooldown_until','seat_budget_until','seat_next_request_at'):setmeta(db,key,0)
+    db.execute("UPDATE source_hosts SET not_before=0 WHERE host='services-in.bookmyshow.com'")
+    db.execute('UPDATE row_layouts SET due=? WHERE due>?',(now,now))
+    db.commit()
+
 def get(db,show_id):
     schema(db);row=db.execute('SELECT * FROM row_layouts WHERE show_id=?',(show_id,)).fetchone()
     if not row:return {'show_id':show_id,'checked':0,'error':'','data':{},'due':0,'next_read':0}

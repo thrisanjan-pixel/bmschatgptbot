@@ -29,6 +29,13 @@ class RowTests(unittest.TestCase):
   setmeta(self.db,'seat_budget_until',now+300);self.db.commit()
   self.assertIsNone(row_watch.next_job(self.db,now))
   self.assertEqual(row_watch.get(self.db,self.show['id'])['next_read'],now+300)
+ def test_retry_now_clears_saved_seat_waits(self):
+  now=time.time()
+  for key in ('seat_cooldown_until','seat_budget_until','seat_next_request_at'):setmeta(self.db,key,now+5000)
+  self.db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(now+5000,self.show['id']));self.db.commit()
+  row_watch.clear_source_wait(self.db)
+  self.assertEqual(row_watch.source_ready_at(self.db),0)
+  self.assertEqual(row_watch.next_job(self.db,time.time()+1)['show_id'],self.show['id'])
  def test_specific_row_release_and_silent_baseline(self):
   self.configure();self.assertEqual(self.db.execute('select count(*) from outbox').fetchone()[0],0)
   changed=copy.deepcopy(self.result);changed['available'].append({'row_id':'Gold / B','seat':'2'})
