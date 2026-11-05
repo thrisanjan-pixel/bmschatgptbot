@@ -9,3 +9,10 @@ The independent health_watch.py process runs every 15 seconds within the same Ra
 /healthz remains the lightweight process health endpoint used by Railway restarts. /readyz returns 503 when the monitor or watchdog is stale or has recorded a sustained issue. Point an independent external uptime monitor at /readyz to detect a whole-service outage. No external monitor is configured by this deployment; the internal watchdog cannot report a total Railway outage.
 
 Railway billing is not connected. The dashboard explicitly reports unknown allowance and links to the account plans page. Optionally set SCREENWATCH_HOSTING_ENDS_AT to a verified timezone-aware ISO expiry, for example 2026-11-20T12:00:00Z. The dashboard and watchdog warn within three days. Do not guess the date. This does not report credit balance, prevent exhaustion, buy credits or upgrade a plan.
+
+
+## Controlled cloud seat probe — 5 November 2026
+
+A single operator-approved read of the active AMB screening from the Railway container returned HTTP 429. The source response included Retry-After: 33792, Server: cloudflare, Content-Type: application/json; charset=utf-8. This confirms a current source rate limit, rather than only a stale local timer. The response retry was persisted and repeated manual reads were stopped. Temporary Railway SSH credentials were revoked afterward.
+
+Seat polling now targets 60 seconds per screening with at least 30 seconds between cloud layout reads. For 15 minutes after a source restriction expires, targets slow to 120 seconds per screening and at least 60 seconds between reads. The recovery window starts after the restriction ends, so long retry periods do not skip it. These are scheduling targets, not guaranteed successful read intervals. Shared reads remain deduplicated across row alerts. No proxy rotation or automatic cooldown resets are used.

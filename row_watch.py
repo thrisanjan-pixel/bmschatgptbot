@@ -13,7 +13,7 @@ def request(db,show_id):
     row=db.execute('SELECT payload FROM sessions WHERE id=? AND active=1 AND cutoff>?',(show_id,time.time())).fetchone()
     if not row:raise ValueError('Choose a future showtime from the list')
     now=time.time()
-    interval=30 if os.environ.get('BMS_PUBLIC')=='1' else 60
+    interval,_=poll_policy(db,now,os.environ.get('BMS_PUBLIC')=='1')
     db.execute("INSERT INTO row_layouts(show_id,payload,due) VALUES(?,'{}',?) ON CONFLICT(show_id) DO UPDATE SET due=CASE WHEN checked<? AND (due<=? OR error='') THEN excluded.due ELSE due END",(show_id,now,now-interval,now))
     db.commit()
 
@@ -81,6 +81,15 @@ def schedule_active(db,now,interval=30):
         if show_id:db.execute('UPDATE row_layouts SET due=? WHERE show_id=? AND due=0 AND checked<?',(now,show_id,now-interval))
     db.commit()
 
+def poll_policy(db,now,cloud=True):
+    until=float(meta(db,'seat_cooldown_until','0'))
+    last_limit=float(meta(db,'seat_last_rate_limit','0'))
+    # Recovery starts after the source wait ends, including waits longer than 15 minutes.
+    recovering=bool((until and 0<=now-until<900) or
+                    (last_limit and 0<=now-last_limit<900))
+    return (120,60) if cloud and recovering else (60,30) if cloud else (60,0)
+
+
 def next_job(db,now):
     if max(float(meta(db,'seat_cooldown_until','0')),
            float(meta(db,'seat_next_request_at','0')))>now:return None
@@ -100,9 +109,8 @@ def main():
     while not stop:
         now=time.time()
         cloud = os.environ.get('BMS_PUBLIC')=='1'
-        last_limit = float(meta(db,'seat_last_rate_limit','0'))
-        recovering = bool(last_limit and now-last_limit<900)
-        schedule_active(db,now,60 if recovering or not cloud else 30)
+        interval,spacing=poll_policy(db,now,cloud)
+        schedule_active(db,now,interval)
         setmeta(db,'row_reader_heartbeat',now);db.commit()
         job=next_job(db,now)
         if not job:time.sleep(1);continue
@@ -113,7 +121,7 @@ def main():
         try:
             if cloud:
                 # Persist request spacing so restarting cannot release a burst.
-                setmeta(db,'seat_next_request_at',now+(30 if recovering else 10))
+                setmeta(db,'seat_next_request_at',now+spacing)
                 db.commit()
                 from cloud_row_reader import read
                 result=read(show)

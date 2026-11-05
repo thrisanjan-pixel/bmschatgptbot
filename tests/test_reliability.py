@@ -129,3 +129,14 @@ class ReliabilityTests(unittest.TestCase):
    with self.assertRaises(ReadError) as failure:get_json('https://in.bookmyshow.com/test')
   self.assertEqual(failure.exception.retry,600)
   self.assertEqual(failure.exception.diagnostic,{'status':429,'headers':{'Retry-After':' 600 ','Server':'test'}})
+
+ def test_long_seat_restriction_still_has_recovery_window_after_expiry(self):
+  setmeta(self.db,'seat_last_rate_limit',100)
+  setmeta(self.db,'seat_cooldown_until',86500);self.db.commit()
+  self.assertEqual(row_watch.poll_policy(self.db,86501),(120,60))
+  self.assertEqual(row_watch.poll_policy(self.db,87399),(120,60))
+  self.assertEqual(row_watch.poll_policy(self.db,87401),(60,30))
+  self.assertEqual(row_watch.poll_policy(self.db,86501,False),(60,0))
+
+ def test_normal_seat_policy_is_conservative_without_a_previous_restriction(self):
+  self.assertEqual(row_watch.poll_policy(self.db,1000),(60,30))
