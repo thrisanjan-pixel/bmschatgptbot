@@ -72,6 +72,19 @@ class ReliabilityTests(unittest.TestCase):
   self.assertEqual([(i['kind'],i['movie']) for i in data['upcoming']],[('showtimes','Epic'),('showtimes','Epic')])
   self.assertLess(data['upcoming'][0]['eta'],data['upcoming'][1]['eta'])
   self.assertEqual([(i['movie'],i['ok']) for i in data['recent']],[('Epic',True)])
+ def test_stalled_check_warning_follows_minutes_and_off_switch(self):
+  alert=prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
+  self.db.execute('UPDATE alerts SET created=0 WHERE id=?',(alert,))
+  now=time.time();setmeta(self.db,'health_watch_started',now-3600);setmeta(self.db,'city_heartbeat',now);self.db.commit()
+  self.db.execute("INSERT INTO jobs(id,kind,url,payload,checked) VALUES('j','discovery','https://example.test/j',?,?)",(json.dumps({'movie':'Epic'}),now-1200))
+  self.db.commit()
+  stale=lambda:[k for k in health_watch.problems(self.db,now) if k.startswith('source:')]
+  self.assertEqual(len(stale()),1)
+  self.assertIn('over 15 minutes',health_watch.problems(self.db,now)[stale()[0]])
+  setmeta(self.db,'stale_warning_minutes','30');self.db.commit();self.assertEqual(stale(),[])
+  setmeta(self.db,'stale_warning_minutes','15');setmeta(self.db,'stale_warning_enabled','0');self.db.commit();self.assertEqual(stale(),[])
+  setmeta(self.db,'stale_warning_minutes','7');setmeta(self.db,'stale_warning_enabled','1');self.db.commit()
+  self.assertEqual(health_watch.stale_settings(self.db),{'enabled':True,'minutes':15})
  def test_duplicate_row_rules_share_one_queued_read(self):
   from tests.test_rows import RowTests
   fixture=RowTests();fixture.setUp()

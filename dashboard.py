@@ -35,7 +35,7 @@ def check_queue(db):
     alert_rows=[r for r in order if r['watched']]
     later=sorted((r for r in db.execute('SELECT * FROM jobs WHERE due>? AND (expires=0 OR expires>?)',(now,now)) if api_watch.is_watched(json.loads(r['payload']),wanted)),key=lambda r:r['due'])
     has_requests=db.execute("SELECT 1 FROM sqlite_master WHERE name='source_requests'").fetchone()
-    last=(db.execute("SELECT max(at) FROM source_requests WHERE host='in.bookmyshow.com' AND manual=0").fetchone()[0] if has_requests else 0) or 0
+    last=(db.execute("SELECT max(at) FROM source_requests WHERE host='in.bookmyshow.com'").fetchone()[0] if has_requests else 0) or 0
     # One listing request a minute; background work takes about one turn in three.
     step=90 if len(order)>len(alert_rows) else 60
     at=max(now,float(meta(db,'listing_budget_until','0')),last+60);upcoming=[]
@@ -93,6 +93,7 @@ def status(path):
                 'metric_history':[dict(r) for r in db.execute('SELECT at,movies,venues,sessions FROM metric_history ORDER BY at DESC LIMIT 7')][::-1],
                 'hosted':os.environ.get('BMS_PUBLIC')=='1',
                 'telegram_enabled':meta(db,'telegram_enabled','1')=='1',
+                'stale_warning':__import__('health_watch').stale_settings(db),
                 'telegram_configured':telegram.configured(),
                 'mode':meta(db,'monitor_mode','browser'),
                 'last_success':float(meta(db,'api_last_success',meta(db,'catalog_last_success','0'))),
@@ -249,6 +250,26 @@ def handler(path, public=False):
                 except sqlite3.Error:self.reply('Seat reader is busy. Please retry shortly.',503);return
                 except (ValueError,TypeError) as e:self.reply(html.escape(str(e)),400);return
                 self.reply_json({'queue':items});return
+            if self.path=='/api/health-settings':
+                if not self.authorized():return
+                if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return
+                import health_watch
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<256:raise ValueError()
+                    data=json.loads(self.rfile.read(length))
+                    if not isinstance(data,dict) or set(data)!={'enabled','minutes'} or type(data['enabled']) is not bool or data['minutes'] not in health_watch.STALE_MINUTES:raise ValueError()
+                    db=connect(path)
+                    try:
+                        db.execute('BEGIN IMMEDIATE')
+                        setmeta(db,'stale_warning_enabled','1' if data['enabled'] else '0');setmeta(db,'stale_warning_minutes',str(data['minutes']))
+                        # Forget stalled-check warnings already sent, so a settings change is not announced
+                        # as a recovery; anything still stalled is reported again under the new setting.
+                        issues={k:v for k,v in json.loads(meta(db,'health_watch_issues','{}')).items() if not (k.startswith('source:') or k=='seat-rate-limit')}
+                        setmeta(db,'health_watch_issues',json.dumps(issues));db.commit()
+                    finally:db.close()
+                except (ValueError,TypeError,sqlite3.Error):self.reply(json.dumps({'error':'Could not save the warning setting. Retry.'}),400);return
+                self.reply(json.dumps({'enabled':data['enabled'],'minutes':data['minutes']}));return
             if self.path=='/api/telegram':
                 if not self.authorized():return
                 if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return

@@ -13,6 +13,13 @@ def hosting_status(now=None):
          'warning':('Hosting allowance has expired' if expiry<=now else 'Hosting allowance ends within 3 days') if expiry and expiry-now<3*86400 else 'Hosting allowance expiry is not connected; check Railway billing' if not expiry else '',
          'billing_url':'https://railway.com/workspace/plans'}
 
+STALE_MINUTES=(15,30,60,120,240)
+
+def stale_settings(db):
+ """Whether to warn when an alert goes without a successful check, and after how long."""
+ minutes=int(meta(db,'stale_warning_minutes','15') or 15)
+ return {'enabled':meta(db,'stale_warning_enabled','1')!='0','minutes':minutes if minutes in STALE_MINUTES else 15}
+
 def problems(db,now):
  rules=prefs.active(db);issues={}
  started=float(meta(db,'health_watch_started',str(now)))
@@ -22,11 +29,12 @@ def problems(db,now):
  if row_rules and now-float(meta(db,'row_reader_heartbeat','0'))>120:issues['row-worker']='The seat reader has stopped reporting its heartbeat.'
  rate_limited_movies=set()
  # Row reads share one 120 s gap and a 30/hour budget, so the quiet period grows with the number of row shows.
- limit=max(900,240*len(row_rules))
+ stale=stale_settings(db);quiet=stale['minutes']*60
+ limit=max(quiet,240*len(row_rules))
  cooling=max(float(meta(db,k,'0')) for k in ('seat_cooldown_until','seat_budget_until'))>now
- for rule in rules:
+ for rule in rules if stale['enabled'] else []:
   h=rule['health'];last=h['last_success'] or rule['created']
-  if now-last>(limit if rule['preferences']['row_show'] else 900):
+  if now-last>(limit if rule['preferences']['row_show'] else quiet):
    if rule['preferences']['row_show'] and cooling:continue
    if rule['preferences']['row_show'] and h['error'] in ('Seat source HTTP 429','Seat metadata HTTP 429'):
     rate_limited_movies.update(rule['preferences']['movies'])
@@ -34,9 +42,9 @@ def problems(db,now):
    target = rule['preferences']['row_show'] or '|'.join(sorted(prefs.normalized(m) for m in rule['preferences']['movies']))
    key='source:'+target
    detail=' Latest check: '+h['error']+'.' if h['error'] else ''
-   issues[key]='No successful check for '+', '.join(rule['preferences']['movies'])+' in over '+str(int((limit if rule['preferences']['row_show'] else 900)/60))+' minutes.'+detail
+   issues[key]='No successful check for '+', '.join(rule['preferences']['movies'])+' in over '+str(int((limit if rule['preferences']['row_show'] else quiet)/60))+' minutes.'+detail
  if rate_limited_movies:
-  issues['seat-rate-limit']='BookMyShow rate-limited seat checks. No successful seat check in over 15 minutes for '+', '.join(sorted(rate_limited_movies))+'.'
+  issues['seat-rate-limit']='BookMyShow rate-limited seat checks. No successful seat check in over '+str(stale['minutes'])+' minutes for '+', '.join(sorted(rate_limited_movies))+'.'
  pending=db.execute('SELECT min(created),max(attempts) FROM outbox WHERE delivered=0 AND alert_id<>?',('__health__',)).fetchone()
  if pending[0] and now-pending[0]>180 and pending[1]:issues['telegram']='Telegram delivery has failed and messages are waiting for retry. This warning also depends on Telegram recovering.'
  hosting=hosting_status(now)

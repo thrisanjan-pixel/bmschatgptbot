@@ -1,7 +1,6 @@
 """One paced HTTP worker, durable state and Telegram delivery. No browser processes."""
 import argparse
 import datetime as dt
-import fcntl
 import hashlib
 import json
 import logging
@@ -363,6 +362,7 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('--db',default=os.environ.get('BMS_DB','runtime/api.sqlite3'))
     parser.add_argument('--seed-db');parser.add_argument('--seconds',type=int,default=0);parser.add_argument('--dry-run',action='store_true')
     args=parser.parse_args();Path(args.db).parent.mkdir(parents=True,exist_ok=True)
+    import fcntl  # Linux only; the dashboard imports this module on any platform.
     lock=open(args.db+'.lock','a')
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:raise SystemExit('API monitor already running')
