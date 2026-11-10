@@ -104,3 +104,11 @@ Left open on purpose:
 - Install as an app: `/manifest.json` and `/static/icon-*.png` are served without login.
 - Verified live after deploy 5f6ae4f2: one '*' alert watching 2 showtimes, no health errors, no console errors. Not checked on a real iPhone; home-screen install untested.
 - Open: state rows of '*' alerts for showtimes that have ended are not cleaned up. The "Watch next date" note still says to pick rows again for '*' alerts.
+
+## Open on PC (10 Nov 2026, commit f6149c8, deploy 39c459a3)
+
+- Each alert has an "Open on PC" switch. `pc_opener.py` on the owner's PC polls `/api/pc-alerts` (every 3 s while a switch is on, every 30 s otherwise). For the alert's next message from the last 10 minutes, it opens the BookMyShow link in the default browser, sounds an alarm and shows a pop-up, then posts `pc_opened` to turn the switch off.
+- The helper only talks to the dashboard. It never requests BookMyShow and never clicks anything; it opens only `https://in.bookmyshow.com/` links.
+- Start it with `start_pc_opener.bat` (pythonw, no console). It is not added to Windows startup.
+- Automated seat holding or checkout from Railway or the PC was declined: it needs getting past BookMyShow's bot block (the checkout lab got HTTP 403 on Railway).
+- Railway CLI is now signed in as Thrisu; it had been signed in to another account (ItsKG) that cannot access the project.
