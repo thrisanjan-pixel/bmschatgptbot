@@ -297,4 +297,110 @@ class OpenOnPcTests(Base):
   p=prefs.rules(self.db)[0]['preferences'];self.assertFalse(p['open_on_pc']);self.assertTrue(p['urgent'] and p['enabled']);self.assertEqual(p['rows'],['Gold / B'])
   self.assertFalse(self.call(url+'/api/pc-alerts?since=0')[1]['armed'])
 
+class SeatCountTests(Base):
+ """Minimum seats open (row and category alerts) and the seat-map photo that follows every category alert."""
+ def setUp(self):
+  super().setUp();patcher=patch.dict(os.environ,{'BMS_ROWS_ENABLED':'1'});patcher.start();self.addCleanup(patcher.stop)
+  from tests import test_api_watch as T
+  self.T=T;self.job={'id':'discovery:'+T.show_url(T.EVENT,T.DAY),'payload':json.dumps({'event':T.EVENT,'date':T.DAY,'movie':'Test Movie','notify_first':False})}
+ def cat_alert(self,**extra):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'enabled':True,'once':False,**extra},create=True)
+  return prefs.rules(self.db)[0]['id']
+ def open_show(self,*status):
+  """Baseline listing with a sold-out Gold, then the given statuses in turn; returns the stored show."""
+  api_watch.ingest(self.db,self.job,self.T.response(status='0'))
+  for s in status or ('3',):api_watch.ingest(self.db,self.job,self.T.response(status=s))
+  self.db.commit();return json.loads(self.db.execute('SELECT payload FROM sessions').fetchone()[0])
+ def texts(self):return [r[0] for r in self.db.execute('SELECT text FROM outbox ORDER BY created,rowid')]
+ def pending(self):return [dict(r) for r in self.db.execute('SELECT * FROM pending_seat_photos')]
+ def read(self,show,res):
+  """One seat read of the show: the queue picks it, then the result is ingested."""
+  row_watch.schedule_active(self.db,time.time());job=row_watch.next_job(self.db,time.time());self.assertEqual(job['show_id'],show['id'])
+  row_watch.ingest(self.db,show,res);self.db.commit()
+ def test_validate_min_seats(self):
+  self.assertEqual(prefs.defaults()['min_seats'],0);self.assertEqual(prefs.validate({**prefs.defaults()})['min_seats'],0)
+  for good in (0,1,12,50):self.assertEqual(prefs.validate({**prefs.defaults(),'min_seats':good})['min_seats'],good)
+  for bad in (51,-1,True,'3',2.5,None):
+   with self.assertRaises(ValueError):prefs.validate({**prefs.defaults(),'min_seats':bad})
+  self.assertEqual(prefs.preset_preferences({**prefs.defaults(),'min_seats':4})['min_seats'],4)
+ def test_row_alert_waits_for_minimum(self):
+  a=show('A');self.add(a);rid=self.alert(min_seats=3)['id']
+  row_watch.ingest(self.db,a,result('1','2'));self.assertEqual(self.texts(),[])
+  row_watch.ingest(self.db,a,result('1','2','3'))  # the third seat reaches the minimum: all three are named
+  self.assertEqual(len(self.texts()),1);self.assertIn('3 seats now available',self.texts()[0])
+  self.db.execute('UPDATE alerts SET last_alert=0');self.db.execute('UPDATE outbox SET delivered=1');self.db.commit()
+  row_watch.ingest(self.db,a,result('1','2','3','4'));self.assertEqual(len(self.texts()),2);self.assertIn('1 seat now available',self.texts()[1])
+  self.db.execute('UPDATE alerts SET last_alert=0');self.db.commit()
+  row_watch.ingest(self.db,a,result('1','2','3','4'));self.assertEqual(len(self.texts()),2)  # nothing new
+  self.assertEqual(prefs.rules(self.db)[0]['id'],rid)
+ def test_row_alert_minimum_with_party(self):
+  a=show('A');self.add(a);self.alert(min_seats=4,party_size=2)
+  row_watch.ingest(self.db,a,result('1','2','3'));self.assertEqual(self.texts(),[])
+  row_watch.ingest(self.db,a,result('1','2','3','9'));self.assertEqual(len(self.texts()),1);self.assertIn('Best 2 together',self.texts()[0])
+ def test_category_alert_sends_text_then_photo_followup(self):
+  rid=self.cat_alert(once=True,open_on_pc=True);s=self.open_show()
+  self.assertEqual(len(self.texts()),1);self.assertIn('Category now available',self.texts()[0])
+  [p]=self.pending();self.assertEqual((p['alert_id'],p['show_id'],p['mode'],json.loads(p['categories'])),(rid,s['id'],'photo',['Gold']))
+  self.db.execute('UPDATE outbox SET delivered=1');prefs.delivered(self.db,rid);self.db.commit()
+  self.assertEqual(prefs.rules(self.db)[0]['status'],'completed')  # the follow-up is still sent for a finished once alert
+  self.assertEqual(len(prefs.active(self.db)),0)
+  self.read(s,{**result('1','2','3'),'seats':[{'row_id':'Gold / B','seat':str(i),'available':True} for i in range(1,4)]+[{'row_id':'Gold / A','seat':'1','available':False}]})
+  self.assertEqual(self.pending(),[])
+  rows=self.db.execute('SELECT text,photo,alert_id FROM outbox WHERE delivered=0').fetchall();self.assertEqual(len(rows),1)
+  self.assertTrue(rows[0]['text'].startswith('📸 Gold · 3 seats open\n\n🎬 Test Movie\n📍 Test Cinema'));self.assertIn('/seat-layout/',rows[0]['text'])
+  self.assertTrue(rows[0]['photo'].startswith(b'\x89PNG'));self.assertEqual(rows[0]['alert_id'],rid)
+  self.assertEqual(len(prefs.pc_alerts(self.db,0)['events']),1)  # Open on PC opens the page for the alert, not again for the follow-up
+ def test_followup_merges_categories_and_reports_none_open(self):
+  rid=self.cat_alert();s=self.open_show()
+  prefs.queue_seat_photo(self.db,rid,s['id'],['Gold.'],'photo');[p]=self.pending();self.assertEqual(json.loads(p['categories']),['Gold','Gold.'])
+  res={'rows':[{'id':'Gold / B','category':'Gold','row':'B'},{'id':'Gold. / B','category':'Gold.','row':'B'}],
+   'available':[{'row_id':'Gold. / B','seat':'1'},{'row_id':'Gold. / B','seat':'2'}],
+   'seats':[{'row_id':'Gold / B','seat':'1','available':False},{'row_id':'Gold. / B','seat':'1','available':True},{'row_id':'Gold. / B','seat':'2','available':True}],'url':'x'}
+  self.read(s,res);self.assertIn('📸 Gold · 0 seats open · Gold. · 2 seats open\n',self.texts()[-1])  # "Gold." is a different category
+  prefs.queue_seat_photo(self.db,rid,s['id'],['Gold'],'photo');self.read(s,{**res,'available':[]})
+  self.assertTrue(self.texts()[-1].startswith('📸 No seats open in Gold now'));self.assertEqual(len(self.texts()),3)
+ def test_gate_holds_until_minimum_then_sends_once_with_photo(self):
+  rid=self.cat_alert(min_seats=3,once=True);s=self.open_show()
+  self.assertEqual(self.texts(),[]);[p]=self.pending();self.assertEqual(p['mode'],'gate');self.assertIn('Category now available',p['text'])
+  self.assertTrue(prefs.gate_waiting(self.db,rid))
+  self.read(s,result('1','2'));self.assertEqual(self.texts(),[]);[p]=self.pending()
+  self.assertGreaterEqual(p['next_read'],time.time()+590)  # the alert interval (10 min), not the 1-minute read gap
+  self.assertEqual(row_watch.targets(self.db)[0],[]);prefs.delivered(self.db,rid);self.assertEqual(prefs.rules(self.db)[0]['status'],'active')  # a gated once alert never completes
+  self.db.execute('UPDATE pending_seat_photos SET next_read=0');self.db.commit()
+  self.read(s,result('1','2','3'));self.assertEqual(self.pending(),[])
+  rows=self.db.execute('SELECT text,photo FROM outbox').fetchall();self.assertEqual(len(rows),1)
+  self.assertTrue(rows[0]['text'].startswith('🎬 Test Movie'));self.assertIn('Category now available',rows[0]['text']);self.assertIn('📸 Gold · 3 seats open',rows[0]['text']);self.assertTrue(rows[0]['photo'])
+  self.assertGreater(self.db.execute('SELECT last_alert FROM alerts').fetchone()[0],0)
+  self.db.execute('UPDATE outbox SET delivered=1');prefs.delivered(self.db,rid);self.assertEqual(prefs.rules(self.db)[0]['status'],'completed')
+ def test_gate_drops_when_category_closes_or_alert_stops(self):
+  rid=self.cat_alert(min_seats=3);self.open_show();self.assertEqual(len(self.pending()),1)
+  api_watch.ingest(self.db,self.job,self.T.response(status='0'));self.assertEqual(self.pending(),[])  # Gold is no longer bookable
+  s=self.open_show('3');self.assertEqual(len(self.pending()),1)
+  self.db.execute("UPDATE alerts SET payload=json_set(payload,'$.enabled',json('false'))");prefs.prune_seat_photos(self.db);self.assertEqual(self.pending(),[])
+  self.assertEqual(self.texts(),[]);self.assertTrue(s['id'])
+ def test_expiry(self):
+  rid=self.cat_alert();s=self.open_show();now=time.time();sid=s['id']
+  self.assertEqual(len(self.pending()),1)
+  prefs.queue_seat_photo(self.db,rid,sid,['Gold'],'photo',now=now-prefs.PHOTO_LIFETIME-5)
+  prefs.prune_seat_photos(self.db,now);self.assertEqual(self.pending(),[])  # 30 minutes old
+  prefs.queue_seat_photo(self.db,rid,sid,['Gold'],'photo',now=now);prefs.prune_seat_photos(self.db,now+60);self.assertEqual(len(self.pending()),1)
+  self.assertEqual(prefs.seat_photo_shows(self.db,now),[sid]);self.assertEqual(prefs.seat_photo_shows(self.db,now-60),[])
+  prefs.prune_seat_photos(self.db,now+10*86400);self.assertEqual(self.pending(),[])  # the showtime has started
+  prefs.queue_seat_photo(self.db,rid,sid,['Gold'],'photo');self.db.commit();prefs.delete(self.db,rid);self.assertEqual(self.pending(),[])  # alert deleted
+  prefs.queue_seat_photo(self.db,'missing',sid,['Gold'],'photo');prefs.prune_seat_photos(self.db);self.assertEqual(self.pending(),[])
+ def test_pending_read_is_ranked_first_and_not_a_health_problem(self):
+  a=show('A');self.add(a);self.alert();rid=prefs.rules(self.db)[0]['id'];other=show('Z',movie='Other');self.add(other)
+  now=time.time();prefs.queue_seat_photo(self.db,rid,'sZ',['Gold'],'photo',now=now-5);self.db.commit()
+  row_watch.schedule_active(self.db,now);self.assertEqual(row_watch.next_job(self.db,now)['show_id'],'sZ')
+  self.assertIn('sZ',row_watch.queue_order(self.db,now)[2]);self.assertEqual(row_watch.targets(self.db,now)[1],set())
+  setmeta(self.db,'health_watch_started',now-9999);setmeta(self.db,'city_heartbeat',now);setmeta(self.db,'row_reader_heartbeat',now)
+  self.db.execute("INSERT OR REPLACE INTO row_layouts(show_id,payload,checked,error,due) VALUES('sZ','{}',?,'Seat source HTTP 403',0)",(now,));self.db.commit()
+  self.assertEqual(health_watch.problems(self.db,now),{})
+ def test_seat_source_disabled(self):
+  with patch.dict(os.environ,{'BMS_ROWS_ENABLED':'0'}):
+   rid=self.cat_alert(min_seats=3);self.open_show()
+   self.assertEqual(self.pending(),[]);self.assertEqual(len(self.texts()),1);self.assertTrue(self.texts()[0].endswith('(seat count unavailable)'))
+   self.db.execute('DELETE FROM outbox');self.db.execute('UPDATE alerts SET last_alert=0');self.db.commit();prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'enabled':True,'once':False},rid)
+   self.open_show('0','3');self.assertEqual(self.pending(),[]);self.assertNotIn('unavailable',self.texts()[-1])
+
 if __name__=='__main__':unittest.main()

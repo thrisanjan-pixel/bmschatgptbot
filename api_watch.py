@@ -43,6 +43,7 @@ def ingest(db,job,data):
     title=result['film'] or args['movie']
     for show in current.values():show['movie']=show['movie'] or title
     changes={}
+    preferences.drop_unbookable_gates(db,current)
     upcoming = meta(db, 'upcoming_event:'+args['event']) == '1'
     if (previous is not None or args.get('notify_first') or meta(db,'waiting_show:'+job['id'])=='1') and meta(db,'notifications_paused','0')!='1':
         old=previous or {}
@@ -63,32 +64,35 @@ def ingest(db,job,data):
                     and preferences.category_matches(category['name'],prefs)
                     for category in before.values()
                 )
-                change = None
+                change = None;names = []
                 if prefs['new_shows'] and ((upcoming and open_categories and not was_bookable) or (not upcoming and identity not in old)):
                     change = ('Booking open · ' if upcoming else 'New show · ') + show['time']
+                    names = [category['name'] for code, category in show['categories'].items() if code in open_categories]
                 elif identity in old and prefs['availability']:
                     # A seat type opens when it was not bookable at the last check: sold out ('0'),
                     # blocked ('4') or not listed yet for this show.
-                    opened = [preferences.with_price(show,category['name']) for code, category in show['categories'].items()
-                              if code in open_categories and before.get(code,{}).get('status') not in ('1','2','3')]
+                    names = [category['name'] for code, category in show['categories'].items()
+                             if code in open_categories and before.get(code,{}).get('status') not in ('1','2','3')]
+                    opened = [preferences.with_price(show,name) for name in names]
                     if opened:
                         change = 'Category now available · ' + show['time'] + ' · ' + ', '.join(opened)
                 if change:
                     group=groups.setdefault(show['venue_code'],{'show':show,'lines':[]})
-                    group['lines'].append((change,seat_layout_url(show)))
+                    group['lines'].append((change,seat_layout_url(show),show,names))
             if groups:changes[rule['id']]=(rule,groups)
     deferred=False
     if previous!=current:
         revision=int(meta(db,'revision:'+key,'0'))+1
         if changes:
             date=dt.datetime.strptime(result['day'],'%Y%m%d').strftime('%d %b %Y')
+            heading_for=lambda show:f"🎬 {title}\n{show['language']}\n📅 {date}\n📍 {show['venue']}\n\n"
             for alert_id,(rule,groups) in changes.items():
                 prefs=rule['preferences'];messages=[]
                 for venue,group in groups.items():
                     show=group['show']
-                    heading=f"🎬 {title}\n{show['language']}\n📅 {date}\n📍 {show['venue']}\n\n"
+                    heading=heading_for(show)
                     chunks=['']
-                    for line,url in group['lines']:
+                    for line,url,_,_ in group['lines']:
                         block=line+'\n'+url+'\n'
                         if len(chunks[-1])+len(block)>2800:chunks.append('')
                         chunks[-1]+=block
@@ -100,9 +104,20 @@ def ingest(db,job,data):
                 pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(alert_id,)).fetchone()
                 # The interval spaces separate ingests; one ingest's changes go out together.
                 if now-rule['last_alert']>=prefs['interval_minutes']*60 and (not pending or prefs['interval_minutes']==0):
-                    for event,text in messages:emit(db,event,text,alert_id=alert_id)
-                    db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,alert_id))
-                    rule['last_alert']=now
+                    rows = preferences.rows_enabled();minimum = prefs.get('min_seats',0)
+                    if minimum and rows:
+                        # Hold the alert until a seat-map read shows enough open seats (row_watch.process_seat_photos sends it).
+                        for group in groups.values():
+                            for line,url,show,names in group['lines']:
+                                preferences.queue_seat_photo(db,alert_id,show['id'],names,'gate',heading_for(show)+line+'\n'+url+'\n',now)
+                    else:
+                        for event,text in messages:emit(db,event,text+('\n(seat count unavailable)' if minimum else ''),alert_id=alert_id)
+                        if rows:
+                            # The text goes out at once; the seat-map photo follows after the next seat read.
+                            for group in groups.values():
+                                for line,url,show,names in group['lines']:preferences.queue_seat_photo(db,alert_id,show['id'],names,'photo','',now)
+                        db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,alert_id))
+                        rule['last_alert']=now
                 else:
                     # Keep the old baseline so the unsent changes are found again next poll.
                     deferred=True;setmeta(db,'watch_skipped',int(meta(db,'watch_skipped','0'))+1)
@@ -359,7 +374,9 @@ class Monitor:
     def tick(self,db):
         running=preferences.active(db)
         muted=meta(db,'notifications_paused','0')=='1' or not running
-        ready=not muted and not self.dry_run and load()
+        # A seat-photo follow-up is still sent after its alert finished or was paused.
+        followup=muted and bool(db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND text LIKE ? LIMIT 1',(preferences.PHOTO_MARK+'%',)).fetchone())
+        ready=(not muted or followup) and not self.dry_run and load()
         setmeta(db,'notifications_mode','paused' if muted else 'enabled' if ready else 'disabled' if self.dry_run else 'waiting for local setup')
         setmeta(db,'city_state','cooldown' if float(meta(db,'source_cooldown','0'))>time.time() else 'running')
         setmeta(db,'city_heartbeat',time.time());setmeta(db,'monitor_mode','api')
@@ -380,6 +397,7 @@ class Monitor:
                 except Exception as error:
                     db.execute('ROLLBACK TO prime');logging.warning('initial availability check: %s',type(error).__name__)
                 db.execute('RELEASE prime')
+            if (running and meta(db,'notifications_paused','0')!='1') or followup:
                 delivered_id=drain(db,commit=False)
                 if delivered_id:preferences.delivered(db,delivered_id)
             db.commit()

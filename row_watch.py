@@ -9,6 +9,7 @@ from http_source import SourceWait
 def schema(db):
     db.execute("CREATE TABLE IF NOT EXISTS row_layouts(show_id TEXT PRIMARY KEY,payload TEXT,checked REAL DEFAULT 0,error TEXT DEFAULT '',due REAL DEFAULT 0)")
     db.execute("CREATE TABLE IF NOT EXISTS row_alert_state(alert_id TEXT PRIMARY KEY,signature TEXT NOT NULL,available TEXT NOT NULL)")
+    prefs.photo_schema(db)
     # manual=1: someone pressed Load seat rows; it runs at once on the manual budget.
     if 'manual' not in {r[1] for r in db.execute('PRAGMA table_info(row_layouts)')}:
         db.execute('ALTER TABLE row_layouts ADD COLUMN manual INTEGER DEFAULT 0')
@@ -99,6 +100,41 @@ def show_date(show):
     except (TypeError,ValueError):return show.get('date','')
 
 
+def count_line(counts):
+    """'3D GOLD · 14 seats open · 3D GOLD. · 6 seats open', or the sentence for no open seat."""
+    if not sum(counts.values()):return 'No seats open in '+', '.join(counts)+' now'
+    return ' · '.join(f"{name} · {n} seat{'s' if n!=1 else ''} open" for name,n in counts.items())
+
+def process_seat_photos(db,show,result):
+    """After a seat read: send the seat-map follow-ups and the seat-count gated alerts waiting on this showtime."""
+    now=time.time();prefs.prune_seat_photos(db,now)
+    for r in db.execute('SELECT * FROM pending_seat_photos WHERE show_id=?',(show['id'],)).fetchall():
+        names=json.loads(r['categories']);category=lambda row_id:prefs.normalized(row_id.rsplit(' / ',1)[0])
+        # "3D GOLD." is another category than "3D GOLD", so names match whole, not by prefix.
+        counts={n:sum(1 for x in result['available'] if category(x['row_id'])==prefs.normalized(n)) for n in names}
+        line=count_line(counts)
+        if r['mode']=='gate':
+            row=db.execute('SELECT payload FROM alerts WHERE id=?',(r['alert_id'],)).fetchone()
+            if not row:db.execute('DELETE FROM pending_seat_photos WHERE alert_id=? AND show_id=?',(r['alert_id'],r['show_id']));continue
+            p=json.loads(row[0])
+            if sum(counts.values())<p.get('min_seats',0):
+                db.execute('UPDATE pending_seat_photos SET next_read=? WHERE alert_id=? AND show_id=?',(now+max(120,p.get('interval_minutes',10)*60),r['alert_id'],r['show_id']));continue
+            text=r['text'].rstrip()+'\n\n'+prefs.PHOTO_MARK+' '+line
+        else:
+            try:
+                from api_source import seat_layout_url
+                link=seat_layout_url(show)
+            except Exception:link=result.get('url','')
+            text=f"{prefs.PHOTO_MARK} {line}\n\n🎬 {show['movie']}\n📍 {show['venue']}\n📅 {show_date(show)} · {show['time']}"+(f'\n\n{link}' if link else '')
+        wanted={prefs.normalized(n) for n in names}
+        try:
+            from seat_map import render
+            photo=render(show,result,[x['id'] for x in result['rows'] if category(x['id']) in wanted])
+        except Exception:photo=None  # The text still carries the counts.
+        emit(db,r['mode']+':'+r['alert_id']+':'+r['show_id']+':'+str(time.time_ns()),text,photo,alert_id=r['alert_id'])
+        if r['mode']=='gate':db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,r['alert_id']))
+        db.execute('DELETE FROM pending_seat_photos WHERE alert_id=? AND show_id=?',(r['alert_id'],r['show_id']))
+
 def ingest(db,show,result):
     schema(db);old=get(db,show['id']);previous=old['data']
     # Seats open now that were taken at the last good read; the first read marks none.
@@ -128,6 +164,14 @@ def ingest(db,show,result):
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
                     (key,signature,json.dumps(sorted(current))))
                 continue
+            minimum=p.get('min_seats',0)
+            if minimum:
+                if len(current)<minimum:
+                    # Remember what is open so the seat that reaches the minimum counts as new.
+                    db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',(key,signature,json.dumps(sorted(current))))
+                    continue
+                # The count has just reached the minimum: name every open seat, not only the newest.
+                if len(before)<minimum:added=[s for s in result['available'] if s['row_id'] in selected]
             party=p.get('party_size',0)
             block=best_block(result,selected,party,{(s['row_id'],s['seat']) for s in added}) if party else None
             if party and not block:
@@ -165,11 +209,12 @@ def ingest(db,show,result):
                 db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,rule['id']))
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
                     (key,signature,json.dumps(sorted(current))))
+    process_seat_photos(db,show,result)
     db.execute('UPDATE row_layouts SET payload=?,checked=?,error=?,due=0,manual=0 WHERE show_id=?',(json.dumps(result),time.time(),'',show['id']));db.commit()
 
-def targets(db):
-    """(sorted showtime ids read for active row alerts, the subset an urgent alert reads)."""
-    active=set();urgent=set();shows=None
+def targets(db,now=None):
+    """(sorted showtime ids read for active row alerts or waiting seat photos, the subset an urgent alert reads)."""
+    active=set(prefs.seat_photo_shows(db,now));urgent=set();shows=None
     for rule in prefs.active(db):
         p=rule['preferences']
         if not p['row_show']:continue
@@ -179,9 +224,13 @@ def targets(db):
     return sorted(active),urgent
 
 def schedule_active(db,now,interval=30):
-    if meta(db,'notifications_paused','0')=='1':return
-    schema(db)
-    for show_id in targets(db)[0]:
+    schema(db);prefs.prune_seat_photos(db,now)
+    # A seat photo is read even when every alert is paused or finished.
+    for show_id in prefs.seat_photo_shows(db,now):
+        db.execute("INSERT OR IGNORE INTO row_layouts(show_id,payload) VALUES(?,'{}')",(show_id,))
+        db.execute('UPDATE row_layouts SET due=? WHERE show_id=? AND due=0',(now,show_id))
+    if meta(db,'notifications_paused','0')=='1':db.commit();return
+    for show_id in targets(db,now)[0]:
         # A '*' alert finds new showtimes on its own, so their rows may not exist yet.
         db.execute("INSERT OR IGNORE INTO row_layouts(show_id,payload) VALUES(?,'{}')",(show_id,))
         db.execute('UPDATE row_layouts SET due=? WHERE show_id=? AND due=0 AND checked<?',(now,show_id,now-interval))
@@ -198,14 +247,15 @@ def poll_policy(db,now,cloud=True):
 
 def queue_order(db,now):
     """ORDER BY clause and its parameters for the seat-read queue."""
-    active,urgent=targets(db);urgent=sorted(urgent)
-    slots=','.join('?' for _ in active) or "''";hot=','.join('?' for _ in urgent) or "''"
+    active,urgent=targets(db,now);urgent=sorted(urgent);rush=prefs.seat_photo_shows(db,now)
+    slots=','.join('?' for _ in active) or "''";hot=','.join('?' for _ in urgent) or "''";first=','.join('?' for _ in rush) or "''"
     # An alert showtime overdue by 2 minutes goes first, so browsing cannot starve it.
     # Then a showtime nobody has seen yet (someone is waiting on the page);
     # routine alert refreshes would otherwise take every slot of the source budget.
     # An urgent alert's showtimes count their overdue time three times (2 minutes becomes 40 s).
-    order=f"CASE WHEN show_id IN ({slots}) AND due<(CASE WHEN show_id IN ({hot}) THEN ? ELSE ? END) THEN 0 WHEN checked=0 AND error='' THEN 1 WHEN due<? THEN 2 WHEN show_id IN ({slots}) THEN 3 ELSE 4 END,CASE WHEN show_id IN ({hot}) THEN due-(?-due)*2 ELSE due END"
-    return order,(*active,*urgent,now-40,now-120,now-90,*active,*urgent,now),set(active)
+    # A waiting seat photo ranks first as soon as it is due.
+    order=f"CASE WHEN show_id IN ({first}) THEN 0 WHEN show_id IN ({slots}) AND due<(CASE WHEN show_id IN ({hot}) THEN ? ELSE ? END) THEN 0 WHEN checked=0 AND error='' THEN 1 WHEN due<? THEN 2 WHEN show_id IN ({slots}) THEN 3 ELSE 4 END,CASE WHEN show_id IN ({hot}) THEN due-(?-due)*2 ELSE due END"
+    return order,(*rush,*active,*urgent,now-40,now-120,now-90,*active,*urgent,now),set(active)
 
 def next_job(db,now):
     if source_ready_at(db)>now:return None

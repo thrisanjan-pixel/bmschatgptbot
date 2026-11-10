@@ -1,6 +1,7 @@
 """Saved personal watch filters and conservative Telegram pacing."""
 import datetime as dt
 import json
+import os
 import re
 import sqlite3
 import time
@@ -35,7 +36,7 @@ def format_matches(actual,wanted):
     if wanted in ('imax','4dx'):return wanted in actual
     return actual==wanted
 def defaults():
-    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'notify_existing':True,'interval_minutes':10,'row_show':'','rows':[],'party_size':0,'request_state':'','urgent':False,'open_on_pc':False}
+    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'notify_existing':True,'interval_minutes':10,'row_show':'','rows':[],'party_size':0,'request_state':'','urgent':False,'open_on_pc':False,'min_seats':0}
 
 def future_shows(db):
     """Active future showtimes as (cutoff, show), soonest first."""
@@ -177,10 +178,16 @@ def prime_availability(db):
                     lines.append(' · '.join(str(show.get(key) or '') for key in ('venue','date','time'))+'\n'+
                         ', '.join(with_price(show,name) for name in opened)+'\n'+link)
                 extra=f'\n\n{len(found)-3} more matching showtimes are open.' if len(found)>3 else ''
-                message='🎬 '+str(found[0][0].get('movie') or '')+'\nSeats already available for this alert:\n\n'+\
-                    '\n\n'.join(lines)+extra
-                emit(db,'initial:'+rule['id']+':'+signature,message[:3900],alert_id=rule['id'])
-                db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(time.time(),rule['id']))
+                head='🎬 '+str(found[0][0].get('movie') or '')+'\nSeats already available for this alert:\n\n'
+                message=head+'\n\n'.join(lines)+extra
+                if p['min_seats'] and rows_enabled():
+                    # Hold each showtime's alert until a seat-map read shows enough open seats.
+                    for (show,opened,link),line in zip(found[:3],lines):queue_seat_photo(db,rule['id'],show['id'],opened,'gate',head+line)
+                else:
+                    emit(db,'initial:'+rule['id']+':'+signature,(message+('\n\n(seat count unavailable)' if p['min_seats'] else ''))[:3900],alert_id=rule['id'])
+                    if rows_enabled():
+                        for show,opened,link in found[:3]:queue_seat_photo(db,rule['id'],show['id'],opened,'photo')
+                    db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(time.time(),rule['id']))
         seen.add(signature)
         db.execute('INSERT OR REPLACE INTO alert_initial_state VALUES(?,?)',(rule['id'],signature))
 
@@ -223,6 +230,9 @@ def validate(data,preset=False):
     party=data.get('party_size',0)
     if type(party) is not int or not (party==0 or 2<=party<=10):raise ValueError('Choose 2 to 10 seats together, or any open seat')
     result['party_size']=party if result['row_show'] else 0
+    minimum=data.get('min_seats',0)
+    if type(minimum) is not int or not (minimum==0 or 1<=minimum<=50):raise ValueError('Choose 1 to 50 minimum seats, or off')
+    result['min_seats']=minimum
     if result['rows'] and not result['row_show']:raise ValueError('Select a specific showtime for rows')
     if result['enabled'] and (not result['movies'] or (not result['row_show'] and not (result['new_shows'] or result['availability']))):raise ValueError('Select at least one movie and an alert type before enabling')
     return result
@@ -337,7 +347,7 @@ def delete(db,alert_id):
     # Once a user deletes a migrated request, an empty alerts table is real
     # state. Do not recreate it from obsolete single-alert settings on GET.
     setmeta(db,'alerts_migration_complete','1')
-    for table in ('row_alert_state','alert_initial_state'):
+    for table in ('row_alert_state','alert_initial_state','pending_seat_photos'):
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
             # A '*' alert keeps one state row per showtime, keyed alert_id:show_id.
             db.execute(f'DELETE FROM {table} WHERE alert_id=? OR substr(alert_id,1,?)=?',(alert_id,len(alert_id)+1,alert_id+':'))
@@ -346,13 +356,65 @@ def delete(db,alert_id):
     setmeta(db,'notifications_mode','enabled' if enabled else 'paused')
     db.commit()
 
+PHOTO_MARK='📸'  # seat-photo follow-ups start with it, so Open on PC does not reopen the page for them
+PHOTO_LIFETIME=1800  # a photo follow-up that could not be sent in 30 minutes is dropped
+
+def rows_enabled():
+    """Whether seat maps can be read on this host; without them no seat photo or seat count exists."""
+    return os.environ.get('BMS_ROWS_ENABLED')=='1'
+
+def photo_schema(db):
+    db.execute("CREATE TABLE IF NOT EXISTS pending_seat_photos(alert_id TEXT NOT NULL,show_id TEXT NOT NULL,categories TEXT NOT NULL,mode TEXT NOT NULL,text TEXT NOT NULL DEFAULT '',created REAL NOT NULL,next_read REAL NOT NULL,PRIMARY KEY(alert_id,show_id))")
+
+def queue_seat_photo(db,alert_id,show_id,categories,mode,text='',now=None):
+    """Ask for a seat-map follow-up ('photo') or a seat-count gate ('gate') for one alert and showtime.
+    A second opening of the same alert and showtime merges into the waiting row."""
+    photo_schema(db);now=time.time() if now is None else now
+    old=db.execute('SELECT categories,text,mode,created FROM pending_seat_photos WHERE alert_id=? AND show_id=?',(alert_id,show_id)).fetchone()
+    if old and old['mode']!=mode:old=None  # the alert was edited between modes: start over
+    names=list(dict.fromkeys([*(json.loads(old['categories']) if old else []),*categories]))
+    if old and text and old['text'] and text not in old['text']:text=old['text']+chr(10)*2+text
+    elif old:text=old['text'] or text
+    db.execute('INSERT OR REPLACE INTO pending_seat_photos VALUES(?,?,?,?,?,?,?)',(alert_id,show_id,json.dumps(names),mode,text,now,now))
+
+def gate_waiting(db,alert_id):
+    photo_schema(db)
+    return bool(db.execute("SELECT 1 FROM pending_seat_photos WHERE alert_id=? AND mode='gate' LIMIT 1",(alert_id,)).fetchone())
+
+def prune_seat_photos(db,now=None):
+    """Drop rows whose alert is gone, whose gated alert stopped, whose showtime started, or that waited too long."""
+    photo_schema(db);now=time.time() if now is None else now
+    for r in db.execute('SELECT alert_id,show_id,mode,created FROM pending_seat_photos').fetchall():
+        alert=db.execute('SELECT payload,completed FROM alerts WHERE id=?',(r['alert_id'],)).fetchone()
+        cutoff=db.execute('SELECT cutoff FROM sessions WHERE id=? AND active=1',(r['show_id'],)).fetchone()
+        if r['mode']=='photo':drop=not alert or now-r['created']>PHOTO_LIFETIME
+        else:
+            try:p=json.loads(alert[0]) if alert else {}
+            except ValueError:p={}
+            drop=not alert or not p.get('enabled') or alert[1]
+        if drop or not cutoff or cutoff[0]<=now:db.execute('DELETE FROM pending_seat_photos WHERE alert_id=? AND show_id=?',(r['alert_id'],r['show_id']))
+
+def drop_unbookable_gates(db,current):
+    """A gated alert stops waiting once none of its categories is bookable in the latest listing."""
+    photo_schema(db)
+    for show in current.values():
+        for r in db.execute("SELECT alert_id,categories FROM pending_seat_photos WHERE mode='gate' AND show_id=?",(show['id'],)).fetchall():
+            names={normalized(n) for n in json.loads(r['categories'])}
+            if not any(c['status'] in ('1','2','3') and normalized(c['name']) in names for c in show['categories'].values()):
+                db.execute("DELETE FROM pending_seat_photos WHERE alert_id=? AND show_id=?",(r['alert_id'],show['id']))
+
+def seat_photo_shows(db,now=None):
+    """Showtimes with a follow-up due now: they are read like urgent seat alerts."""
+    photo_schema(db);now=time.time() if now is None else now
+    return sorted({r[0] for r in db.execute('SELECT show_id FROM pending_seat_photos WHERE next_read<=?',(now,))})
+
 def delivered(db,alert_id=None):
     saved=rules(db)
     rule=next((r for r in saved if r['id']==alert_id),None) if alert_id else (saved[0] if saved else None)
     if not rule:return
     p=rule['preferences']
     # One check can queue several messages (a cinema each, or 2800-char chunks); finish only after the last is delivered.
-    if p['once'] and not db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone():
+    if p['once'] and not db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone() and not gate_waiting(db,rule['id']):
         p['enabled']=False
         db.execute('UPDATE alerts SET payload=?,updated=?,completed=? WHERE id=?',
             (json.dumps(p),time.time(),time.time(),rule['id']))
@@ -472,7 +534,7 @@ def pc_alerts(db,since,now=None):
         if p.get('open_on_pc'):on[r['id']]=bool(p.get('row_show'));armed=armed or bool(p.get('enabled'))
     events=[]
     if on:
-        for r in db.execute(f"SELECT id,alert_id,created,text FROM outbox WHERE created>? AND created>? AND alert_id IN ({','.join('?'*len(on))}) ORDER BY created",(since,now-PC_WINDOW,*on)):
+        for r in db.execute(f"SELECT id,alert_id,created,text FROM outbox WHERE created>? AND created>? AND text NOT LIKE '{PHOTO_MARK}%' AND alert_id IN ({','.join('?'*len(on))}) ORDER BY created",(since,now-PC_WINDOW,*on)):
             url=pc_link(r['text'])
             if url:events.append({'id':r['id'],'alert':r['alert_id'],'created':r['created'],'summary':history_summary(r['text'],on[r['alert_id']]),'url':url})
             if len(events)>=5:break
