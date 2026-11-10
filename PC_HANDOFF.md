@@ -94,3 +94,13 @@ Left open on purpose:
 - Two alerts with different intervals on the same listing can repeat a line, because the snapshot baseline is shared between alerts.
 - `watch_preferences.rules()` re-reads every job for every alert on each call; slow with many alerts.
 - The health label for a showtime alert uses the newest check of any of the movie's listings, so one healthy listing can hide a failing one.
+
+## New alert features (10 Nov 2026, commit 951a06e)
+
+- Any-showtime row alert: `row_show='*'` watches the chosen rows at every matching showtime of exactly one theatre, up to 20 showtimes (`ROW_ANY_LIMIT`). Seat memory is kept per showtime in `row_alert_state` under `alert_id:show_id`. The seat budget is unchanged (60 reads an hour), so with N watched showtimes each is read about every N minutes.
+- Urgent alerts (`urgent`): their listings count overdue time three times, and their showtimes jump the seat queue after 40 s instead of 2 minutes.
+- Presets: stored in meta `alert_presets`; POST actions `save_preset` and `delete_preset`.
+- History: GET `/api/watch` gives each alert its last 10 outbox messages.
+- Install as an app: `/manifest.json` and `/static/icon-*.png` are served without login.
+- Verified live after deploy 5f6ae4f2: one '*' alert watching 2 showtimes, no health errors, no console errors. Not checked on a real iPhone; home-screen install untested.
+- Open: state rows of '*' alerts for showtimes that have ended are not cleaned up. The "Watch next date" note still says to pick rows again for '*' alerts.
