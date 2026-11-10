@@ -174,6 +174,17 @@ body .filter-box[open]>.filter-menu .option-list{max-height:none;overflow:visibl
 .map-row button.open-seat.new-seat{background:#ca8a04;color:#fffbeb;border-color:#facc15}.seat-legend .lg-new{background:#ca8a04}
 .alerts-layout{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px;align-items:start;margin-bottom:20px}.alerts-layout .alert-grid{margin-bottom:0}.check-queue{position:sticky;top:16px;padding:16px;max-height:calc(100vh - 32px);overflow:auto;margin:0}.cq-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}.cq-head h2{margin:0;font-size:16px}.cq-head small{color:#9ca3af;font-size:11px}.check-queue h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#9ca3af;margin:14px 0 6px}.cq-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}.cq-item{border:1px solid #ffffff14;border-radius:8px;padding:8px 10px;background:#ffffff06}.cq-item.bad{border-color:#ef444466}.cq-top{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px}.cq-chip{border-radius:999px;padding:1px 7px;font-weight:600}.cq-chip.showtimes{background:#3b82f626;color:#93c5fd}.cq-chip.seats{background:#10b98126;color:#6ee7b7}.cq-time{color:#9ca3af;font-variant-numeric:tabular-nums;white-space:nowrap}.cq-title{font-size:13px;font-weight:600;margin-top:4px}.cq-detail{font-size:11px;color:#9ca3af;overflow-wrap:anywhere}.cq-empty{font-size:12px;color:#9ca3af}.cq-note{font-size:11px;color:#9ca3af;margin:12px 0 0}@media(max-width:900px){.alerts-layout{grid-template-columns:1fr}.check-queue{position:static;max-height:none}}
 .stale-controls{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:end;margin:6px 0}.stale-controls .field{min-width:160px}
+/* Phone: an open picker is a bottom sheet with its own Done button, above the keyboard. */
+.filter-sheet-head{display:none}
+@media(max-width:680px){
+body .filter-box[open]>.filter-menu,body .schedule-grid .filter-box[open]>.filter-menu{position:fixed;left:0;right:0;top:auto;bottom:var(--keyboard,0px);width:auto;max-height:min(72dvh,calc(100dvh - var(--keyboard,0px) - 56px));margin:0;padding:0 14px calc(14px + env(safe-area-inset-bottom));border-radius:16px 16px 0 0;z-index:1000;box-shadow:0 0 0 100vmax #000b;overflow-y:auto;overscroll-behavior:contain}
+.filter-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:12px;position:sticky;top:0;z-index:2;margin:0 -14px 10px;padding:12px 14px 10px;background:#15171d;border-bottom:1px solid #ffffff14;font-size:15px}
+.filter-sheet-head .button{min-height:40px;padding:0 18px}
+.filter-box[open]>.filter-menu>.filter-search{position:static}
+html.sheet-open,html.sheet-open body{overflow:hidden}
+/* 16px stops iOS zooming the page when a field gets focus. */
+input,select,textarea{font-size:16px!important}
+}
 </style>
 </head>
 <body>
@@ -290,8 +301,12 @@ function categoryLabel(value, layoutRows=[]){
  }
  return base+' — Section '+(peers.indexOf(value)+1);
 }
+const phoneLayout=()=>matchMedia('(max-width:680px)').matches;
 function positionPicker(panel){
- const menu=panel.querySelector('.filter-menu'),rect=panel.querySelector('summary').getBoundingClientRect();
+ const menu=panel.querySelector('.filter-menu');
+ // On a phone the open picker is a bottom sheet laid out by CSS alone.
+ if(phoneLayout()){menu.removeAttribute('style');return}
+ const rect=panel.querySelector('summary').getBoundingClientRect();
  const below=innerHeight-rect.bottom-12,above=rect.top-12,up=below<180&&above>below;
  const height=Math.min(360,Math.max(100,up?above:below));
  Object.assign(menu.style,{width:Math.min(rect.width,innerWidth-24)+'px',left:Math.max(12,Math.min(rect.left,innerWidth-rect.width-12))+'px',maxHeight:height+'px',top:up?'auto':rect.bottom+6+'px',bottom:up?innerHeight-rect.top+6+'px':'auto'});
@@ -312,7 +327,7 @@ function picker(key,saved=[]){
  function addOption(o){const label=el('label'),input=el('input');input.type='checkbox';input.value=o.value;input.checked=(saved||[]).some(v=>norm(v)===norm(o.value));if(o.custom)input.dataset.custom='1';label.append(input,el('span','',o.label));list.append(label);return input}
  for(const o of options)addOption(o);
  all.onclick=()=>{list.querySelectorAll('label:not([hidden]) input:not(:disabled)').forEach(i=>i.checked=true);selectionChanged(key);panel.open=false};
- clear.onclick=()=>{list.querySelectorAll('input').forEach(i=>i.checked=false);selectionChanged(key);panel.open=false};tools.append(all,clear);menu.append(search,tools,list);
+ clear.onclick=()=>{list.querySelectorAll('input').forEach(i=>i.checked=false);selectionChanged(key);panel.open=false};tools.append(all,clear);const head=el('div','filter-sheet-head'),done=el('button','button','Done');done.type='button';done.onclick=()=>{panel.open=false};head.append(el('strong','',labels[key]),done);menu.append(head,search,tools,list);
  if(['movies','screens','languages','formats','categories','dates'].includes(key)){
   const custom=el('div','future-option-add'),input=el('input'),add=el('button','button','Add');input.type=key==='dates'?'date':'text';if(key==='dates')input.min=new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'});input.maxLength=key==='movies'?300:80;input.setAttribute('aria-label',key==='dates'?'Add future date':'Add future '+labels[key].toLowerCase());input.placeholder='Add future '+labels[key].toLowerCase()+'…';add.type='button';
   if(key==='movies'){input.placeholder='Upcoming movie title';add.textContent='Track title';menu.append(el('p','filter-hint','Enter the BookMyShow title to watch for its first Hyderabad bookings.'))}
@@ -336,9 +351,9 @@ function picker(key,saved=[]){
  const hint=el('div','filter-hint');hint.id='hint-'+key;menu.append(hint);panel.append(summary,menu);
  search.oninput=()=>{for(const item of list.querySelectorAll('label'))item.hidden=item.dataset.unavailable==='1'||!norm(item.textContent).includes(norm(search.value))};
  list.onchange=()=>{if(key==='movies'){search.value='';panel.open=false}selectionChanged(key)};
- panel.addEventListener('toggle',()=>{if(panel.open){document.querySelectorAll('.filter-box[open]').forEach(other=>{if(other!==panel)other.open=false});positionPicker(panel);search.focus({preventScroll:true})}});const wrapper=el('div','schedule-picker');wrapper.append(top,panel);return wrapper;
+ panel.addEventListener('toggle',()=>{if(panel.open){document.querySelectorAll('.filter-box[open]').forEach(other=>{if(other!==panel)other.open=false});positionPicker(panel);if(matchMedia('(hover:hover) and (pointer:fine)').matches)search.focus({preventScroll:true})}document.documentElement.classList.toggle('sheet-open',!!document.querySelector('.filter-box[open]'))});const wrapper=el('div','schedule-picker');wrapper.append(top,panel);return wrapper;
 }
-window.addEventListener('resize',()=>document.querySelectorAll('.filter-box[open]').forEach(positionPicker));document.addEventListener('scroll',()=>document.querySelectorAll('.filter-box[open]').forEach(positionPicker),true);document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.querySelector('.filter-box[open]')){e.stopImmediatePropagation();document.querySelectorAll('.filter-box[open]').forEach(p=>{p.open=false;p.querySelector('summary').focus()})}});
+window.addEventListener('resize',()=>document.querySelectorAll('.filter-box[open]').forEach(positionPicker));if(window.visualViewport){const keyboard=()=>document.documentElement.style.setProperty('--keyboard',Math.max(0,innerHeight-visualViewport.height-visualViewport.offsetTop)+'px');visualViewport.addEventListener('resize',keyboard);visualViewport.addEventListener('scroll',keyboard)}document.addEventListener('scroll',()=>document.querySelectorAll('.filter-box[open]').forEach(positionPicker),true);document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.querySelector('.filter-box[open]')){e.stopImmediatePropagation();document.querySelectorAll('.filter-box[open]').forEach(p=>{p.open=false;p.querySelector('summary').focus()})}});
 function profilesForSelections(){let profile=watchData?.options.profiles||[];for(const key of keys){const values=currentValues(key);if(!values.length)continue;const property=dimensions[key];profile=profile.filter(p=>key==='categories'?p.categories.some(c=>values.includes(c)):values.includes(p[property]))}return profile}
 const facetField={screens:'screen',languages:'language',formats:'format',dates:'date',categories:'categories'};
 function profileMatches(p,skip){const cinemas=currentValues('cinemas');if(cinemas.length&&!cinemas.includes(p.cinema))return false;for(const [key,field] of [['movies','movie'],['screens','screen'],['languages','language'],['formats','format'],['dates','date']])if(key!==skip&&!pickedMatch(currentValues(key),p[field]))return false;return skip==='categories'||!currentValues('categories').length||currentValues('categories').some(c=>p.categories.some(v=>norm(v)===norm(c)))}
