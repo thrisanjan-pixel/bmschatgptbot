@@ -80,3 +80,17 @@ The old environment's private proxy CA was explicitly approved only for that env
 6. Verify fresh heartbeat plus increasing successful coverage, labelled Telegram delivery, volume persistence through redeployment and an actual later source change. Source cooldown is not successful coverage. State polling limits accurately.
 
 Keep working independently on authorized reversible tasks; ask only for access or constraints that are actually missing. Do not tell the user the system is fully instant/24/7 until evidence supports those claims.
+
+## Full audit pass (10 Nov 2026)
+
+Three read-only audits (phone UI, backend, request limits) and their fixes, commits 3232f1f to 1b011d8.
+
+- Phone UI: alert pickers open as a bottom sheet with a Done button on screens up to 680px wide; form fields are 16px there so iOS does not zoom; the search box is not auto-focused on touch devices. The Save bar in the alert form is sticky. The alert list is rebuilt only when what the cards show changes (compared to the minute) and never within 1.5 s of a touch.
+- Delivery: a once alert completes after its last queued message, not its first. `telegram.claim` hides an outbox row for 120 s before sending so two workers cannot both send it. A Telegram 429 sets `telegram_blocked_until` and pauses all sends.
+- Scheduling: seat spacing is 60 s to match the source gap, and a budget wait never changes a job's due time. Background listings get at most one turn in five (`BACKGROUND_SPACING=300`) and get the turn back when no request was made. A never-checked alert listing joins the end of the overdue line. "Retry now" clears only the budget and spacing waits, never a 429 Retry-After deadline.
+
+Left open on purpose:
+- The hosted dashboard has no password (`SCREENWATCH_PASSWORDLESS=1`). Anyone with the link can change alerts. Owner's decision.
+- Two alerts with different intervals on the same listing can repeat a line, because the snapshot baseline is shared between alerts.
+- `watch_preferences.rules()` re-reads every job for every alert on each call; slow with many alerts.
+- The health label for a showtime alert uses the newest check of any of the movie's listings, so one healthy listing can hide a failing one.
