@@ -112,3 +112,12 @@ Left open on purpose:
 - Start it with `start_pc_opener.bat` (pythonw, no console). It is not added to Windows startup.
 - Automated seat holding or checkout from Railway or the PC was declined: it needs getting past BookMyShow's bot block (the checkout lab got HTTP 403 on Railway).
 - Railway CLI is now signed in as Thrisu; it had been signed in to another account (ItsKG) that cannot access the project.
+
+## Minimum seats and category seat photos (10 Nov 2026, commit 2be058a, deploy 00e33ee0)
+
+- `min_seats` (0 = off, 1–50): an alert fires only when at least that many seats are open in its chosen rows or opened categories.
+- Category alerts send their text at once, then a "📸" follow-up with the seat-map photo and per-category counts after the next seat read. With `min_seats` set, they wait in `pending_seat_photos` (mode 'gate') and send one message when the minimum is met.
+- Photo reads share the 60-an-hour seat budget and go ahead of routine reads.
+- `notifications_paused` means "no alert is enabled", not a manual pause, so follow-ups still go out after a once alert finishes.
+- Open on PC ignores "📸" follow-ups, so the page is not opened twice.
+- Not yet seen on a live alert: the first real category opening will show whether the photo arrives about a minute later.
