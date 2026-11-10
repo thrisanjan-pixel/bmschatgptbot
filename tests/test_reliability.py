@@ -2,7 +2,12 @@ import json,os,tempfile,time,unittest
 from pathlib import Path
 from unittest.mock import patch
 from store import connect,setmeta,record_check,emit
+import datetime as dt
+from api_source import IST
 import health_watch,watch_preferences as prefs,api_watch,row_watch,telegram
+
+# Dates relative to today in IST so the tests do not rot.
+D1=(dt.datetime.now(IST)+dt.timedelta(days=2)).strftime('%Y%m%d');D2=(dt.datetime.now(IST)+dt.timedelta(days=4)).strftime('%Y%m%d')
 
 class ReliabilityTests(unittest.TestCase):
  def setUp(self):
@@ -35,20 +40,21 @@ class ReliabilityTests(unittest.TestCase):
   self.db.commit();self.assertEqual(api_watch.next_job(self.db,1000)['id'],'active')
   self.db.execute("UPDATE jobs SET due=600 WHERE id='background'");self.db.commit();self.assertEqual(api_watch.next_job(self.db,1000)['id'],'background')
  def test_dates_no_alert_asks_for_do_not_crowd_out_other_alerts(self):
-  prefs.save(self.db,{**prefs.defaults(),'movies':['Watched'],'dates':['20261106'],'enabled':True},create=True)
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Watched'],'dates':[D1],'enabled':True},create=True)
   prefs.save(self.db,{**prefs.defaults(),'movies':['Second'],'enabled':True},create=True)
-  for name,movie,day,due in [('other-date','Watched','20261110',980),('alert-date','Watched','20261106',990),('undated','Watched','',991),('second','Second','',995)]:
+  for name,movie,day,due in [('other-date','Watched',D2,980),('alert-date','Watched',D1,990),('undated','Watched','',991),('second','Second','',995)]:
    self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'discovery','https://example.test/'+name,json.dumps({'movie':movie,'date':day}),due))
   self.db.commit();order=[]
   for _ in range(4):
    job=api_watch.next_job(self.db,1000);order.append(job['id']);self.db.execute('UPDATE jobs SET due=5000 WHERE id=?',(job['id'],));self.db.commit()
   # The undated listing is background: the alert's only date already has its own listing.
   self.assertEqual(order[:2],['alert-date','second']);self.assertEqual(set(order[2:]),{'other-date','undated'})
-  self.assertEqual(api_watch.poll_interval(self.db,{'kind':'discovery','payload':json.dumps({'movie':'Watched','date':'20261110'})}),120)
+  self.assertEqual(api_watch.poll_interval(self.db,{'kind':'discovery','payload':json.dumps({'movie':'Watched','date':D2})}),120)
  def test_movie_with_many_listings_does_not_starve_another_alert_movie(self):
   prefs.save(self.db,{**prefs.defaults(),'movies':['Big'],'enabled':True},create=True)
   prefs.save(self.db,{**prefs.defaults(),'movies':['Small'],'enabled':True},create=True)
-  for i in range(10):self.db.execute('INSERT INTO jobs(id,kind,url,payload,due,checked) VALUES(?,?,?,?,0,0)',('big'+str(i),'discovery','https://example.test/b'+str(i),json.dumps({'movie':'Big','date':''})))
+  # Routine listings (already scheduled), so the older one for the other movie still goes first.
+  for i in range(10):self.db.execute('INSERT INTO jobs(id,kind,url,payload,due,checked) VALUES(?,?,?,?,995,0)',('big'+str(i),'discovery','https://example.test/b'+str(i),json.dumps({'movie':'Big','date':''})))
   self.db.execute("INSERT INTO jobs(id,kind,url,payload,due,checked) VALUES('small','discovery','https://example.test/s',?,990,500)",(json.dumps({'movie':'Small','date':''}),))
   self.db.execute("UPDATE jobs SET checked=900 WHERE id='big0'");setmeta(self.db,'listing_background_attempt',995);self.db.commit()
   self.assertEqual(api_watch.next_job(self.db,1000)['id'],'small')
@@ -67,7 +73,7 @@ class ReliabilityTests(unittest.TestCase):
   prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
   now=time.time()
   for name,movie,due,checked in [('a','Epic',now-30,now-400),('b','Epic',now+500,now-100),('bg','Other',now-30,0)]:
-   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due,checked) VALUES(?,?,?,?,?,?)',(name,'discovery','https://example.test/'+name,json.dumps({'movie':movie,'date':'20261106','event':'ET1'}),due,checked))
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due,checked) VALUES(?,?,?,?,?,?)',(name,'discovery','https://example.test/'+name,json.dumps({'movie':movie,'date':D1,'event':'ET1'}),due,checked))
   record_check(self.db,'listings','b',now-100,now=now-100);self.db.commit()
   data=dashboard.check_queue(self.db)
   self.assertEqual([(i['kind'],i['movie']) for i in data['upcoming']],[('showtimes','Epic'),('showtimes','Epic')])
@@ -87,18 +93,18 @@ class ReliabilityTests(unittest.TestCase):
   setmeta(self.db,'stale_warning_minutes','7');setmeta(self.db,'stale_warning_enabled','1');self.db.commit()
   self.assertEqual(health_watch.stale_settings(self.db),{'enabled':True,'minutes':15})
  def test_undated_listing_is_background_once_alert_dates_have_listings(self):
-  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'dates':['20261106'],'enabled':True},create=True)
-  self.db.execute("INSERT INTO jobs(id,kind,url,payload) VALUES('d','discovery','https://example.test/d',?)",(json.dumps({'movie':'Epic','event':'E1','date':'20261106'}),));self.db.commit()
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'dates':[D1],'enabled':True},create=True)
+  self.db.execute("INSERT INTO jobs(id,kind,url,payload) VALUES('d','discovery','https://example.test/d',?)",(json.dumps({'movie':'Epic','event':'E1','date':D1}),));self.db.commit()
   wanted=api_watch.wanted_dates(self.db)
   self.assertFalse(api_watch.is_watched({'movie':'Epic','event':'E1','date':''},wanted))
   self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'E2','date':''},wanted))
-  self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'E1','date':'20261106'},wanted))
+  self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'E1','date':D1},wanted))
  def test_most_overdue_alert_listing_goes_first(self):
   prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
   for name,due in [('recent',990),('oldest',100),('new',0)]:
    self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'discovery','https://example.test/'+name,json.dumps({'movie':'Epic','event':name}),due))
   setmeta(self.db,'listing_background_attempt',995);self.db.commit()
-  self.assertEqual([r['id'] for r in api_watch.listing_order(self.db,1000)],['oldest','recent','new'])
+  self.assertEqual([r['id'] for r in api_watch.listing_order(self.db,1000)],['oldest','new','recent'])
  def test_alert_reports_latest_listing_check_not_an_old_failure(self):
   prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
   for name,error in [('old','Source HTTP 403'),('fresh','')]:
@@ -150,7 +156,7 @@ class ReliabilityTests(unittest.TestCase):
   setmeta(self.db,'listing_background_attempt',990);self.db.commit()
   self.assertEqual(api_watch.next_job(self.db,1000)['id'],'active')
   self.assertEqual(api_watch.next_job(self.db,1051)['id'],'active')
-  self.assertEqual(api_watch.next_job(self.db,1171)['id'],'background')
+  self.assertEqual(api_watch.next_job(self.db,1291)['id'],'background')
 
  def test_live_outage_is_included_in_report_without_rewriting_past_average(self):
   alert=prefs.save(self.db,{**prefs.defaults(),'movies':['Movie'],'enabled':True})
@@ -179,7 +185,7 @@ class ReliabilityTests(unittest.TestCase):
   setmeta(self.db,'listing_background_attempt',990);self.db.commit()
   self.assertIsNone(api_watch.next_job(self.db,1000))
   self.assertIsNone(api_watch.next_job(self.db,1051))
-  self.assertEqual(api_watch.next_job(self.db,1171)['id'],'background')
+  self.assertEqual(api_watch.next_job(self.db,1291)['id'],'background')
 
  def test_row_alert_does_not_promote_movie_discovery_to_listing_watch(self):
   from tests.test_rows import RowTests
@@ -217,11 +223,75 @@ class ReliabilityTests(unittest.TestCase):
   setmeta(self.db,'seat_cooldown_until',86500);self.db.commit()
   self.assertEqual(row_watch.poll_policy(self.db,86501),(120,60))
   self.assertEqual(row_watch.poll_policy(self.db,87399),(120,60))
-  self.assertEqual(row_watch.poll_policy(self.db,87401),(60,30))
+  self.assertEqual(row_watch.poll_policy(self.db,87401),(60,60))
   self.assertEqual(row_watch.poll_policy(self.db,86501,False),(60,0))
 
  def test_normal_seat_policy_is_conservative_without_a_previous_restriction(self):
-  self.assertEqual(row_watch.poll_policy(self.db,1000),(60,30))
+  self.assertEqual(row_watch.poll_policy(self.db,1000),(60,60))
+
+ def test_new_watched_listing_queues_behind_long_overdue_and_ahead_of_routine(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
+  for name,due in [('a',100),('b',200),('c',300),('fresh',990),('new',0)]:
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'discovery','https://example.test/'+name,json.dumps({'movie':'Epic','event':name}),due))
+  self.db.commit()
+  self.assertEqual([r['id'] for r in api_watch.listing_order(self.db,1000)],['a','b','c','new','fresh'])
+  setmeta(self.db,'listing_background_attempt',995);self.db.commit()  # background turn recently spent: same order
+  self.assertEqual([r['id'] for r in api_watch.listing_order(self.db,1000)],['a','b','c','new','fresh'])
+ def test_never_checked_background_listing_keeps_waiting_behind_overdue_and_watched(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
+  for name,movie,due in [('bg-new','Other',0),('bg-old','Other',100),('w','Epic',990)]:
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'discovery','https://example.test/'+name,json.dumps({'movie':movie,'event':name}),due))
+  self.db.commit()
+  self.assertEqual([r['id'] for r in api_watch.listing_order(self.db,1000)],['bg-old','w','bg-new'])
+ def test_undated_listing_is_background_for_an_undated_alert_once_a_dated_listing_is_live(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
+  undated={'movie':'Epic','event':'E1','date':''}
+  self.assertTrue(api_watch.is_watched(undated,api_watch.wanted_dates(self.db)))  # no dated listing yet: bookings may not be open
+  self.db.execute("INSERT INTO jobs(id,kind,url,payload,expires) VALUES('d','discovery','https://example.test/d',?,?)",(json.dumps({'movie':'Epic','event':'E1','date':D1}),time.time()-10))
+  self.db.commit()
+  self.assertTrue(api_watch.is_watched(undated,api_watch.wanted_dates(self.db)))  # expired listing does not count
+  self.db.execute("UPDATE jobs SET expires=? WHERE id='d'",(time.time()+3600,));self.db.commit()
+  wanted=api_watch.wanted_dates(self.db)
+  self.assertFalse(api_watch.is_watched(undated,wanted))
+  self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'E2','date':''},wanted))  # another event: still watched
+  self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'E1','date':D1},wanted))
+ def test_transport_errors_retry_in_a_minute_but_http_statuses_keep_their_delay(self):
+  from api_source import ReadError
+  self.db.execute("INSERT INTO jobs(id,kind,url,payload,due) VALUES('j','discovery','https://example.test/j',?,1)",(json.dumps({'movie':'M'}),));self.db.commit()
+  job=lambda:self.db.execute("SELECT * FROM jobs WHERE id='j'").fetchone()
+  due=lambda:self.db.execute("SELECT due FROM jobs WHERE id='j'").fetchone()[0]
+  for error,expected in [(TimeoutError('x'),60),(ConnectionResetError('x'),60),(ReadError('Source connection or JSON error'),60),(ReadError('Source HTTP 500',500,300),300),(ReadError('Source HTTP 403',403,180),180)]:
+   api_watch.record_listing_failure(self.db,job(),error,1000,1000);self.assertEqual(due(),1000+expected,error)
+  api_watch.record_listing_failure(self.db,job(),ReadError('Source HTTP 429',429,600),1000,1000);self.assertEqual(due(),1600)
+ def _check(self,job_id,kind,payload,due,error):
+  monitor=api_watch.Monitor(self.path)
+  self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(job_id,kind,'https://example.test/'+job_id,json.dumps(payload),due));self.db.commit()
+  with patch('api_watch.get_json',side_effect=error),patch.object(monitor.stop,'wait'):monitor.check(self.db)
+ def test_wait_on_a_background_pick_gives_its_turn_back(self):
+  from http_source import SourceWait
+  setmeta(self.db,'listing_background_attempt',123);self.db.commit()
+  self._check('bg','discovery',{'movie':'Other'},100,SourceWait(time.time()+40))
+  self.assertEqual(float(api_watch.meta(self.db,'listing_background_attempt')),123)
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Watched'],'enabled':True},create=True)
+  self.db.execute("UPDATE jobs SET due=5000");self.db.commit()
+  self._check('w','discovery',{'movie':'Watched'},100,SourceWait(time.time()+40))
+  self.assertEqual(float(api_watch.meta(self.db,'listing_background_attempt')),123)
+ def test_catalog_wait_delays_only_the_catalog_job(self):
+  from http_source import SourceWait
+  until=time.time()+500
+  self._check('cat','catalog',{},100,SourceWait(until))
+  self.assertEqual(self.db.execute("SELECT due FROM jobs WHERE id='cat'").fetchone()[0],until)
+  self.assertEqual(float(api_watch.meta(self.db,'listing_budget_until','0')),0)
+ def test_undated_no_show_flag_is_set_only_by_the_undated_listing(self):
+  monitor=api_watch.Monitor(self.path)
+  for job_id,day in (('dated',D1),('undated','')):
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,100)',(job_id,'discovery','https://example.test/'+job_id,json.dumps({'movie':'M','event':'E'+job_id,'date':day})))
+  self.db.commit()
+  with patch('api_watch.get_json',return_value={}),patch('api_watch.no_regional_shows',return_value=True),patch.object(monitor.stop,'wait'):
+   for job_id in ('dated','undated'):
+    setmeta(self.db,'listing_background_attempt',0);self.db.execute('UPDATE jobs SET due=5000');self.db.execute('UPDATE jobs SET due=100 WHERE id=?',(job_id,));self.db.commit();monitor.check(self.db)
+  self.assertEqual(api_watch.meta(self.db,'upcoming_event:Eundated'),'1')
+  self.assertEqual(api_watch.meta(self.db,'upcoming_event:Edated'),'')
 
 
 class HealthScalingTests(unittest.TestCase):

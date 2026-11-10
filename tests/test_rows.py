@@ -59,13 +59,40 @@ class RowTests(unittest.TestCase):
   setmeta(self.db,'seat_cooldown_until',time.time()+600);self.db.commit()
   self.db.execute('UPDATE row_layouts SET due=?,manual=1',(time.time(),));self.db.commit()
   self.assertIsNone(row_watch.manual_job(self.db,time.time()+1))
- def test_retry_now_clears_saved_seat_waits(self):
-  now=time.time()
+ def test_retry_now_clears_budget_waits_but_respects_a_429_deadline(self):
+  from http_source import schema as source_schema
+  now=time.time();source_schema(self.db)
   for key in ('seat_cooldown_until','seat_budget_until','seat_next_request_at'):setmeta(self.db,key,now+5000)
-  self.db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(now+5000,self.show['id']));self.db.commit()
+  self.db.execute("INSERT INTO source_hosts VALUES('services-in.bookmyshow.com',?)",(now+5000,))
+  self.db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(now+9000,self.show['id']));self.db.commit()
   row_watch.clear_source_wait(self.db)
-  self.assertEqual(row_watch.source_ready_at(self.db),0)
+  self.assertEqual((float(meta(self.db,'seat_budget_until')),float(meta(self.db,'seat_next_request_at'))),(0,0))
+  self.assertEqual(float(meta(self.db,'seat_cooldown_until')),now+5000)
+  self.assertEqual(self.db.execute('SELECT not_before FROM source_hosts').fetchone()[0],now+5000)
+  self.assertEqual(self.db.execute('SELECT due FROM row_layouts WHERE show_id=?',(self.show['id'],)).fetchone()[0],now+5000)
+  self.assertIsNone(row_watch.next_job(self.db,time.time()+1))
+  setmeta(self.db,'seat_cooldown_until',0);self.db.execute('UPDATE row_layouts SET due=?',(now+9000,));self.db.commit()
+  row_watch.clear_source_wait(self.db)
   self.assertEqual(row_watch.next_job(self.db,time.time()+1)['show_id'],self.show['id'])
+ def test_source_wait_leaves_the_job_due_unchanged(self):
+  from http_source import SourceWait
+  now=time.time();due=now-30;until=now+40
+  self.db.execute('UPDATE row_layouts SET due=?,manual=0 WHERE show_id=?',(due,self.show['id']));self.db.commit()
+  with patch.dict(os.environ,{'BMS_PUBLIC':'1'}),patch('cloud_row_reader.read',side_effect=SourceWait(until)):row_watch.step(self.db)
+  self.assertEqual(self.db.execute('SELECT due FROM row_layouts WHERE show_id=?',(self.show['id'],)).fetchone()[0],due)
+  self.assertEqual(float(meta(self.db,'seat_budget_until')),until)
+ def _failing_step(self,error):
+  now=time.time();setmeta(self.db,'seat_next_request_at',0);self.db.execute('UPDATE row_layouts SET due=?,manual=0 WHERE show_id=?',(now-30,self.show['id']));self.db.commit()
+  with patch.dict(os.environ,{'BMS_PUBLIC':'1'}),patch('cloud_row_reader.read',side_effect=error):row_watch.step(self.db)
+  return now,self.db.execute('SELECT due,error FROM row_layouts WHERE show_id=?',(self.show['id'],)).fetchone()
+ def test_failed_read_of_a_show_no_alert_watches_is_not_retried(self):
+  now,row=self._failing_step(ValueError('Seat page unavailable'))
+  self.assertEqual((row['due'],row['error']),(0,'Seat page unavailable'))
+ def test_failed_read_of_an_alert_show_retries_and_honours_retry_after(self):
+  self.configure();now,row=self._failing_step(ValueError('boom'))
+  self.assertAlmostEqual(row['due'],now+300,delta=5)
+  error=ValueError('slow down');error.retry=900
+  now,row=self._failing_step(error);self.assertAlmostEqual(row['due'],now+900,delta=5)
  def test_specific_row_release_and_silent_baseline(self):
   self.configure();self.assertEqual(self.db.execute('select count(*) from outbox').fetchone()[0],0)
   changed=copy.deepcopy(self.result);changed['available'].append({'row_id':'Gold / B','seat':'2'})

@@ -36,8 +36,8 @@ def check_queue(db):
     later=sorted((r for r in db.execute('SELECT * FROM jobs WHERE due>? AND (expires=0 OR expires>?)',(now,now)) if api_watch.is_watched(json.loads(r['payload']),wanted)),key=lambda r:r['due'])
     has_requests=db.execute("SELECT 1 FROM sqlite_master WHERE name='source_requests'").fetchone()
     last=(db.execute("SELECT max(at) FROM source_requests WHERE host='in.bookmyshow.com'").fetchone()[0] if has_requests else 0) or 0
-    # One listing request a minute; background work takes about one turn in three.
-    step=90 if len(order)>len(alert_rows) else 60
+    # One listing request a minute; background work takes about one turn in five.
+    step=75 if len(order)>len(alert_rows) else 60
     at=max(now,float(meta(db,'listing_budget_until','0')),last+60);upcoming=[]
     for row in alert_rows+later:
         at=max(at,row['due']);upcoming.append({**listing(row),'eta':at});at+=step

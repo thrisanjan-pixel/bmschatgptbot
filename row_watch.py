@@ -28,14 +28,13 @@ def source_ready_at(db):
     return max(float(meta(db,key,'0')) for key in ('seat_cooldown_until','seat_next_request_at','seat_budget_until'))
 
 def clear_source_wait(db):
-    """User-requested retry: drop saved seat waits so the next queued read runs now.
-    The hourly request budget still applies, and a new 429 starts a new wait."""
+    """User-requested retry: drop the saved budget and spacing waits so the next queued read can run.
+    A 429 Retry-After deadline (seat_cooldown_until, source_hosts.not_before) is never cleared:
+    queued reads move up to that deadline at the earliest. The hourly request budget still applies."""
     schema(db);now=time.time()
-    from http_source import schema as source_schema
-    source_schema(db)
-    for key in ('seat_cooldown_until','seat_budget_until','seat_next_request_at'):setmeta(db,key,0)
-    db.execute("UPDATE source_hosts SET not_before=0 WHERE host='services-in.bookmyshow.com'")
-    db.execute('UPDATE row_layouts SET due=? WHERE due>?',(now,now))
+    for key in ('seat_budget_until','seat_next_request_at'):setmeta(db,key,0)
+    ready=max(now,float(meta(db,'seat_cooldown_until','0')))
+    db.execute('UPDATE row_layouts SET due=? WHERE due>?',(ready,ready))
     db.commit()
 
 def get(db,show_id):
@@ -178,7 +177,7 @@ def poll_policy(db,now,cloud=True):
     # Recovery starts after the source wait ends, including waits longer than 15 minutes.
     recovering=bool((until and 0<=now-until<900) or
                     (last_limit and 0<=now-last_limit<900))
-    return (120,60) if cloud and recovering else (60,30) if cloud else (60,0)
+    return (120,60) if cloud and recovering else (60,60) if cloud else (60,0)
 
 
 def queue_order(db,now):
@@ -277,17 +276,19 @@ def step(db):
                 if e.until-time.time()<=60:db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(e.until,job['show_id']))
                 else:db.execute('UPDATE row_layouts SET manual=0 WHERE show_id=?',(job['show_id'],))
                 db.commit();return
-            db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(e.until,job['show_id']))
+            # Leave the job's due alone so it keeps its place in the queue; only the budget waits.
             setmeta(db,'seat_budget_until',e.until);db.commit();return
         message=(str(e).partition(chr(10))[0] or type(e).__name__)[:200]
         if getattr(e,'diagnostic',None):
             setmeta(db,'seat_last_refusal',json.dumps({**e.diagnostic,'at':time.time()}))
-        retry_at=time.time()+300
+        retry_at=time.time()+max(300,getattr(e,'retry',0) or 0)
         if getattr(e,'status',0)==429:
             retry_at=time.time()+max(300,e.retry)
             setmeta(db,'seat_cooldown_until',retry_at)
             setmeta(db,'seat_last_rate_limit',time.time())
         record_check(db,'rows',show['id'],now,message)
+        # A show no alert watches (only "Load seat rows" was pressed) is not retried: the page shows the error.
+        if job['show_id'] not in queue_order(db,time.time())[2]:retry_at=0
         db.execute('UPDATE row_layouts SET error=?,due=?,manual=0 WHERE show_id=?',(message,retry_at,job['show_id']))
         db.commit()
 if __name__=='__main__':main()

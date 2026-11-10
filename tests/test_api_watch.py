@@ -111,3 +111,18 @@ class ThrottleTests(unittest.TestCase):
         self.assertEqual(self.db.execute('SELECT count(*) FROM outbox').fetchone()[0],2)
         self.db.execute('UPDATE alerts SET last_alert=0');ingest(self.db,self.job,later)
         self.assertEqual(self.db.execute('SELECT count(*) FROM outbox').fetchone()[0],3)
+
+
+class UpcomingTests(unittest.TestCase):
+    setUp=ApiTests.setUp
+    tearDown=ApiTests.tearDown
+    def test_event_leaves_upcoming_mode_once_a_show_is_bookable(self):
+        setmeta(self.db,'upcoming_event:'+EVENT,'1');setmeta(self.db,'waiting_show:'+self.job['id'],'1')
+        texts=lambda:[r[0] for r in self.db.execute('SELECT text FROM outbox ORDER BY rowid')]
+        ingest(self.db,self.job,response('1','1'))
+        self.assertEqual(len(texts()),1);self.assertIn('Booking open',texts()[0])
+        self.assertEqual(self.db.execute("SELECT count(*) FROM meta WHERE key=?",('upcoming_event:'+EVENT,)).fetchone()[0],0)
+        ingest(self.db,self.job,response('1','1'));self.assertEqual(len(texts()),1)
+        later=response('1','1');shows=later['data']['showtimeWidgets'][0]['data'][0]['data'][0]['showtimes'];shows.append(copy.deepcopy(shows[0]));shows[1]['additionalData']['sessionId']='2'
+        ingest(self.db,self.job,later)
+        self.assertEqual(len(texts()),2);self.assertIn('New show',texts()[1]);self.assertNotIn('Booking open',texts()[1])

@@ -107,6 +107,10 @@ def ingest(db,job,data):
                     # Keep the old baseline so the unsent changes are found again next poll.
                     deferred=True;setmeta(db,'watch_skipped',int(meta(db,'watch_skipped','0'))+1)
         if not deferred:setmeta(db,'revision:'+key,revision)
+    # Once any show of the event is bookable the event is no longer "upcoming". A deferred pass
+    # keeps the flag so its retry still says "Booking open".
+    if upcoming and not deferred and any(c['status'] in ('1','2','3') for show in current.values() for c in show['categories'].values()):
+        db.execute('DELETE FROM meta WHERE key=?',('upcoming_event:'+args['event'],))
     if not deferred:db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',(key,json.dumps(current)))
     for old in db.execute('SELECT id,payload FROM sessions WHERE active=1').fetchall():
         show=json.loads(old['payload'])
@@ -151,7 +155,7 @@ def watched_movies(db):
                    for m in rule['preferences']['movies'] if not rule['preferences']['row_show']})
 
 
-BACKGROUND_SPACING=180
+BACKGROUND_SPACING=300
 
 
 def wanted_dates(db):
@@ -169,7 +173,8 @@ def wanted_dates(db):
             json_extract(payload,'$.language'),json_extract(payload,'$.format') FROM sessions"""):
         profiles.setdefault(event,[]).append({'movie':'','venue_code':'','date':'','categories':{},
             'language':language or '','format':screen or ''})
-    dated={(json.loads(r[0]).get('event'),json.loads(r[0]).get('date')) for r in db.execute("SELECT payload FROM jobs WHERE kind='discovery'")}
+    # Dated listings that have not expired; an expired one no longer covers its date.
+    dated={(p.get('event'),p.get('date')) for p in (json.loads(r[0]) for r in db.execute("SELECT payload FROM jobs WHERE kind='discovery' AND (expires=0 OR expires>?)",(time.time(),))) if p.get('date')}
     return {'movies':movies,'profiles':profiles,'dated':dated}
 
 
@@ -183,7 +188,10 @@ def is_watched(payload,wanted):
     day=payload.get('date','');event=payload.get('event');shows=wanted['profiles'].get(event)
     # An undated listing only finds new dates; once every date an alert wants has
     # its own listing, the undated one is background work for that alert.
-    covered=lambda dates:not day and dates is not None and all((event,d) in wanted.get('dated',()) for d in dates)
+    # An alert with no dates is covered too once the event has a live dated listing: every
+    # dated response schedules newly appearing dates and variants (see ingest).
+    dated=wanted.get('dated',())
+    covered=lambda dates:not day and (any(e==event and d for e,d in dated) if event and dates is None else dates is not None and all((event,d) in dated for d in dates))
     return any((dates is None or not day or day in dates) and not covered(dates) and
                (not shows or any(preferences.matches(show,probe) for show in shows))
                for dates,probe in entries)
@@ -202,27 +210,29 @@ def listing_order(db, now):
     cooldown_until = float(meta(db, 'source_cooldown', '0'))
     recovering = bool(cooldown_until and 0 <= now - cooldown_until < 60)
     # Listing requests are one a minute, so a 60 s window would hand background
-    # work every turn. Give it at most one turn in three.
+    # work every turn. Give it at most one turn in five.
     background_recent = now-float(meta(db,'listing_background_attempt','0')) < BACKGROUND_SPACING
     background_paused = float(meta(db, 'background_cooldown_until', '0')) > now
     rows = db.execute(f"""WITH eligible AS (
         SELECT *, id IN ({slots}) AS watched
         FROM jobs WHERE due<=? AND (expires=0 OR expires>?)
       )
-      SELECT *, CASE WHEN NOT ? AND due>0 AND due<? THEN 0
+      SELECT *, CASE WHEN NOT ? AND (due>0 OR watched) AND due<? THEN 0
         WHEN watched THEN 1 ELSE 2 END AS rank
       FROM eligible WHERE watched OR (NOT ? AND NOT ?)""",
       (*movies, now, now, recovering or background_recent, now-300, background_paused, background_recent)).fetchall()
     def order(row):
         # Alert listings take turns by how overdue they are. A never-checked listing
-        # joins the line now instead of jumping ahead of long-overdue ones.
-        return (row['rank'], row['due'] or now, row['checked'])
+        # joins the end of the overdue line (as if due 300 s ago) instead of jumping ahead of
+        # long-overdue ones; an unwatched one keeps waiting its turn.
+        return (row['rank'], row['due'] or (now-300 if row['watched'] else now), row['checked'])
     return sorted(rows, key=order)
 
 
 def record_listing_failure(db, job, error, started, now):
     status = error.status if isinstance(error, ReadError) else 0
-    delay = error.retry if isinstance(error, ReadError) else 300
+    # A transport error or status-0 read retries after the 60 s request gap the budget already enforces.
+    delay = error.retry if isinstance(error, ReadError) and error.status else 60
     message = str(error) if isinstance(error, ReadError) else type(error).__name__
     if getattr(error,'diagnostic',None):
         setmeta(db,'listing_last_refusal',json.dumps({**error.diagnostic,'at':now}))
@@ -283,7 +293,9 @@ class Monitor:
         try:
             started=time.time()
             setmeta(db,'listing_check_started',started)
-            if not is_watched(json.loads(job['payload']),wanted_dates(db)):
+            stamped=not is_watched(json.loads(job['payload']),wanted_dates(db))
+            if stamped:
+                previous_attempt=meta(db,'listing_background_attempt','0')
                 setmeta(db,'listing_background_attempt',started)
             db.commit()
             data=get_json(job['url'])
@@ -297,7 +309,8 @@ class Monitor:
             elif no_regional_shows(data):
                 # Keep prior show state and wait for a verified showtime payload.
                 setmeta(db,'waiting_show:'+job['id'],'1')
-                setmeta(db,'upcoming_event:'+json.loads(job['payload'])['event'],'1')
+                # Only the undated listing says the event has no shows yet; a dated one may just be an empty day.
+                if not json.loads(job['payload']).get('date'):setmeta(db,'upcoming_event:'+json.loads(job['payload'])['event'],'1')
                 setmeta(db,'api_last_success',time.time())
             else:ingest(db,job,data)
             streak_key='listing_success_streak:'+job['id']
@@ -308,8 +321,15 @@ class Monitor:
         except Exception as error:
             db.rollback()
             if isinstance(error,SourceWait):
-                # Leave the job's place in the queue alone; only the budget waits.
-                setmeta(db,'listing_budget_until',error.until);db.commit()
+                # No request was made, so a background pick gets its turn back.
+                if stamped:setmeta(db,'listing_background_attempt',previous_attempt)
+                if job['kind']=='catalog':
+                    # The catalog is a different host with its own, longer gap: wait on that job alone.
+                    db.execute('UPDATE jobs SET due=? WHERE id=?',(error.until,job['id']))
+                else:
+                    # Leave the job's place in the queue alone; only the budget waits.
+                    setmeta(db,'listing_budget_until',error.until)
+                db.commit()
             else:
                 message=record_listing_failure(db,job,error,started,time.time())
                 db.commit();logging.warning('%s: %s',job['kind'],message)
