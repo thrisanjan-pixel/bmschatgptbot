@@ -7,6 +7,8 @@ import time
 import uuid
 from store import emit,meta,setmeta
 
+ANY_SHOW='*'  # row_show value meaning every showtime that matches the alert's filters
+ROW_ANY_LIMIT=20
 FIELDS=('movies','cinemas','screens','languages','formats','dates','categories')
 VENUE_SCREENS={
     'PRHN':['PCX SCREEN','PCX HDR BY BARCO','BARCO FLAGSHIP 4K LASER','BARCO 4K LASER',
@@ -33,7 +35,23 @@ def format_matches(actual,wanted):
     if wanted in ('imax','4dx'):return wanted in actual
     return actual==wanted
 def defaults():
-    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'notify_existing':True,'interval_minutes':10,'row_show':'','rows':[],'party_size':0,'request_state':''}
+    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'notify_existing':True,'interval_minutes':10,'row_show':'','rows':[],'party_size':0,'request_state':'','urgent':False}
+
+def future_shows(db):
+    """Active future showtimes as (cutoff, show), soonest first."""
+    return [(r[1],json.loads(r[0])) for r in db.execute('SELECT payload,cutoff FROM sessions WHERE active=1 AND cutoff>? ORDER BY cutoff',(time.time(),))]
+
+def row_targets(db,p,shows=None):
+    """Showtime ids a row alert reads: its one showtime, or for '*' the soonest matching ones."""
+    if not p.get('row_show'):return []
+    if p['row_show']!=ANY_SHOW:return [p['row_show']]
+    probe={**p,'categories':[]};found=[]
+    for _,show in (future_shows(db) if shows is None else shows):
+        try:
+            if matches(show,probe):found.append(show['id'])
+        except (KeyError,TypeError,AttributeError):continue  # one odd stored show must not break every alert
+        if len(found)>=ROW_ANY_LIMIT:break
+    return found
 
 def ensure(db):
     db.execute('''CREATE TABLE IF NOT EXISTS alerts(
@@ -53,15 +71,20 @@ def ensure(db):
 
 def rules(db):
     ensure(db)
-    result=[]
-    for row in db.execute('SELECT * FROM alerts ORDER BY created DESC'):
-        rule={**dict(row),'preferences':{**defaults(),**json.loads(row['payload'])}}
-        p=rule['preferences'];state=p.get('request_state','')
+    result=[];parsed=[];shows=None
+    for row in db.execute('SELECT * FROM alerts ORDER BY created DESC').fetchall():
+        p={**defaults(),**json.loads(row['payload'])}
+        if p['row_show']==ANY_SHOW and shows is None:shows=future_shows(db)
+        parsed.append((row,p,row_targets(db,p,shows)))
+    # Seat reads share one budget, so the quiet period grows with every watched showtime, not every alert.
+    row_count=sum(len(t) for _,p,t in parsed if p['enabled'] and p['row_show'])
+    for row,p,targets in parsed:
+        rule={**dict(row),'preferences':p,'row_targets':len(targets)};state=p.get('request_state','')
         expired=False
         if p['dates']:
             from api_source import end_day
             expired=max(end_day(day) for day in p['dates'])<=time.time()
-        if p['row_show']:
+        if p['row_show'] and p['row_show']!=ANY_SHOW:
             show=db.execute('SELECT cutoff FROM sessions WHERE id=?',(p['row_show'],)).fetchone()
             expired=expired or bool(show and show[0]<=time.time())
         rule['status']='cancelled' if state=='cancelled' else 'completed' if rule['completed'] or state=='booked' else 'missed' if expired and p['enabled'] else 'active' if p['enabled'] else 'paused'
@@ -70,8 +93,15 @@ def rules(db):
         rule['booking_url']=link[0] if link else ''
         checked=0;error='';due=0;waiting_for_bookings=False
         if p['row_show'] and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='row_layouts'").fetchone():
-            layout=db.execute('SELECT checked,error,due FROM row_layouts WHERE show_id=?',(p['row_show'],)).fetchone()
-            if layout:checked,error,due=layout
+            layouts=db.execute(f"SELECT show_id,checked,error,due FROM row_layouts WHERE show_id IN ({','.join('?'*len(targets))})",targets).fetchall() if targets else []
+            read=[l['checked'] for l in layouts if l['checked']>0]
+            # The oldest read is the health signal: one fresh showtime must not hide stale ones.
+            checked=min(read) if read else 0
+            due=min((l['due'] for l in layouts if l['due']>0),default=0)
+            if len(layouts)==1:error=layouts[0]['error']
+            elif layouts:
+                latest=db.execute(f"SELECT job_key FROM check_stats WHERE source='rows' AND job_key IN ({','.join('?'*len(targets))}) ORDER BY last_attempt DESC LIMIT 1",targets).fetchone()
+                error=next((l['error'] for l in layouts if latest and l['show_id']==latest[0]),'')
         elif not p['row_show']:
             jobs=[r for r in db.execute('SELECT id,payload,checked,error,due FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
             checked=max((r['checked'] for r in jobs),default=0)
@@ -85,7 +115,6 @@ def rules(db):
                 meta(db, 'waiting_show:'+r['id']) == '1' for r in jobs
             )
         now=time.time()
-        row_count=db.execute("SELECT count(*) FROM alerts WHERE json_extract(payload,'$.enabled')=1 AND coalesce(json_extract(payload,'$.row_show'),'')<>''").fetchone()[0]
         cooldown=float(meta(db,'seat_cooldown_until' if p['row_show'] else 'source_cooldown','0'))
         budget=float(meta(db,'seat_budget_until' if p['row_show'] else 'listing_budget_until','0'))
         if max(cooldown,budget)>now:due=max(due,cooldown,budget)
@@ -93,7 +122,7 @@ def rules(db):
         # Routine 1-minute spacing is normal; only a long budget wait is worth showing.
         health='Source unavailable' if error else 'Waiting for request budget' if budget>now+300 else 'Checks delayed' if checked and cooldown<=now and time.time()-checked>(max(180,240*row_count) if p['row_show'] else 180) else 'Watching seats' if p['row_show'] else 'Waiting for bookings' if waiting_for_bookings else 'Watching availability' if checked else 'Waiting for listings'
         rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'retry_until':max(cooldown,budget) if max(cooldown,budget)>now else 0,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
-        keys=[p['row_show']] if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
+        keys=targets if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
         source='rows' if p['row_show'] else 'listings'
         intervals=[]
         for key in keys:
@@ -160,7 +189,7 @@ def read(db,alert_id=None):
     rule=next((r for r in saved if r['id']==alert_id),None) if alert_id else (saved[0] if saved else None)
     return rule['preferences'] if rule else defaults()
 
-def validate(data):
+def validate(data,preset=False):
     if not isinstance(data,dict):raise ValueError('Invalid settings')
     result=defaults()
     for key in FIELDS:
@@ -177,7 +206,7 @@ def validate(data):
             dt.datetime.strptime(value,'%H:%M')
         result[key]=value
     if result['time_from'] and result['time_to'] and result['time_from']>result['time_to']:raise ValueError('End time must be after start time')
-    for key in ('new_shows','availability','enabled','once','notify_existing'):
+    for key in ('new_shows','availability','enabled','once','notify_existing','urgent'):
         if type(data.get(key,result[key])) is not bool:raise ValueError('Invalid '+key)
         result[key]=data.get(key,result[key])
     interval=data.get('interval_minutes',10)
@@ -188,6 +217,9 @@ def validate(data):
     if not isinstance(result['row_show'],str) or len(result['row_show'])>150:raise ValueError('Invalid row showtime')
     if not isinstance(result['rows'],list) or len(result['rows'])>200 or any(not isinstance(r,str) or len(r)>300 for r in result['rows']):raise ValueError('Invalid rows')
     if result['row_show'] and not result['rows']:raise ValueError('Load and select at least one row')
+    if result['row_show']==ANY_SHOW:
+        if len(result['cinemas'])!=1:raise ValueError('Choose exactly one cinema to watch rows at any showtime')
+        if not result['movies'] and not preset:raise ValueError('Choose at least one movie to watch rows at any showtime')
     party=data.get('party_size',0)
     if type(party) is not int or not (party==0 or 2<=party<=10):raise ValueError('Choose 2 to 10 seats together, or any open seat')
     result['party_size']=party if result['row_show'] else 0
@@ -247,7 +279,7 @@ def save(db,data,alert_id=None,create=False):
     elif saved:
         alert_id=saved[0]['id']
     else:alert_id=uuid.uuid4().hex
-    if p['row_show'] and p['enabled']:
+    if p['row_show'] and p['row_show']!=ANY_SHOW and p['enabled']:
         import row_watch
         layout=row_watch.get(db,p['row_show'])
         show=db.execute('SELECT payload FROM sessions WHERE id=? AND active=1 AND cutoff>?',(p['row_show'],time.time())).fetchone()
@@ -307,7 +339,8 @@ def delete(db,alert_id):
     setmeta(db,'alerts_migration_complete','1')
     for table in ('row_alert_state','alert_initial_state'):
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
-            db.execute(f'DELETE FROM {table} WHERE alert_id=?',(alert_id,))
+            # A '*' alert keeps one state row per showtime, keyed alert_id:show_id.
+            db.execute(f'DELETE FROM {table} WHERE alert_id=? OR substr(alert_id,1,?)=?',(alert_id,len(alert_id)+1,alert_id+':'))
     enabled=bool(db.execute("SELECT 1 FROM alerts WHERE json_extract(payload,'$.enabled')=1 LIMIT 1").fetchone())
     setmeta(db,'notifications_paused','0' if enabled else '1')
     setmeta(db,'notifications_mode','enabled' if enabled else 'paused')
@@ -366,3 +399,59 @@ def options(db):
             'venue_options':{code:{k:sorted(items) for k,items in value.items()} for code,value in venue_options.items()},
             'profiles':[{'movie':p[0],'cinema':p[1],'language':p[2],'format':p[3],'categories':p[4],'screen':p[5],'date':p[6],'url':p[7]} for p in sorted(profiles)],
             'showtimes':[{'id':s['id'],'movie':s['movie'],'cinema':s['venue_code'],'screen':str(s.get('format','')),'language':dimensions(s)[0],'format':dimensions(s)[1],'date':s['date'],'time':s['time'],'categories':[c['name'] for c in s['categories'].values()],'booking_url':safe_link(s)} for s in shows]}
+
+
+PRESET_LIMIT=30
+
+def presets(db):
+    try:saved=json.loads(meta(db,'alert_presets','[]'))
+    except ValueError:return []
+    return [x for x in saved if isinstance(x,dict)] if isinstance(saved,list) else []
+
+def preset_preferences(data):
+    """Validated filters for a preset: no movies or dates, never enabled, a row_show kept only as '*'."""
+    if not isinstance(data,dict):raise ValueError('Invalid settings')
+    any_show=data.get('row_show')==ANY_SHOW
+    clean={**data,'movies':[],'dates':[],'enabled':False,'request_state':''}
+    if not any_show:clean.update(row_show='',rows=[],party_size=0)
+    return validate(clean,preset=True)
+
+def save_preset(db,name,data):
+    if not isinstance(name,str) or not 1<=len(name.strip())<=40:raise ValueError('Preset name must be 1 to 40 characters')
+    name=name.strip();p=preset_preferences(data);saved=presets(db)
+    same=next((i for i,x in enumerate(saved) if str(x.get('name','')).casefold()==name.casefold()),None)
+    if same is None and len(saved)>=PRESET_LIMIT:raise ValueError('You can keep up to 30 presets. Delete one first')
+    item={'id':saved[same]['id'] if same is not None else uuid.uuid4().hex,'name':name,'preferences':p}
+    if same is None:saved.append(item)
+    else:saved[same]=item
+    setmeta(db,'alert_presets',json.dumps(saved));db.commit()
+    return saved
+
+def delete_preset(db,preset_id):
+    if not isinstance(preset_id,str) or not preset_id:raise ValueError('Choose a preset to delete')
+    saved=presets(db);kept=[x for x in saved if x.get('id')!=preset_id]
+    if len(kept)==len(saved):raise ValueError('Preset no longer exists')
+    setmeta(db,'alert_presets',json.dumps(kept));db.commit()
+    return kept
+
+def history_summary(text,row):
+    lines=[l.strip() for l in str(text or '').split('\n')]
+    if row:line=next((l for l in lines if l),'')
+    else:
+        # After the header (movie, language, date, venue) the first line of the form "Category now available · time · seats".
+        body=lines[next((i for i,l in enumerate(lines) if not l),len(lines)):]
+        line=next((l for l in body if ' \u00b7 ' in l),'') or next((l for l in lines if l),'')
+    return line[:140]
+
+def history(db,limit=10):
+    """Last `limit` queued messages per alert in one query, newest first: {alert_id:[{created,delivered,summary,url}]}."""
+    rows=db.execute('''SELECT alert_id,created,delivered,text FROM (SELECT alert_id,created,delivered,text,
+        row_number() OVER (PARTITION BY alert_id ORDER BY created DESC) AS n FROM outbox WHERE alert_id NOT IN ('','__health__'))
+        WHERE n<=? ORDER BY alert_id,created DESC''',(limit,)).fetchall()
+    kinds={r['id']:bool(json.loads(r['payload']).get('row_show')) for r in db.execute('SELECT id,payload FROM alerts')}
+    result={}
+    for r in rows:
+        links=re.findall(r'https://in\.bookmyshow\.com/\S+',r['text'] or '')
+        result.setdefault(r['alert_id'],[]).append({'created':r['created'],'delivered':r['delivered'] or 0,
+            'summary':history_summary(r['text'],kinds.get(r['alert_id'],False)),'url':links[-1] if links else ''})
+    return result

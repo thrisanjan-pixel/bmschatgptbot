@@ -300,7 +300,7 @@ class HealthScalingTests(unittest.TestCase):
  def tearDown(self):self.db.close();self.tmp.cleanup()
  def test_row_alert_threshold_scales_and_waits_out_cooldown(self):
   now=100000.0;setmeta(self.db,'health_watch_started',1);setmeta(self.db,'city_heartbeat',now);setmeta(self.db,'row_reader_heartbeat',now)
-  rules=[{'preferences':{**prefs.defaults(),'row_show':f's{i}','movies':['M']},'health':{'last_success':now-1000,'error':''},'created':0} for i in range(5)]
+  rules=[{'preferences':{**prefs.defaults(),'row_show':f's{i}','movies':['M']},'health':{'last_success':now-1000,'error':''},'created':0,'row_targets':1} for i in range(5)]
   with patch.object(prefs,'active',return_value=rules):
    self.assertEqual(health_watch.problems(self.db,now),{})
    rules[0]['health']['last_success']=now-3000;self.assertIn('source:s0',health_watch.problems(self.db,now))

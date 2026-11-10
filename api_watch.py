@@ -152,19 +152,20 @@ def poll_interval(db,job):
 
 def watched_movies(db):
     return sorted({preferences.normalized(m) for rule in preferences.active(db)
-                   for m in rule['preferences']['movies'] if not rule['preferences']['row_show']})
+                   for m in rule['preferences']['movies'] if rule['preferences']['row_show'] in ('',preferences.ANY_SHOW)})
 
 
 BACKGROUND_SPACING=300
 
 
-def wanted_dates(db):
+def wanted_dates(db,urgent=False):
     """What showtime alerts need: per movie, each alert's dates (None = any date) and
-    its language, format and screen filters, plus what each known version has shown."""
+    its language, format and screen filters, plus what each known version has shown.
+    A '*' row alert needs fresh showtime lists too, to find new showtimes. With urgent=True only urgent alerts count."""
     movies={}
     for rule in preferences.active(db):
         p=rule['preferences']
-        if p['row_show']:continue
+        if p['row_show'] not in ('',preferences.ANY_SHOW) or (urgent and not p['urgent']):continue
         probe={**preferences.defaults(),**{k:p[k] for k in ('languages','formats','screens')}}
         for movie in p['movies']:
             movies.setdefault(preferences.normalized(movie),[]).append((set(p['dates']) or None,probe))
@@ -205,7 +206,11 @@ def next_job(db, now):
 def listing_order(db, now):
     """Due listing jobs in the order the worker will take them."""
     wanted = wanted_dates(db)
-    movies = [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if is_watched(json.loads(r['payload']),wanted)]
+    jobs = [(r['id'],json.loads(r['payload'])) for r in db.execute('SELECT id,payload FROM jobs')]
+    movies = [i for i,payload in jobs if is_watched(payload,wanted)];watched_ids = set(movies)
+    # Listings an urgent alert watches count their overdue time three times.
+    urgent_wanted = wanted_dates(db,True)
+    hot = {i for i,payload in jobs if i in watched_ids and is_watched(payload,urgent_wanted)} if urgent_wanted['movies'] else set()
     slots = ','.join('?' for _ in movies) or "''"
     cooldown_until = float(meta(db, 'source_cooldown', '0'))
     recovering = bool(cooldown_until and 0 <= now - cooldown_until < 60)
@@ -217,15 +222,17 @@ def listing_order(db, now):
         SELECT *, id IN ({slots}) AS watched
         FROM jobs WHERE due<=? AND (expires=0 OR expires>?)
       )
-      SELECT *, CASE WHEN NOT ? AND (due>0 OR watched) AND due<? THEN 0
-        WHEN watched THEN 1 ELSE 2 END AS rank
-      FROM eligible WHERE watched OR (NOT ? AND NOT ?)""",
-      (*movies, now, now, recovering or background_recent, now-300, background_paused, background_recent)).fetchall()
+      SELECT * FROM eligible WHERE watched OR (NOT ? AND NOT ?)""",
+      (*movies, now, now, background_paused, background_recent)).fetchall()
+    def effective(row):
+        return now-(now-row['due'])*3 if row['id'] in hot and row['due'] else row['due']
     def order(row):
         # Alert listings take turns by how overdue they are. A never-checked listing
         # joins the end of the overdue line (as if due 300 s ago) instead of jumping ahead of
         # long-overdue ones; an unwatched one keeps waiting its turn.
-        return (row['rank'], row['due'] or (now-300 if row['watched'] else now), row['checked'])
+        due=effective(row)
+        rank=0 if not (recovering or background_recent) and (row['due']>0 or row['watched']) and due<now-300 else 1 if row['watched'] else 2
+        return (rank, due or (now-300 if row['watched'] else now), row['checked'])
     return sorted(rows, key=order)
 
 

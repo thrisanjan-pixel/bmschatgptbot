@@ -108,22 +108,25 @@ def ingest(db,show,result):
     else:result['new']=[]
     known={r['id']:r for r in result['rows']};known.update({r['id']:r for r in previous.get('rows',[]) if r['id'] not in known});result['rows']=list(known.values())
     if meta(db,'notifications_paused','0')!='1':
-        seen_signatures=set()
+        seen_signatures=set();shows=None
         for rule in prefs.active(db):
             p=rule['preferences']
-            if p.get('row_show')!=show['id']:continue
+            if p.get('row_show')==prefs.ANY_SHOW and shows is None:shows=prefs.future_shows(db)
+            if show['id'] not in prefs.row_targets(db,p,shows):continue
+            # A '*' alert keeps its seat memory per showtime, so seats open at one never hide another's.
+            key=rule['id']+':'+show['id'] if p['row_show']==prefs.ANY_SHOW else rule['id']
             selected=set(p.get('rows',[]))
             signature=json.dumps([show['id'],sorted(selected)]+([p['party_size']] if p.get('party_size') else []))
-            state=db.execute('SELECT signature,available FROM row_alert_state WHERE alert_id=?',(rule['id'],)).fetchone()
+            state=db.execute('SELECT signature,available FROM row_alert_state WHERE alert_id=?',(key,)).fetchone()
             before={tuple(item) for item in json.loads(state['available'])} if state and state['signature']==signature else set()
             current={(s['row_id'],s['seat']) for s in result['available'] if s['row_id'] in selected}
             added=[s for s in result['available'] if s['row_id'] in selected and (s['row_id'],s['seat']) not in before]
             if not p['notify_existing'] and (not state or state['signature']!=signature):
-                db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',(rule['id'],signature,json.dumps(sorted(current))))
+                db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',(key,signature,json.dumps(sorted(current))))
                 continue
             if not added:
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
-                    (rule['id'],signature,json.dumps(sorted(current))))
+                    (key,signature,json.dumps(sorted(current))))
                 continue
             party=p.get('party_size',0)
             block=best_block(result,selected,party,{(s['row_id'],s['seat']) for s in added}) if party else None
@@ -131,11 +134,11 @@ def ingest(db,show,result):
                 # Not enough seats side by side yet; remember what is open so the seat that
                 # completes a block still counts as new.
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
-                    (rule['id'],signature,json.dumps(sorted(current))))
+                    (key,signature,json.dumps(sorted(current))))
                 continue
             if signature in seen_signatures:
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
-                    (rule['id'],signature,json.dumps(sorted(current))))
+                    (key,signature,json.dumps(sorted(current))))
                 continue
             seen_signatures.add(signature)
             now=time.time()
@@ -161,14 +164,27 @@ def ingest(db,show,result):
                 emit(db,'row:'+rule['id']+':'+show['id']+':'+str(time.time_ns()),message,photo,alert_id=rule['id'])
                 db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,rule['id']))
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
-                    (rule['id'],signature,json.dumps(sorted(current))))
+                    (key,signature,json.dumps(sorted(current))))
     db.execute('UPDATE row_layouts SET payload=?,checked=?,error=?,due=0,manual=0 WHERE show_id=?',(json.dumps(result),time.time(),'',show['id']));db.commit()
+
+def targets(db):
+    """(sorted showtime ids read for active row alerts, the subset an urgent alert reads)."""
+    active=set();urgent=set();shows=None
+    for rule in prefs.active(db):
+        p=rule['preferences']
+        if not p['row_show']:continue
+        if p['row_show']==prefs.ANY_SHOW and shows is None:shows=prefs.future_shows(db)
+        found=prefs.row_targets(db,p,shows);active.update(found)
+        if p.get('urgent'):urgent.update(found)
+    return sorted(active),urgent
 
 def schedule_active(db,now,interval=30):
     if meta(db,'notifications_paused','0')=='1':return
-    for rule in prefs.active(db):
-        show_id=rule['preferences'].get('row_show')
-        if show_id:db.execute('UPDATE row_layouts SET due=? WHERE show_id=? AND due=0 AND checked<?',(now,show_id,now-interval))
+    schema(db)
+    for show_id in targets(db)[0]:
+        # A '*' alert finds new showtimes on its own, so their rows may not exist yet.
+        db.execute("INSERT OR IGNORE INTO row_layouts(show_id,payload) VALUES(?,'{}')",(show_id,))
+        db.execute('UPDATE row_layouts SET due=? WHERE show_id=? AND due=0 AND checked<?',(now,show_id,now-interval))
     db.commit()
 
 def poll_policy(db,now,cloud=True):
@@ -182,13 +198,14 @@ def poll_policy(db,now,cloud=True):
 
 def queue_order(db,now):
     """ORDER BY clause and its parameters for the seat-read queue."""
-    active=sorted({r['preferences']['row_show'] for r in prefs.active(db) if r['preferences']['row_show']})
-    slots=','.join('?' for _ in active) or "''"
+    active,urgent=targets(db);urgent=sorted(urgent)
+    slots=','.join('?' for _ in active) or "''";hot=','.join('?' for _ in urgent) or "''"
     # An alert showtime overdue by 2 minutes goes first, so browsing cannot starve it.
     # Then a showtime nobody has seen yet (someone is waiting on the page);
     # routine alert refreshes would otherwise take every slot of the source budget.
-    order=f"CASE WHEN show_id IN ({slots}) AND due<? THEN 0 WHEN checked=0 AND error='' THEN 1 WHEN due<? THEN 2 WHEN show_id IN ({slots}) THEN 3 ELSE 4 END,due"
-    return order,(*active,now-120,now-90,*active),set(active)
+    # An urgent alert's showtimes count their overdue time three times (2 minutes becomes 40 s).
+    order=f"CASE WHEN show_id IN ({slots}) AND due<(CASE WHEN show_id IN ({hot}) THEN ? ELSE ? END) THEN 0 WHEN checked=0 AND error='' THEN 1 WHEN due<? THEN 2 WHEN show_id IN ({slots}) THEN 3 ELSE 4 END,CASE WHEN show_id IN ({hot}) THEN due-(?-due)*2 ELSE due END"
+    return order,(*active,*urgent,now-40,now-120,now-90,*active,*urgent,now),set(active)
 
 def next_job(db,now):
     if source_ready_at(db)>now:return None

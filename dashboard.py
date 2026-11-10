@@ -16,6 +16,7 @@ from urllib.parse import parse_qs,urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 DEFAULT_DB='/workspace/booking-tracker/state.sqlite3'
+PWA_FILES={'/manifest.json':('manifest.json','application/manifest+json'),'/static/icon-180.png':('icon-180.png','image/png'),'/static/icon-192.png':('icon-192.png','image/png'),'/static/icon-512.png':('icon-512.png','image/png')}
 from store import connect, coverage, meta, setmeta
 import watch_preferences as preferences
 
@@ -44,7 +45,7 @@ def check_queue(db):
     for item in row_watch.queue(db,now):
         upcoming.append({'kind':'seats','movie':item['movie'],'date':'','detail':' · '.join(filter(None,[item['venue'],item['date'],item['time']])),'alert':item['alert'],'eta':item['eta'],'checked':0,'error':''})
     upcoming.sort(key=lambda item:item['eta'])
-    row_shows={r['preferences']['row_show'] for r in prefs.active(db) if r['preferences']['row_show']}
+    row_shows=set(row_watch.targets(db)[0])
     keys={r['id']:r for r in alert_rows+later}
     recent=[]
     for stat in db.execute('SELECT source,job_key,last_attempt,last_success,error FROM check_stats ORDER BY last_attempt DESC LIMIT 200'):
@@ -317,6 +318,12 @@ def handler(path, public=False):
                         from api_watch import register_movie
                         title=register_movie(db,data['url']);db.commit()
                         self.reply(json.dumps({'title':title}));return
+                    if action=='save_preset':
+                        if set(data)!={'name','preferences'}:raise ValueError('Provide a preset name and preferences')
+                        self.reply(json.dumps({'presets':preferences.save_preset(db,data['name'],data['preferences'])}));return
+                    if action=='delete_preset':
+                        if set(data)!={'id'}:raise ValueError('Choose a preset to delete')
+                        self.reply(json.dumps({'presets':preferences.delete_preset(db,data['id'])}));return
                     if action=='delete':
                         if data:raise ValueError('Invalid delete request')
                         preferences.delete(db,requested)
@@ -386,6 +393,12 @@ def handler(path, public=False):
                 self.reply('ready' if ok else 'monitor needs attention',200 if ok else 503);return
             if self.path=='/healthz':
                 self.reply('ok');return
+            asset=PWA_FILES.get(urlsplit(self.path).path)
+            if asset:
+                # Public on purpose: iOS fetches the manifest and home-screen icon without the session cookie. Fixed file names only.
+                body=Path(__file__).with_name('static').joinpath(asset[0]).read_bytes()
+                self.send_response(200);self.send_header('Content-Type',asset[1]);self.send_header('Content-Length',str(len(body)))
+                self.send_header('Cache-Control','public, max-age=86400');self.send_header('X-Content-Type-Options','nosniff');self.end_headers();self.wfile.write(body);return
             if public and self.path in ('/','/login') and not self.authenticated():
                 self.login_page();return
             if not self.authorized():return
@@ -435,12 +448,15 @@ def handler(path, public=False):
                     alerts=preferences.rules(db)
                     new=parse_qs(urlsplit(self.path).query).get('new',[''])[0]=='1'
                     selected=next((a for a in alerts if a['id']==alert_id),None) if alert_id else (alerts[0] if alerts and not new else None)
+                    recent=preferences.history(db)
+                    for a in alerts:a['history']=recent.get(a['id'],[])
                     body=json.dumps({'preferences':selected['preferences'] if selected else preferences.defaults(),
                         'selected_id':selected['id'] if selected else '',
                         'alerts':alerts,'options':preferences.options(db),'csrf':csrf,
                         'skipped':int(meta(db,'watch_skipped','0')),
                         'completed':selected['completed'] if selected else 0,
                         'rows_supported':os.environ.get('BMS_ROWS_ENABLED')=='1',
+                        'presets':preferences.presets(db),'row_any_limit':preferences.ROW_ANY_LIMIT,
                         'seat_ready_at':row_watch.source_ready_at(db)}).encode()
                 finally:db.close()
                 content_type='application/json'

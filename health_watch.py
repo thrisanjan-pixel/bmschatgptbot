@@ -28,12 +28,13 @@ def problems(db,now):
  row_rules=[r for r in rules if r['preferences']['row_show']]
  if row_rules and now-float(meta(db,'row_reader_heartbeat','0'))>120:issues['row-worker']='The seat reader has stopped reporting its heartbeat.'
  rate_limited_movies=set()
- # Row reads share one 120 s gap and a 30/hour budget, so the quiet period grows with the number of row shows.
+ # Row reads share one 120 s gap and a 30/hour budget, so the quiet period grows with the number of watched showtimes.
  stale=stale_settings(db);quiet=stale['minutes']*60
- limit=max(quiet,240*len(row_rules))
+ limit=max(quiet,240*sum(r['row_targets'] for r in row_rules))
  cooling=max(float(meta(db,k,'0')) for k in ('seat_cooldown_until','seat_budget_until'))>now
  for rule in rules if stale['enabled'] else []:
   h=rule['health'];last=h['last_success'] or rule['created']
+  if rule['preferences']['row_show'] and not rule['row_targets']:continue  # an any-showtime alert with no matching showtime has nothing to read
   if now-last>(limit if rule['preferences']['row_show'] else quiet):
    if rule['preferences']['row_show'] and cooling:continue
    if rule['preferences']['row_show'] and h['error'] in ('Seat source HTTP 429','Seat metadata HTTP 429'):
