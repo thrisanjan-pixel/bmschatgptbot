@@ -235,7 +235,11 @@ input,select,textarea{font-size:16px!important}
 .history-link{display:inline-flex;align-items:center;min-height:44px;color:#93c5fd}
 @media(max-width:680px){.preset-bar{margin:11px 14px 0}#create .form-intro{padding-top:calc(15px + env(safe-area-inset-top,0px))}.preset-bar .row-select,.preset-name-row input{font-size:16px!important}}
 .alert-status.pc{color:#93c5fd;border-color:#3b82f655;background:#3b82f614}.alert-card-actions .button.pc-open{min-height:44px}.alert-card-actions .button.pc-open.on{border-color:#3b82f688;color:#93c5fd}
-.min-seats-label{margin:14px 0 10px}#min-seats{height:44px;font-size:16px!important}.min-seats-note{margin-top:2px;font-size:11px}</style>
+.min-seats-label{margin:14px 0 10px}#min-seats{height:44px;font-size:16px!important}.min-seats-note{margin-top:2px;font-size:11px}/* Card header: the title keeps its width and the tags wrap under it when there are many. */
+.alert-head{flex-wrap:wrap;row-gap:8px}
+.alert-head>:first-child{flex:1 1 160px;min-width:0;overflow-wrap:anywhere}
+.alert-head .request-tags{flex:0 1 auto;flex-wrap:wrap;justify-content:flex-end;max-width:100%}
+</style>
 </head>
 <body>
 <div class="app">
