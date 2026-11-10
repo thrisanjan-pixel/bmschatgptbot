@@ -74,6 +74,8 @@ def main():
  p=argparse.ArgumentParser();p.add_argument('--db',required=True);a=p.parse_args();db=connect(a.db)
  from telegram import drain
  from local_credentials import load
+ # Grace period restarts on every deploy, otherwise old worker heartbeats look like a stopped monitor.
+ setmeta(db,'health_watch_started',time.time());db.commit()
  while True:
   try:
    check(db)

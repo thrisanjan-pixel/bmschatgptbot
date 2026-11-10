@@ -107,10 +107,17 @@ def permanent(error):
     return error.code == 400 and 'chat' not in reason and 'token' not in reason
 
 
+def claim(db, row, now):
+    """Hide a due row from other processes for 120 s; False if someone else already took it."""
+    return bool(db.execute('UPDATE outbox SET next_try=? WHERE id=? AND delivered=0 AND next_try<=?', (now+120, row['id'], now)).rowcount)
+
+
 def drain(db, commit=True, system_only=False):
-    from store import meta
+    from store import meta,setmeta
     if meta(db,'telegram_enabled','1')!='1':return None
     now = time.time()
+    # A 429 is a flood wait for the whole bot, not for one row.
+    if float(meta(db,'telegram_blocked_until','0') or 0)>now:return None
     row = db.execute("SELECT * FROM outbox WHERE delivered=0 AND next_try<=?"+(" AND alert_id='__health__'" if system_only else "")+" ORDER BY CASE WHEN alert_id='__health__' THEN 0 ELSE 1 END,created LIMIT 1", (now,)).fetchone()
     if not row:
         return None
@@ -119,7 +126,11 @@ def drain(db, commit=True, system_only=False):
         # Queued while alerts were switched off or Telegram was down; say so instead of looking current.
         ist = dt.datetime.fromtimestamp(row['created'], dt.timezone(dt.timedelta(hours=5, minutes=30)))
         text = f"Delayed alert from {ist:%H:%M} IST (may be out of date)\n\n" + text
-    # Release the write lock while talking to Telegram; a crash before the mark below resends, as before.
+    # Claim the row before releasing the write lock: api_watch and health_watch both drain and must not both send it.
+    if not db.in_transaction:db.execute('BEGIN IMMEDIATE')
+    if not claim(db, row, now):
+        db.commit();return None
+    # Release the write lock while talking to Telegram; a crash before the mark below resends after the claim expires.
     db.commit()
     try:
         send(text, row['photo'])
@@ -128,6 +139,7 @@ def drain(db, commit=True, system_only=False):
         logging.warning('Telegram delivery failed: HTTP %s, retry in %ss, attempt %s%s', error.code, error.retry,
                         row['attempts']+1, ' ('+error.reason+')' if error.reason else '')
         db.execute('BEGIN IMMEDIATE')
+        if error.code==429:setmeta(db,'telegram_blocked_until',str(now+error.retry))
         if permanent(error) and row['attempts']+1 >= FAILED_ATTEMPTS:
             # Keep the text for inspection, but stop it holding back later alerts for this rule.
             from watch_preferences import archive_message

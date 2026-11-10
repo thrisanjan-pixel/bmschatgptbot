@@ -167,10 +167,14 @@ def validate(data):
         values=data.get(key,[])
         if not isinstance(values,list) or len(values)>200 or any(not isinstance(v,str) or not v or len(v)>300 for v in values):raise ValueError('Invalid '+key)
         result[key]=list(dict.fromkeys(values))
-    for value in result['dates']:dt.datetime.strptime(value,'%Y%m%d')
+    for value in result['dates']:
+        if not re.fullmatch(r'\d{8}',value):raise ValueError('Dates must look like 20261231')
+        dt.datetime.strptime(value,'%Y%m%d')
     for key in ('time_from','time_to'):
         value=data.get(key,'')
-        if value:dt.datetime.strptime(value,'%H:%M')
+        if value:
+            if not isinstance(value,str) or not re.fullmatch(r'\d\d:\d\d',value):raise ValueError('Times must look like 09:30')
+            dt.datetime.strptime(value,'%H:%M')
         result[key]=value
     if result['time_from'] and result['time_to'] and result['time_from']>result['time_to']:raise ValueError('End time must be after start time')
     for key in ('new_shows','availability','enabled','once','notify_existing'):
@@ -314,7 +318,8 @@ def delivered(db,alert_id=None):
     rule=next((r for r in saved if r['id']==alert_id),None) if alert_id else (saved[0] if saved else None)
     if not rule:return
     p=rule['preferences']
-    if p['once']:
+    # One check can queue several messages (a cinema each, or 2800-char chunks); finish only after the last is delivered.
+    if p['once'] and not db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone():
         p['enabled']=False
         db.execute('UPDATE alerts SET payload=?,updated=?,completed=? WHERE id=?',
             (json.dumps(p),time.time(),time.time(),rule['id']))
@@ -326,6 +331,10 @@ def delivered(db,alert_id=None):
 
 def options(db):
     from api_source import seat_layout_url
+    def safe_link(s):
+        # One stored show with an odd event code must not break the dashboard for everyone.
+        try:return seat_layout_url(s)
+        except Exception:return ''
     shows=[json.loads(r[0]) for r in db.execute('SELECT payload FROM sessions WHERE active=1 AND cutoff>?',(time.time(),))]
     result={k:set() for k in FIELDS};cinemas={};profiles=set()
     for s in shows:
@@ -356,4 +365,4 @@ def options(db):
             'cinema_names':cinema_names,
             'venue_options':{code:{k:sorted(items) for k,items in value.items()} for code,value in venue_options.items()},
             'profiles':[{'movie':p[0],'cinema':p[1],'language':p[2],'format':p[3],'categories':p[4],'screen':p[5],'date':p[6],'url':p[7]} for p in sorted(profiles)],
-            'showtimes':[{'id':s['id'],'movie':s['movie'],'cinema':s['venue_code'],'screen':str(s.get('format','')),'language':dimensions(s)[0],'format':dimensions(s)[1],'date':s['date'],'time':s['time'],'categories':[c['name'] for c in s['categories'].values()],'booking_url':seat_layout_url(s)} for s in shows]}
+            'showtimes':[{'id':s['id'],'movie':s['movie'],'cinema':s['venue_code'],'screen':str(s.get('format','')),'language':dimensions(s)[0],'format':dimensions(s)[1],'date':s['date'],'time':s['time'],'categories':[c['name'] for c in s['categories'].values()],'booking_url':safe_link(s)} for s in shows]}

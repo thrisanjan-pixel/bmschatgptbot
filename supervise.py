@@ -30,6 +30,7 @@ def main():
         from http_source import carry_over
         state=connect(str(db))
         try:print(f'Carried over source deadlines: {carry_over(state,os.environ["BMS_SOURCE_NOT_BEFORE"])}',flush=True)
+        except ValueError as error:print(f'Ignoring malformed BMS_SOURCE_NOT_BEFORE: {error}',flush=True)  # a bad value must not crash-loop the service
         finally:state.close()
     stop=threading.Event()
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:stop.set())

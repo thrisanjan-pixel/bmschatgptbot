@@ -71,6 +71,7 @@ class IngestOptionTests(unittest.TestCase):
     def test_once_completes_after_first_delivery_repeat_keeps_running(self):
         one=prefs.save(self.db,pref(enabled=True,once=True),create=True);many=self.alert()
         ingest(self.db,self.job,response());ingest(self.db,self.job,response('2'))
+        self.db.execute('UPDATE outbox SET delivered=1')  # delivered() runs after a message is sent
         prefs.delivered(self.db,one);prefs.delivered(self.db,many)
         self.assertEqual([r['id'] for r in prefs.active(self.db)],[many])
         self.assertEqual(next(r for r in prefs.rules(self.db) if r['id']==one)['status'],'completed')
