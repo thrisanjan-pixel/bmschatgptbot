@@ -35,7 +35,7 @@ def format_matches(actual,wanted):
     if wanted in ('imax','4dx'):return wanted in actual
     return actual==wanted
 def defaults():
-    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'notify_existing':True,'interval_minutes':10,'row_show':'','rows':[],'party_size':0,'request_state':'','urgent':False}
+    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'notify_existing':True,'interval_minutes':10,'row_show':'','rows':[],'party_size':0,'request_state':'','urgent':False,'open_on_pc':False}
 
 def future_shows(db):
     """Active future showtimes as (cutoff, show), soonest first."""
@@ -206,7 +206,7 @@ def validate(data,preset=False):
             dt.datetime.strptime(value,'%H:%M')
         result[key]=value
     if result['time_from'] and result['time_to'] and result['time_from']>result['time_to']:raise ValueError('End time must be after start time')
-    for key in ('new_shows','availability','enabled','once','notify_existing','urgent'):
+    for key in ('new_shows','availability','enabled','once','notify_existing','urgent','open_on_pc'):
         if type(data.get(key,result[key])) is not bool:raise ValueError('Invalid '+key)
         result[key]=data.get(key,result[key])
     interval=data.get('interval_minutes',10)
@@ -412,7 +412,7 @@ def preset_preferences(data):
     """Validated filters for a preset: no movies or dates, never enabled, a row_show kept only as '*'."""
     if not isinstance(data,dict):raise ValueError('Invalid settings')
     any_show=data.get('row_show')==ANY_SHOW
-    clean={**data,'movies':[],'dates':[],'enabled':False,'request_state':''}
+    clean={**data,'movies':[],'dates':[],'enabled':False,'request_state':'','open_on_pc':False}
     if not any_show:clean.update(row_show='',rows=[],party_size=0)
     return validate(clean,preset=True)
 
@@ -455,3 +455,32 @@ def history(db,limit=10):
         result.setdefault(r['alert_id'],[]).append({'created':r['created'],'delivered':r['delivered'] or 0,
             'summary':history_summary(r['text'],kinds.get(r['alert_id'],False)),'url':links[-1] if links else ''})
     return result
+
+PC_WINDOW=600
+def pc_link(text):
+    """The one BookMyShow link the PC helper opens: the seat layout when a message has several, else the last."""
+    links=re.findall(r'https://in\.bookmyshow\.com/[^\s<>"\x27]+',text or '')
+    return next((l for l in links if '/seat-layout/' in l),links[-1] if links else '')
+
+def pc_alerts(db,since,now=None):
+    """Queued messages of alerts with Open on PC on, newer than `since`, for the helper on the owner's PC: {armed,now,events}."""
+    now=time.time() if now is None else now;ensure(db)
+    on={};armed=False
+    for r in db.execute('SELECT id,payload FROM alerts'):
+        try:p=json.loads(r['payload'])
+        except ValueError:continue
+        if p.get('open_on_pc'):on[r['id']]=bool(p.get('row_show'));armed=armed or bool(p.get('enabled'))
+    events=[]
+    if on:
+        for r in db.execute(f"SELECT id,alert_id,created,text FROM outbox WHERE created>? AND created>? AND alert_id IN ({','.join('?'*len(on))}) ORDER BY created",(since,now-PC_WINDOW,*on)):
+            url=pc_link(r['text'])
+            if url:events.append({'id':r['id'],'alert':r['alert_id'],'created':r['created'],'summary':history_summary(r['text'],on[r['alert_id']]),'url':url})
+            if len(events)>=5:break
+    return {'armed':armed,'now':now,'events':events}
+
+def set_open_on_pc(db,alert_id,value=False):
+    """Flip only open_on_pc on a stored alert; nothing else is re-validated or changed."""
+    row=db.execute('SELECT payload FROM alerts WHERE id=?',(alert_id,)).fetchone() if isinstance(alert_id,str) else None
+    if not row:raise ValueError('Alert no longer exists')
+    p=json.loads(row[0]);p['open_on_pc']=bool(value)
+    db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),alert_id));db.commit()

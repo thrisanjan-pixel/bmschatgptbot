@@ -324,6 +324,10 @@ def handler(path, public=False):
                     if action=='delete_preset':
                         if set(data)!={'id'}:raise ValueError('Choose a preset to delete')
                         self.reply(json.dumps({'presets':preferences.delete_preset(db,data['id'])}));return
+                    if action=='pc_opened':
+                        if set(data)!={'alert'}:raise ValueError('Choose an alert')
+                        preferences.set_open_on_pc(db,data['alert'],False)
+                        self.reply(json.dumps({'ok':True}));return
                     if action=='delete':
                         if data:raise ValueError('Invalid delete request')
                         preferences.delete(db,requested)
@@ -458,6 +462,14 @@ def handler(path, public=False):
                         'rows_supported':os.environ.get('BMS_ROWS_ENABLED')=='1',
                         'presets':preferences.presets(db),'row_any_limit':preferences.ROW_ANY_LIMIT,
                         'seat_ready_at':row_watch.source_ready_at(db)}).encode()
+                finally:db.close()
+                content_type='application/json'
+            elif urlsplit(self.path).path=='/api/pc-alerts':
+                if not public and not self.local_host():self.reply('Local access only.',403);return
+                try:since=float(parse_qs(urlsplit(self.path).query).get('since',['0'])[0])
+                except ValueError:since=0.0
+                db=connect(path)
+                try:body=json.dumps(preferences.pc_alerts(db,since)).encode()
                 finally:db.close()
                 content_type='application/json'
             elif self.path=='/api/status':

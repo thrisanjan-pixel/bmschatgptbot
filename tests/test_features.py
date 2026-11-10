@@ -1,5 +1,5 @@
 """Any-showtime row alerts, urgent alerts, presets, alert history and the installable app files."""
-import copy,json,os,tempfile,threading,time,unittest,urllib.error,urllib.request
+import copy,hashlib,json,os,tempfile,threading,time,unittest,urllib.error,urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -255,5 +255,46 @@ class ServerTests(Base):
    self.assertIn(caught.exception.code,(401,404));caught.exception.close()
   dockerfile=Path(__file__).resolve().parents[1].joinpath('Dockerfile').read_text()
   for name in ('manifest.json','icon-180.png','icon-192.png','icon-512.png'):self.assertIn('static/'+name,dockerfile)
+
+class OpenOnPcTests(Base):
+ call=ServerTests.call
+ def test_preference_default_validation_and_presets(self):
+  self.assertFalse(prefs.defaults()['open_on_pc']);self.assertTrue(prefs.validate({**prefs.defaults(),'open_on_pc':True})['open_on_pc'])
+  with self.assertRaises(ValueError):prefs.validate({**prefs.defaults(),'open_on_pc':'yes'})
+  self.assertFalse(prefs.preset_preferences({**prefs.defaults(),'open_on_pc':True})['open_on_pc'])
+ def test_pc_alerts_filtering(self):
+  self.add(show(1));on=self.alert(open_on_pc=True)['id'];off=prefs.save(self.db,any_prefs(open_on_pc=False),create=True)
+  seat='https://in.bookmyshow.com/movies/hyderabad/seat-layout/ET1/TEST/1/1/20261231'
+  now=time.time()
+  def put(key,text,alert,age):
+   emit(self.db,key,text,alert_id=alert);self.db.execute('UPDATE outbox SET created=? WHERE id=?',(now-age,hashlib.sha256(key.encode()).hexdigest()))
+  ids=lambda *keys:[hashlib.sha256(k.encode()).hexdigest() for k in keys]
+  put('old','🎟 old\n\n'+seat,on,700);put('a','🎟 first\n\nhttps://in.bookmyshow.com/movies/x\n'+seat+'\nhttps://in.bookmyshow.com/z',on,30)
+  put('b','🎟 second\n\n'+seat,on,20);put('off','🎟 off\n\n'+seat,off,20);put('hl','⚠️ health\n'+seat,'__health__',20)
+  put('nolink','🎟 nolink\n\nhttps://evil.example/x',on,10);put('plain','🎟 plain, no link',on,9)
+  for i in range(6):put(f'm{i}','🎟 m'+str(i)+'\n'+seat,on,8-i)
+  self.db.commit()
+  r=prefs.pc_alerts(self.db,0,now)
+  self.assertTrue(r['armed']);self.assertEqual(r['now'],now);self.assertEqual([e['id'] for e in r['events']],ids('a','b','m0','m1','m2'))
+  first=r['events'][0];self.assertEqual((first['alert'],first['url'],first['summary']),(on,seat,'🎟 first'));self.assertAlmostEqual(first['created'],now-30,3)
+  self.assertEqual([e['id'] for e in prefs.pc_alerts(self.db,now-25,now)['events']],ids('b','m0','m1','m2','m3'))
+  self.assertEqual(prefs.pc_alerts(self.db,now,now)['events'],[])
+  prefs.set_open_on_pc(self.db,on,False);r=prefs.pc_alerts(self.db,0,now);self.assertEqual((r['armed'],r['events']),(False,[]))
+  prefs.save(self.db,any_prefs(open_on_pc=True,enabled=False),alert_id=on)
+  self.assertFalse(prefs.pc_alerts(self.db,0,now)['armed'])
+ def test_api_pc_alerts_and_pc_opened(self):
+  self.add(show(1));row=self.alert(open_on_pc=True,urgent=True)
+  server=ThreadingHTTPServer(('127.0.0.1',0),handler(self.path));thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+  self.addCleanup(lambda:(server.shutdown(),server.server_close(),thread.join()));url=f'http://127.0.0.1:{server.server_port}'
+  emit(self.db,'r1','🎟 2 seats\n\nhttps://in.bookmyshow.com/seat-layout/x',alert_id=row['id']);self.db.commit()
+  code,data=self.call(url+'/api/pc-alerts?since=0');self.assertEqual(code,200);self.assertTrue(data['armed']);self.assertEqual([e['id'] for e in data['events']],[hashlib.sha256(b'r1').hexdigest()])
+  self.assertEqual(self.call(url+'/api/pc-alerts?since=abc')[0],200)
+  csrf=self.call(url+'/api/watch')[1]['csrf']
+  self.assertEqual(self.call(url+'/api/watch',{'action':'pc_opened','alert':row['id']})[0],403)
+  self.assertEqual(self.call(url+'/api/watch',{'action':'pc_opened','alert':'nope'},csrf)[0],400)
+  self.assertEqual(self.call(url+'/api/watch',{'action':'pc_opened','alert':row['id'],'enabled':False},csrf)[0],400)
+  self.assertEqual(self.call(url+'/api/watch',{'action':'pc_opened','alert':row['id']},csrf),(200,{'ok':True}))
+  p=prefs.rules(self.db)[0]['preferences'];self.assertFalse(p['open_on_pc']);self.assertTrue(p['urgent'] and p['enabled']);self.assertEqual(p['rows'],['Gold / B'])
+  self.assertFalse(self.call(url+'/api/pc-alerts?since=0')[1]['armed'])
 
 if __name__=='__main__':unittest.main()
