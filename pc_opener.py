@@ -61,7 +61,7 @@ class Dashboard:
         self.http=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
     def get(self,path):
         with self.http.open(self.base+path,timeout=20) as r:return json.loads(r.read())
-    def alerts(self,since):return self.get('/api/pc-alerts?since='+repr(float(since)))
+    def alerts(self,since):return self.get('/api/pc-alerts?client=helper&since='+repr(float(since)))
     def opened(self,alert):
         """Tell the dashboard to turn Open on PC off for this alert (the token comes from the same page the browser uses)."""
         for attempt in (1,2):
@@ -75,6 +75,20 @@ class Dashboard:
                 if error.code==403 and attempt==1:self.csrf='';continue  # the dashboard restarted and issued a new token
                 raise
 
+def new_events(data,seen,handled=None):
+    """Events to open now. While the Chrome extension is connected it opens the page itself, so the helper skips them (one log line)."""
+    if data.get('extension'):
+        if data['events']:log('the Chrome extension is connected; leaving',len(data['events']),'event(s) to it')
+        return []
+    result=[];handled=set() if handled is None else handled
+    for event in data['events']:
+        if event['id'] in seen:continue
+        seen.add(event['id'])
+        if event['alert'] in handled:continue  # one opening per alert; it turns itself off
+        if not str(event.get('url','')).startswith('https://in.bookmyshow.com/'):continue  # open BookMyShow links only, whatever the server sends
+        handled.add(event['alert']);result.append(event)
+    return result
+
 def run(base):
     dash=Dashboard(base);since=None;seen=set();to_close=set();wait=0
     log('Open on PC helper watching',dash.base)
@@ -84,13 +98,7 @@ def run(base):
                 if dash.opened(alert):to_close.discard(alert);log('turned off Open on PC for alert',alert)
             # The first call only learns the server clock, so old messages are never replayed.
             data=dash.alerts(since if since is not None else 9e12)
-            handled=set()
-            for event in data['events']:
-                if event['id'] in seen:continue
-                seen.add(event['id'])
-                if event['alert'] in handled:continue  # one opening per alert; it turns itself off
-                if not str(event.get('url','')).startswith('https://in.bookmyshow.com/'):continue  # open BookMyShow links only, whatever the server sends
-                handled.add(event['alert'])
+            for event in new_events(data,seen):
                 log('opening',event['url'],'-',event['summary'])
                 announce(event['summary'],event['url']);to_close.add(event['alert'])
             for alert in list(to_close):

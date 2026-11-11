@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Screenwatch fixture</title>
+<style>
+  body{font:14px system-ui,sans-serif;margin:16px}
+  #konva{position:relative;width:480px;height:120px;background:#f4f4f4;border:1px solid #ccc;margin:12px 0}
+  .seat{position:absolute;width:26px;height:26px;border:1px solid #888;font-size:10px;text-align:center;line-height:26px;box-sizing:border-box}
+  #qty{border:1px solid #999;padding:8px;margin:8px 0;width:300px}#qty li{display:inline-block;margin:0 6px;cursor:pointer;list-style:none}#qty li.on{font-weight:700;color:#c00}
+  #log{white-space:pre-wrap;background:#fafafa;border:1px solid #ddd;padding:8px;min-height:60px}
+</style>
+</head>
+<body>
+<h3>Fake seat map for page.js</h3>
+<p>Open as <code>fixture.html?task={"pair":{"category":"Gold","row":"B","seats":["5","6"]}}</code>. Options: <code>&amp;noqty=1</code> (quantity already 2), <code>&amp;taken=6</code> (seat 6 taken), <code>&amp;dup=1</code> (row B exists in two areas), <code>&amp;pick=left</code> (the map picks the left neighbour), <code>&amp;terms=1</code> (terms pop-up first), <code>&amp;signin=1</code> (sign-in page text), <code>&amp;late=1</code> (map appears after 3 s), <code>&amp;autopress=2</code> (presses the simulated banner button after 2 s).</p>
+<div id="qty"><b>How many seats?</b><ul><li>1</li><li>2</li><li>3</li><li>4</li><li>5</li><li>6</li></ul><button id="qtyGo">Select Seats</button></div>
+<div id="termsBox" hidden><p>Terms and conditions</p><button id="accept">Accept</button></div>
+<div id="signinBox" hidden><p>Sign in to continue</p></div>
+<div id="konva"></div>
+<button id="pay" hidden>Pay Rs. 800</button>
+<p>Pay clicked: <b id="payState">no</b></p>
+<p><button id="press">Simulate the banner button (select)</button> <button id="dismiss">Simulate Dismiss</button></p>
+<div id="log"></div>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search), TOKEN = 'test-token-test-token';
+  var qtyWanted = q.get('noqty') ? 2 : 0, pick = q.get('pick') || 'right';
+  var pay = document.getElementById('pay'), konva = document.getElementById('konva'), log = document.getElementById('log');
+  document.getElementById('qty').hidden = !!q.get('noqty');
+  document.getElementById('termsBox').hidden = !q.get('terms');
+  document.getElementById('signinBox').hidden = !q.get('signin');
+  pay.addEventListener('click', function () { window.__payClicked = true; document.getElementById('payState').textContent = 'YES (failure)'; });
+  document.getElementById('accept').addEventListener('click', function () { document.getElementById('termsBox').hidden = true; });
+
+  // A tiny Konva look-alike: Groups with attrs, children Rects, find / findOne / fill / fire / getClientRect.
+  function Rect(group, fill) { this.group = group; this.attrs = { fill: fill }; }
+  Rect.prototype.fill = function (v) { if (v !== undefined) this.attrs.fill = v; return this.attrs.fill; };
+  Rect.prototype.fire = function (type) { if (type === 'click') this.group.onClick(); };
+  function Group(attrs, x) { this.attrs = attrs; this.x = x; this.rect = new Rect(this, attrs.id.endsWith('-selected') ? '#1EA83C' : attrs.seatObj.seatStatus === 1 ? '#FFFFFF' : '#E5E5E5'); }
+  Group.prototype.findOne = function (sel) { return sel === 'Rect' ? this.rect : null; };
+  Group.prototype.getClientRect = function () { return { x: this.x, y: this.attrs.seatObj.rowNumber === 'B' ? 20 : 60, width: 26, height: 26 }; };
+  var groups = [], areaOf = { A: 'A1', B: 'A1' };
+  function mk(area, row, n, taken) {
+    var obj = { areaCode: area, rowNumber: row, displaySeatNumber: String(n), cinemaSeatNumber: String(n), seatNumber: ('0' + n).slice(-2), priceCode: '0001', curPrice: 400, seatType: taken ? 'Booked / Held' : 'Available', seatStatus: taken ? 2 : 1 };
+    var g = new Group({ id: 'Seat-' + area + '-' + row + '-' + n, seatObj: obj }, 10 + (n - 1) * 30);
+    g.onClick = function () { clickSeat(g); };
+    return g;
+  }
+  function build() {
+    var takenNo = Number(q.get('taken') || 0), n;
+    for (n = 1; n <= 10; n++) { groups.push(mk('A1', 'B', n, n === takenNo)); groups.push(mk('A1', 'C', n, false)); }
+    if (q.get('dup')) for (n = 1; n <= 10; n++) groups.push(mk('A2', 'B', n, false));
+    draw();
+  }
+  function clickSeat(g) {
+    if (document.getElementById('qty').hidden === false) return;                    // the seat count must be chosen first
+    if (g.attrs.seatObj.seatStatus !== 1 || g.attrs.id.endsWith('-selected')) return;
+    var row = g.attrs.seatObj.rowNumber, n = Number(g.attrs.seatObj.cinemaSeatNumber), buddy = null;
+    if (qtyWanted === 2) {                                                          // one click selects two neighbours
+      var order = pick === 'left' ? [n - 1, n + 1] : [n + 1, n - 1];
+      order.forEach(function (m) { if (!buddy) buddy = groups.find(function (x) { return x.attrs.seatObj.rowNumber === row && Number(x.attrs.seatObj.cinemaSeatNumber) === m && x.attrs.seatObj.seatStatus === 1 && x.attrs.seatObj.areaCode === g.attrs.seatObj.areaCode; }) || null; });
+    }
+    [g, buddy].forEach(function (x) { if (x) select(x); });
+    pay.hidden = false;
+    draw();
+  }
+  function select(g) {
+    var i = groups.indexOf(g), obj = Object.assign({}, g.attrs.seatObj, { priceDesc: '3D GOLD.' });
+    var s = new Group({ id: g.attrs.id + '-selected', seatObj: obj }, g.x); s.onClick = function () {};
+    groups.splice(i, 1, s);
+  }
+  window.Konva = { stages: [{
+    content: konva, width: function () { return 480; },
+    find: function (sel) { return sel === 'Group' ? groups.slice() : []; }
+  }] };
+  function draw() {
+    konva.replaceChildren();
+    groups.forEach(function (g) {
+      var d = document.createElement('div'); d.className = 'seat'; d.textContent = g.attrs.seatObj.cinemaSeatNumber;
+      var r = g.getClientRect(); d.style.left = r.x + 'px'; d.style.top = r.y + 'px'; d.style.background = g.rect.fill(); konva.appendChild(d);
+    });
+  }
+
+  // Seat-count pop-up: choose a number, then Select Seats closes it and sets the quantity.
+  Array.prototype.forEach.call(document.querySelectorAll('#qty li'), function (li) {
+    li.addEventListener('click', function () { Array.prototype.forEach.call(document.querySelectorAll('#qty li'), function (x) { x.classList.remove('on'); }); li.classList.add('on'); qtyWanted = Number(li.textContent); });
+  });
+  document.getElementById('qtyGo').addEventListener('click', function () { if (qtyWanted) document.getElementById('qty').hidden = true; });
+
+  if (q.get('late')) { delete window.Konva; setTimeout(function () { window.Konva = { stages: [{ content: konva, width: function () { return 480; }, find: function (sel) { return sel === 'Group' ? groups.slice() : []; } }] }; build(); }, 3000); } else build();
+
+  // Show what page.js reports, and stand in for the banner button.
+  window.addEventListener('message', function (e) {
+    var d = e.data; if (e.source !== window || !d || d.src !== 'screenwatch-page') return;
+    log.textContent += d.type + ' ' + (d.phase || '') + ' ' + (d.text || '') + '\n';
+  });
+  document.getElementById('press').addEventListener('click', function () { window.postMessage({ src: 'screenwatch-content', token: TOKEN, type: 'select' }, '*'); });
+  if (q.get('autopress')) setTimeout(function () { document.getElementById('press').click(); }, Number(q.get('autopress')) * 1000);
+  document.getElementById('dismiss').addEventListener('click', function () { window.postMessage({ src: 'screenwatch-content', token: TOKEN, type: 'dismiss' }, '*'); });
+
+  // Test hook: page.js reads ?task= only because this flag is set and the page is a file: URL.
+  window.__SCREENWATCH_TEST__ = true;
+  ['../seatlogic.js', '../page.js'].reduce(function (chain, src) {
+    return chain.then(function () { return new Promise(function (ok) { var s = document.createElement('script'); s.src = src; s.onload = ok; document.body.appendChild(s); }); });
+  }, Promise.resolve());
+})();
+</script>
+</body>
+</html>

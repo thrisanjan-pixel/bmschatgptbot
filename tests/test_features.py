@@ -28,6 +28,8 @@ class Base(unittest.TestCase):
  def alert(self,**extra):
   prefs.save(self.db,any_prefs(**extra),create=True)
   return prefs.rules(self.db)[0]
+ def client(self,name='extension',age=0):
+  setmeta(self.db,f'pc_{name}_seen',time.time()-age);self.db.commit()
 
 class AnyShowTests(Base):
  def test_validate(self):
@@ -263,7 +265,7 @@ class OpenOnPcTests(Base):
   with self.assertRaises(ValueError):prefs.validate({**prefs.defaults(),'open_on_pc':'yes'})
   self.assertFalse(prefs.preset_preferences({**prefs.defaults(),'open_on_pc':True})['open_on_pc'])
  def test_pc_alerts_filtering(self):
-  self.add(show(1));on=self.alert(open_on_pc=True)['id'];off=prefs.save(self.db,any_prefs(open_on_pc=False),create=True)
+  self.client();self.add(show(1));on=self.alert(open_on_pc=True)['id'];off=prefs.save(self.db,any_prefs(open_on_pc=False),create=True)
   seat='https://in.bookmyshow.com/movies/hyderabad/seat-layout/ET1/TEST/1/1/20261231'
   now=time.time()
   def put(key,text,alert,age):
@@ -283,11 +285,13 @@ class OpenOnPcTests(Base):
   prefs.save(self.db,any_prefs(open_on_pc=True,enabled=False),alert_id=on)
   self.assertFalse(prefs.pc_alerts(self.db,0,now)['armed'])
  def test_api_pc_alerts_and_pc_opened(self):
-  self.add(show(1));row=self.alert(open_on_pc=True,urgent=True)
+  self.client();self.add(show(1));row=self.alert(open_on_pc=True,urgent=True)
   server=ThreadingHTTPServer(('127.0.0.1',0),handler(self.path));thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
   self.addCleanup(lambda:(server.shutdown(),server.server_close(),thread.join()));url=f'http://127.0.0.1:{server.server_port}'
-  emit(self.db,'r1','🎟 2 seats\n\nhttps://in.bookmyshow.com/seat-layout/x',alert_id=row['id']);self.db.commit()
+  seat='https://in.bookmyshow.com/movies/hyderabad/seat-layout/ET00523251/ALUC/6249/20261111'
+  emit(self.db,'r1','🎟 2 seats\n\n⭐ Best 2 together: Gold / B · seats 09, 08\n\n'+seat,alert_id=row['id']);self.db.commit()
   code,data=self.call(url+'/api/pc-alerts?since=0');self.assertEqual(code,200);self.assertTrue(data['armed']);self.assertEqual([e['id'] for e in data['events']],[hashlib.sha256(b'r1').hexdigest()])
+  self.assertEqual(data['events'][0]['pair'],{'category':'Gold','row':'B','seats':['09','08']})
   self.assertEqual(self.call(url+'/api/pc-alerts?since=abc')[0],200)
   csrf=self.call(url+'/api/watch')[1]['csrf']
   self.assertEqual(self.call(url+'/api/watch',{'action':'pc_opened','alert':row['id']})[0],403)
@@ -296,6 +300,63 @@ class OpenOnPcTests(Base):
   self.assertEqual(self.call(url+'/api/watch',{'action':'pc_opened','alert':row['id']},csrf),(200,{'ok':True}))
   p=prefs.rules(self.db)[0]['preferences'];self.assertFalse(p['open_on_pc']);self.assertTrue(p['urgent'] and p['enabled']);self.assertEqual(p['rows'],['Gold / B'])
   self.assertFalse(self.call(url+'/api/pc-alerts?since=0')[1]['armed'])
+  # pc_cancel turns the arm off the same way, and the page and pc-alerts replies carry the new fields
+  prefs.set_open_on_pc(self.db,row['id'],True);self.assertEqual(self.call(url+'/api/watch',{'action':'pc_cancel','alert':row['id']})[0],403)
+  self.assertEqual(self.call(url+'/api/watch',{'action':'pc_cancel','alert':'nope'},csrf)[0],400)
+  self.assertEqual(self.call(url+'/api/watch',{'action':'pc_cancel','alert':row['id']},csrf),(200,{'ok':True}))
+  watch=self.call(url+'/api/watch')[1];self.assertEqual(watch['alerts'][0]['preferences']['open_on_pc_until'],0);self.assertEqual(watch['alerts'][0]['open_on_pc_until'],0)
+  self.assertEqual(watch['pc_clients']['helper'],None);self.assertLess(watch['pc_clients']['extension'],60)
+  data=self.call(url+'/api/pc-alerts?since=0&client=helper')[1];self.assertTrue(data['extension']);self.assertEqual(data['armed_alerts'],[])
+  self.assertLess(self.call(url+'/api/watch')[1]['pc_clients']['helper'],60)
+
+class PcExtensionServerTests(Base):
+ def test_arm_expiry(self):
+  self.client();self.add(show(1));row=self.alert(open_on_pc=True);t=time.time()
+  until=row['preferences']['open_on_pc_until'];self.assertAlmostEqual(until,t+3*3600,delta=5)
+  # an ordinary edit keeps the expiry; turning off clears it and works with no client
+  self.db.execute("UPDATE meta SET value='0' WHERE key LIKE 'pc_%_seen'");self.db.commit()
+  prefs.save(self.db,{**row['preferences'],'urgent':True},alert_id=row['id']);self.assertEqual(prefs.rules(self.db)[0]['preferences']['open_on_pc_until'],until)
+  p=row['preferences'];prefs.save(self.db,{**p,'open_on_pc':False},alert_id=row['id']);self.assertEqual(prefs.rules(self.db)[0]['preferences']['open_on_pc_until'],0)
+  # an expired arm reads as off everywhere and is cleared in storage
+  self.client();prefs.set_open_on_pc(self.db,row['id'],True)
+  self.assertEqual([a['id'] for a in prefs.pc_alerts(self.db,0)['armed_alerts']],[row['id']])
+  stored=lambda:json.loads(self.db.execute('SELECT payload FROM alerts WHERE id=?',(row['id'],)).fetchone()[0])
+  p=stored();p['open_on_pc_until']=time.time()-1;self.db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),row['id']));self.db.commit()
+  r=prefs.pc_alerts(self.db,0);self.assertEqual((r['armed'],r['armed_alerts']),(False,[]));self.assertEqual((stored()['open_on_pc'],stored()['open_on_pc_until']),(False,0))
+  p=stored();p.update(open_on_pc=True,open_on_pc_until=time.time()-1);self.db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),row['id']));self.db.commit()
+  self.assertFalse(prefs.rules(self.db)[0]['preferences']['open_on_pc'])
+  p=stored();p.update(open_on_pc=True,open_on_pc_until=0);self.db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),row['id']));self.db.commit()
+  self.assertFalse(prefs.rules(self.db)[0]['preferences']['open_on_pc'])  # a legacy arm with no expiry is off
+  self.assertEqual(prefs.preset_preferences({**prefs.defaults(),'open_on_pc':True,'open_on_pc_until':99})['open_on_pc_until'],0)
+ def test_arming_needs_a_live_pc_client(self):
+  self.add(show(1));message='Start the PC helper or enable the Screenwatch extension on this PC first'
+  with self.assertRaises(ValueError) as caught:self.alert(open_on_pc=True)
+  self.assertEqual(str(caught.exception),message)
+  off=self.alert();self.assertEqual(prefs.pc_clients(self.db),{'extension':None,'helper':None})
+  with self.assertRaises(ValueError):prefs.set_open_on_pc(self.db,off['id'],True)
+  self.client('extension',age=200)
+  with self.assertRaises(ValueError):prefs.set_open_on_pc(self.db,off['id'],True)  # seen more than 120 s ago
+  self.client('helper',age=100);prefs.set_open_on_pc(self.db,off['id'],True);self.assertTrue(prefs.rules(self.db)[0]['preferences']['open_on_pc'])
+  prefs.set_open_on_pc(self.db,off['id'],False);self.assertFalse(prefs.rules(self.db)[0]['preferences']['open_on_pc'])
+  self.assertFalse(prefs.pc_alerts(self.db,0,client='helper')['extension']);self.assertLess(prefs.pc_clients(self.db)['helper'],5)
+  self.assertTrue(prefs.pc_alerts(self.db,0,client='extension')['extension']);self.assertFalse(prefs.pc_alerts(self.db,0,now=time.time()+500)['extension'])
+  prefs.pc_alerts(self.db,0,client='other');self.assertEqual(meta(self.db,'pc_other_seen'),'')
+ def test_event_show_and_pair(self):
+  self.client();s={**show('x'),'id':'ALUC:20261111:6249:ET00523251','movie':'Big Film','venue':'Alu Cinema','date':'20261111','time':'09:40 PM','format':'PCX'};self.add(s)
+  row=self.alert(open_on_pc=True);seat='https://in.bookmyshow.com/movies/hyderabad/seat-layout/ET00523251/ALUC/6249/20261111'
+  other='https://in.bookmyshow.com/movies/hyderabad/seat-layout/ET00523251/ALUC/9999/20261111'
+  emit(self.db,'a','⭐ Best 2 together: Gold / B · seats 09, 10\n\n'.replace('\\n','\n')+seat,alert_id=row['id']);emit(self.db,'b','🎟 plain\n'.replace('\\n','\n')+other,alert_id=row['id']);self.db.commit()
+  first,second=prefs.pc_alerts(self.db,0)['events']
+  self.assertEqual(first['show'],{'movie':'Big Film','venue':'Alu Cinema','date':'20261111','time':'09:40 PM','screen':'PCX'})
+  self.assertEqual(first['pair'],{'category':'Gold','row':'B','seats':['09','10']});self.assertNotIn('show',second);self.assertNotIn('pair',second)
+ def test_helper_skips_events_when_extension_is_connected(self):
+  import pc_opener
+  event=lambda i:{'id':i,'alert':'a'+i,'url':'https://in.bookmyshow.com/movies/x/seat-layout/y','summary':'s'}
+  data={'extension':True,'events':[event('1')]};seen=set()
+  self.assertEqual(pc_opener.new_events(data,seen),[]);self.assertEqual(seen,set())
+  data={'extension':False,'events':[event('1'),event('1'),{**event('2'),'url':'https://evil.example/'}]}
+  self.assertEqual([e['id'] for e in pc_opener.new_events(data,seen)],['1']);self.assertEqual(pc_opener.new_events(data,seen),[])
+  d=pc_opener.Dashboard('http://x');d.get=lambda path:path;self.assertIn('client=helper',d.alerts(5))
 
 class SeatCountTests(Base):
  """Minimum seats open (row and category alerts) and the seat-map photo that follows every category alert."""
@@ -338,7 +399,7 @@ class SeatCountTests(Base):
   row_watch.ingest(self.db,a,result('1','2','3'));self.assertEqual(self.texts(),[])
   row_watch.ingest(self.db,a,result('1','2','3','9'));self.assertEqual(len(self.texts()),1);self.assertIn('Best 2 together',self.texts()[0])
  def test_category_alert_sends_text_then_photo_followup(self):
-  rid=self.cat_alert(once=True,open_on_pc=True);s=self.open_show()
+  self.client();rid=self.cat_alert(once=True,open_on_pc=True);s=self.open_show()
   self.assertEqual(len(self.texts()),1);self.assertIn('Category now available',self.texts()[0])
   [p]=self.pending();self.assertEqual((p['alert_id'],p['show_id'],p['mode'],json.loads(p['categories'])),(rid,s['id'],'photo',['Gold']))
   self.db.execute('UPDATE outbox SET delivered=1');prefs.delivered(self.db,rid);self.db.commit()

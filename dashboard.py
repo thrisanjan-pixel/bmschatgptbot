@@ -324,7 +324,7 @@ def handler(path, public=False):
                     if action=='delete_preset':
                         if set(data)!={'id'}:raise ValueError('Choose a preset to delete')
                         self.reply(json.dumps({'presets':preferences.delete_preset(db,data['id'])}));return
-                    if action=='pc_opened':
+                    if action in ('pc_opened','pc_cancel'):
                         if set(data)!={'alert'}:raise ValueError('Choose an alert')
                         preferences.set_open_on_pc(db,data['alert'],False)
                         self.reply(json.dumps({'ok':True}));return
@@ -460,7 +460,7 @@ def handler(path, public=False):
                         'skipped':int(meta(db,'watch_skipped','0')),
                         'completed':selected['completed'] if selected else 0,
                         'rows_supported':os.environ.get('BMS_ROWS_ENABLED')=='1',
-                        'presets':preferences.presets(db),'row_any_limit':preferences.ROW_ANY_LIMIT,
+                        'pc_clients':preferences.pc_clients(db),'presets':preferences.presets(db),'row_any_limit':preferences.ROW_ANY_LIMIT,
                         'seat_ready_at':row_watch.source_ready_at(db)}).encode()
                 finally:db.close()
                 content_type='application/json'
@@ -469,7 +469,8 @@ def handler(path, public=False):
                 try:since=float(parse_qs(urlsplit(self.path).query).get('since',['0'])[0])
                 except ValueError:since=0.0
                 db=connect(path)
-                try:body=json.dumps(preferences.pc_alerts(db,since)).encode()
+                client=parse_qs(urlsplit(self.path).query).get('client',[''])[0]
+                try:body=json.dumps(preferences.pc_alerts(db,since,client=client)).encode()
                 finally:db.close()
                 content_type='application/json'
             elif self.path=='/api/status':

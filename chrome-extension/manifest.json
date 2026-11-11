@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Screenwatch seat helper",
+  "version": "1.0.0",
+  "description": "Opens the seat page of a Screenwatch alert on this PC and highlights your two seats. You press the button; it never pays.",
+  "minimum_chrome_version": "111",
+  "permissions": ["storage", "alarms", "notifications", "tabs", "tts"],
+  "host_permissions": [
+    "https://bmschatgptbot-production.up.railway.app/*",
+    "https://in.bookmyshow.com/*"
+  ],
+  "optional_host_permissions": ["https://*/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Screenwatch seat helper", "default_popup": "popup.html" },
+  "icons": { "128": "icon128.png" },
+  "content_scripts": [
+    {
+      "matches": ["https://in.bookmyshow.com/movies/*/seat-layout/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://in.bookmyshow.com/movies/*/seat-layout/*"],
+      "js": ["seatlogic.js", "page.js"],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    }
+  ]
+}
