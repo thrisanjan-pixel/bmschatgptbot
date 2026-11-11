@@ -56,8 +56,8 @@ class SourceBudgetTests(unittest.TestCase):
  def test_listing_and_seat_hosts_have_independent_budgets(self):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000)
   source.reserve(self.db,'https://in.bookmyshow.com/api/test',1000)
-  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/test',1059)
-  source.reserve(self.db,'https://in.bookmyshow.com/api/test',1060)
+  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/test',1019)
+  source.reserve(self.db,'https://in.bookmyshow.com/api/test',1020)
  def test_budget_denial_sends_no_network_request(self):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',time.time())
   with patch.dict(os.environ,{'BMS_REQUEST_BUDGET':'1','BMS_DB':self.path}),patch('urllib.request.urlopen') as call:

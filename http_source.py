@@ -12,7 +12,9 @@ class SourceWait(RuntimeError):
 # Alert seat reads: at most one every 20 s and 165 an hour (plus 10 manual reads, so 175 at most).
 # The 11 Nov rate test held 20 s for an hour (176 reads, no refusals), then got HTTP 429 with a
 # 24-hour Retry-After at 10 s when the rolling hour reached about 181 reads.
-POLICIES={'services-in.bookmyshow.com':(165,20),'in.bookmyshow.com':(60,60),'in-cdn.bmscdn.com':(6,600)}
+# Showtime (listing) checks: one every 20 s, 165 an hour, at the owner's request (11 Nov 2026).
+# This host was not rate-tested; 403 and 429 replies still back off.
+POLICIES={'services-in.bookmyshow.com':(165,20),'in.bookmyshow.com':(165,20),'in-cdn.bmscdn.com':(6,600)}
 # Seat loads someone asked for on the page: a small separate budget, so they run at once
 # without taking slots from alert checks. Source cooldowns (429) still apply.
 MANUAL={'services-in.bookmyshow.com':(10,10),'in.bookmyshow.com':(10,10)}
