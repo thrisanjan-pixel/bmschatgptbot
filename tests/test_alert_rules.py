@@ -121,7 +121,7 @@ class AlertRuleTests(unittest.TestCase):
         job={**self.job,'kind':'discovery'}
         self.assertEqual(poll_interval(self.db,job),120)
         alert_id=prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'enabled':True},create=True)
-        self.assertEqual(poll_interval(self.db,job),20)
+        self.assertEqual(poll_interval(self.db,job),60)
         prefs.transition(self.db,alert_id,'cancel')
         self.assertEqual(poll_interval(self.db,job),120)
 

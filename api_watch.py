@@ -161,8 +161,8 @@ def poll_interval(db,job):
     movie=json.loads(job['payload']).get('movie','')
     if not is_watched(json.loads(job['payload']),wanted_dates(db)):
         return 120
-    # Watched listings are rechecked every 20 s; the shared 20 s request gap spaces them out.
-    return 20
+    # Keep a conservative target until real source access is stable.
+    return 60
 
 
 def watched_movies(db):
@@ -229,7 +229,7 @@ def listing_order(db, now):
     slots = ','.join('?' for _ in movies) or "''"
     cooldown_until = float(meta(db, 'source_cooldown', '0'))
     recovering = bool(cooldown_until and 0 <= now - cooldown_until < 60)
-    # Listing requests are spaced 20 s apart, so a short window would hand background
+    # Listing requests are one a minute, so a 60 s window would hand background
     # work every turn. Give it at most one turn in five.
     background_recent = now-float(meta(db,'listing_background_attempt','0')) < BACKGROUND_SPACING
     background_paused = float(meta(db, 'background_cooldown_until', '0')) > now
