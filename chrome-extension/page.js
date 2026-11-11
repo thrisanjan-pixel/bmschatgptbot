@@ -7,7 +7,7 @@
   const L = globalThis.ScreenwatchSeatLogic;
   // Test hook: only on a file: page that set the flag itself (test/fixture.html). Never active on a website.
   const TEST = window.__SCREENWATCH_TEST__ === true && location.protocol === 'file:';
-  let token = '', pair = null, started = false, finished = false, busy = false, latched = false;
+  let token = '', pair = null, started = false, finished = false, busy = false, latched = false, autoCheckout = false;
   let lastKey = '', lastVerify = 0, ids = [], overlay = null, rings = [];
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -103,7 +103,7 @@
   }
 
   async function select() {
-    if (busy || finished || latched || (!TEST && !navigator.userActivation.isActive)) return;
+    if (busy || finished || latched || (!TEST && !autoCheckout && !navigator.userActivation.isActive)) return;
     busy = true;
     try {
       const stop = stopNow();
@@ -182,6 +182,7 @@
     started = true;
     token = String(detail.token || '');
     pair = detail.pair || null;
+    autoCheckout = detail.autoCheckout === true;
     if (pair && !(Array.isArray(pair.seats) && pair.seats.length === 2 && pair.row)) pair = null;
     post('hello', {});
     if (!pair) { state('nopair', 'This alert names no exact pair. Pick seats yourself.', false); return; }

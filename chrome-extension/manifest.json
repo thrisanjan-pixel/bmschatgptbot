@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Screenwatch seat helper",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Opens a Screenwatch seat alert in Chrome and prepares BookMyShow checkout after your confirmation.",
   "minimum_chrome_version": "111",
   "permissions": ["storage", "alarms", "notifications", "tabs", "tts"],

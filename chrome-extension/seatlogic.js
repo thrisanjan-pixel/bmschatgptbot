@@ -84,7 +84,18 @@
     return matches.length === 1 && matches[0].enabled ? matches[0].element : null;
   }
 
-  const api = { FRESH_SECONDS, num, findPair, checkSelection, isFresh, validSeatUrl, detectStop, seatLabel, checkoutCandidate };
+  function canAutoCheckout(grant, dashboard, alert, event, serverNow, localNowMs) {
+    const seats = event.pair?.seats;
+    return !!grant && grant.dashboard === dashboard && grant.until === alert.until
+      && alert.id === event.alert && alert.until > serverNow
+      && isFresh(event, serverNow)
+      && localNowMs - Math.max(0, serverNow - event.created) * 1000 >= grant.armedAt
+      && typeof event.pair?.row === 'string' && !!event.pair.row.trim()
+      && typeof event.pair.category === 'string' && !!event.pair.category.trim()
+      && Array.isArray(seats) && seats.length === 2 && Math.abs(num(seats[0]) - num(seats[1])) === 1;
+  }
+
+  const api = { FRESH_SECONDS, num, findPair, checkSelection, isFresh, validSeatUrl, detectStop, seatLabel, checkoutCandidate, canAutoCheckout };
   root.ScreenwatchSeatLogic = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

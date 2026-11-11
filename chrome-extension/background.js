@@ -47,10 +47,10 @@ async function flushPendingOff(c) {
   c.pendingOff = left;
 }
 
-async function openEvent(c, event, serverNow) {
+async function openEvent(c, event, serverNow, autoCheckout) {
   const tab = await chrome.tabs.create({ url: event.url, active: true });
   if (tab.windowId !== undefined) chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
-  await chrome.storage.session.set({ ['task:' + tab.id]: { event, skew: Date.now() / 1000 - serverNow } });
+  await chrome.storage.session.set({ ['task:' + tab.id]: { event, autoCheckout, skew: Date.now() / 1000 - serverNow } });
   const show = event.show || {};
   chrome.notifications.create('screenwatch-' + event.id, {
     type: 'basic', iconUrl: 'icon128.png', requireInteraction: true, title: 'Seats open',
@@ -74,9 +74,14 @@ async function pollOnce() {
       handled.push(event.id);
       if (seenAlerts.has(event.alert)) continue;
       if (!L.isFresh(event, data.now) || !L.validSeatUrl(event.url)) continue;
-      if (!(data.armed_alerts || []).some((a) => a.id === event.alert)) continue;
+      const alert = (data.armed_alerts || []).find((a) => a.id === event.alert);
+      if (!alert) continue;
       seenAlerts.add(event.alert);
-      await openEvent(c, event, data.now);
+      const key = 'auto:' + alert.id;
+      const grant = (await chrome.storage.session.get(key))[key];
+      const autoCheckout = L.canAutoCheckout(grant, c.dashboard, alert, event, data.now, Date.now());
+      if (autoCheckout) await chrome.storage.session.remove(key);
+      await openEvent(c, event, data.now, autoCheckout);
       if (!c.pendingOff.includes(event.alert)) c.pendingOff.push(event.alert);
     }
     await local.set({ since: data.now - 5, handled: handled.slice(-HANDLED_KEEP), pendingOff: c.pendingOff, armed: data.armed_alerts || [] });
@@ -133,6 +138,11 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       let samePage = false;
       try { samePage = !!task && new URL(sender.url || '').pathname === new URL(task.event.url).pathname; } catch (error) { samePage = false; }
       if (!task || expired(task) || !samePage) { if (task && expired(task)) await chrome.storage.session.remove(key); return reply({ task: null }); }
+      if (task.autoCheckout) {
+        const c = await config();
+        await chrome.storage.session.set({ [key]: { ...task, autoCheckout: false } });
+        task.autoCheckout = c.enabled;
+      }
       return reply({ task });
     }
     if (message.type === 'result') {
@@ -146,6 +156,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     }
     if (message.type === 'cancel') {
       const c = await config();
+      await chrome.storage.session.remove('auto:' + String(message.alert || ''));
       try { await dashboardAction(c.dashboard, 'pc_cancel', String(message.alert || '')); } catch (error) { return reply({ ok: false, error: String(error.message || error) }); }
       await local.set({ armed: c.armed.filter((a) => a.id !== message.alert) });
       return reply({ ok: true });

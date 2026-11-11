@@ -20,6 +20,8 @@ The dashboard address is in the pop-up. Changing it to another https address mak
 4. Check the banner at the top and the two pink rings on the seats. The button enables only while both seats are verified free. Press **Select seats and open checkout**. Review the seats and price on BookMyShow. If a terms or add-ons screen appears, continue from there yourself.
 5. The dashboard switch turns itself off after the page opens.
 
+For automatic selection, arm **Open on PC** for the alert first. In the extension pop-up, choose **Auto checkout once** next to that armed alert. The next matching alert with an exact pair can select those seats and open checkout without a second click. Use **Turn auto off** to revoke that permission while leaving Open on PC armed. Restarting Chrome clears it. BookMyShow prompts and payment are yours to handle.
+
 ## Cancel
 
 Press **Cancel** next to the alert in the extension pop-up, or turn the switch off on the dashboard card. Arming also expires by itself after 3 hours.
@@ -27,7 +29,7 @@ Press **Cancel** next to the alert in the extension pop-up, or turn the switch o
 ## What it never does
 
 - It acts on BookMyShow only in a tab it opened for a fresh armed alert (under 10 minutes old), and only for the show that alert names.
-- It selects seats only after you press its button (it checks the click is a real one).
+- It selects seats after a real click on the seat banner or a one-use permission granted for that alert in the extension pop-up.
 - It can click the seat map’s total button once after your confirmation and exact selection. It stops when the flow leaves the seat map. You handle terms, consent, and the final payment controls yourself.
 - It never reads or sends cookies or page data to the dashboard. The dashboard only receives "opened" and "cancel" for an alert.
 - It never retries around a sign-in page, CAPTCHA, queue or waiting room, Cloudflare check, "Access denied" page or terms pop-up. It stops and tells you where to take over. After you accept a terms pop-up, the highlighting resumes.

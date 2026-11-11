@@ -125,3 +125,17 @@ test('checkoutCandidate requires one enabled seat-total button', () => {
     assert.strictEqual(L.checkoutCandidate([{ ...enabled, label }]), null);
   }
 });
+
+test('automatic checkout requires a fresh exact pair after local opt-in for this arming', () => {
+  const dashboard = 'https://screenwatch.example';
+  const alert = { id: 'a1', until: 1200 };
+  const grant = { dashboard, until: 1200, armedAt: 1040000 };
+  const event = { alert: 'a1', created: 1041, pair };
+  const eligible = (g, e = event, a = alert) => L.canAutoCheckout(g, dashboard, a, e, 1050, 1050000);
+  assert.strictEqual(eligible(grant), true);
+  assert.strictEqual(eligible(null), false);
+  assert.strictEqual(eligible(grant, { ...event, created: 1039 }), false);
+  assert.strictEqual(eligible(grant, { ...event, alert: 'a2' }), false);
+  assert.strictEqual(eligible(grant, event, { ...alert, until: 1300 }), false);
+  assert.strictEqual(eligible(grant, { ...event, pair: { ...pair, seats: ['8', '10'] } }), false);
+});

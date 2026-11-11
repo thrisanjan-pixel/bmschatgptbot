@@ -51,6 +51,7 @@
     const post = (type) => window.postMessage({ src: 'screenwatch-content', token, type }, location.origin);
     const say = (text, tone) => { const n = $('st'); n.textContent = text; n.className = 'status ' + (tone || ''); };
     let hello = false, gone = false, checkoutUntil = 0, attemptedCheckout = false;
+    let autoPending = task.autoCheckout === true;
 
     function openCheckout(text) {
       const confirmed = !gone && !attemptedCheckout && Date.now() < checkoutUntil;
@@ -90,7 +91,14 @@
       if (d.type === 'hello') { hello = true; return; }
       if (d.type === 'state') {
         say(String(d.text || ''), d.phase === 'verified' || d.phase === 'done' ? 'ok' : d.phase === 'loading' || d.phase === 'selecting' ? 'warn' : 'bad');
-        $('go').disabled = attemptedCheckout || !d.canSelect;
+        $('go').disabled = attemptedCheckout || !d.canSelect || Date.now() < checkoutUntil;
+        if (autoPending && d.phase === 'verified' && d.canSelect) {
+          autoPending = false;
+          selectPair();
+        } else if (d.phase === 'gone' || d.phase === 'stopped') {
+          autoPending = false;
+          checkoutUntil = 0;
+        }
         if (d.phase === 'stopped') chrome.runtime.sendMessage({ type: 'result', ok: false, text: String(d.text || '') }).catch(() => {});
       } else if (d.type === 'result') {
         checkoutUntil = 0;
@@ -102,11 +110,14 @@
     });
 
     // Only a real click by the person counts. Script-made clicks have isTrusted false and are ignored.
-    $('go').addEventListener('click', (e) => {
-      if (!e.isTrusted || $('go').disabled || attemptedCheckout) return;
+    function selectPair() {
       $('go').disabled = true;
       checkoutUntil = Date.now() + 15000;
       post('select');
+    }
+    $('go').addEventListener('click', (e) => {
+      if (!e.isTrusted || $('go').disabled || attemptedCheckout) return;
+      selectPair();
     });
     $('no').addEventListener('click', (e) => {
       if (!e.isTrusted) return;
@@ -115,7 +126,7 @@
     });
 
     // Give page.js its token and the pair. It may load a moment after this script, so repeat until it answers.
-    const detail = JSON.stringify({ token, pair });
+    const detail = JSON.stringify({ token, pair, autoCheckout: autoPending });
     for (let i = 0; i < 12 && !hello && !gone; i++) {
       window.dispatchEvent(new CustomEvent('screenwatch-init', { detail }));
       await sleep(i < 4 ? 250 : 1000);
