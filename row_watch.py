@@ -227,6 +227,9 @@ def targets(db,now=None):
         if p.get('urgent'):urgent.update(found)
     return sorted(active),urgent
 
+# Seconds between seat reads of one showtime: normal alerts, urgent alerts, and the gap between any two alert seat reads.
+NORMAL_INTERVAL,URGENT_INTERVAL,SEAT_SPACING=45,25,25
+
 def schedule_active(db,now,interval=30):
     schema(db);prefs.prune_seat_photos(db,now)
     # A seat photo is read even when every alert is paused or finished.
@@ -234,10 +237,13 @@ def schedule_active(db,now,interval=30):
         db.execute("INSERT OR IGNORE INTO row_layouts(show_id,payload) VALUES(?,'{}')",(show_id,))
         db.execute('UPDATE row_layouts SET due=? WHERE show_id=? AND due=0',(now,show_id))
     if meta(db,'notifications_paused','0')=='1':db.commit();return
-    for show_id in targets(db,now)[0]:
+    active,urgent=targets(db,now)
+    # Urgent showtimes are read faster, except while recovering from a rate limit.
+    fast=min(interval,URGENT_INTERVAL) if interval<=NORMAL_INTERVAL else interval
+    for show_id in active:
         # A '*' alert finds new showtimes on its own, so their rows may not exist yet.
         db.execute("INSERT OR IGNORE INTO row_layouts(show_id,payload) VALUES(?,'{}')",(show_id,))
-        db.execute('UPDATE row_layouts SET due=? WHERE show_id=? AND due=0 AND checked<?',(now,show_id,now-interval))
+        db.execute('UPDATE row_layouts SET due=? WHERE show_id=? AND due=0 AND checked<?',(now,show_id,now-(fast if show_id in urgent else interval)))
     db.commit()
 
 def poll_policy(db,now,cloud=True):
@@ -246,7 +252,7 @@ def poll_policy(db,now,cloud=True):
     # Recovery starts after the source wait ends, including waits longer than 15 minutes.
     recovering=bool((until and 0<=now-until<900) or
                     (last_limit and 0<=now-last_limit<900))
-    return (120,60) if cloud and recovering else (60,60) if cloud else (60,0)
+    return (120,60) if cloud and recovering else (NORMAL_INTERVAL,SEAT_SPACING) if cloud else (60,0)
 
 
 def queue_order(db,now):

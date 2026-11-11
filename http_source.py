@@ -9,7 +9,9 @@ class SourceWait(RuntimeError):
         super().__init__('Waiting for the permitted source request budget')
 
 
-POLICIES={'services-in.bookmyshow.com':(60,60),'in.bookmyshow.com':(60,60),'in-cdn.bmscdn.com':(6,600)}
+# Seat reads: at most one every 25 s and 144 an hour. The 11 Nov rate test held 20 s (176/hour)
+# for an hour and got HTTP 429 with a 24-hour Retry-After at 10 s, so 25 s keeps about 20% headroom.
+POLICIES={'services-in.bookmyshow.com':(144,25),'in.bookmyshow.com':(60,60),'in-cdn.bmscdn.com':(6,600)}
 # Seat loads someone asked for on the page: a small separate budget, so they run at once
 # without taking slots from alert checks. Source cooldowns (429) still apply.
 MANUAL={'services-in.bookmyshow.com':(10,10),'in.bookmyshow.com':(10,10)}

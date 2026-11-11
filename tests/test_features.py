@@ -83,6 +83,16 @@ class AnyShowTests(Base):
   self.assertEqual(set(rows),{'s1','s2'});self.assertTrue(all(d==now for d in rows.values()))
   self.assertEqual(row_watch.queue_order(self.db,now)[2],{'s1','s2'})
   self.assertEqual({q['show_id'] for q in row_watch.queue(self.db,now)},{'s1','s2'})
+ def test_urgent_alert_rereads_its_showtimes_sooner(self):
+  self.add(show(1));self.alert(urgent=True);now=time.time()
+  row_watch.schedule_active(self.db,now);self.db.execute('UPDATE row_layouts SET due=0,checked=?',(now,));self.db.commit()
+  row_watch.schedule_active(self.db,now+24,45);self.assertEqual(self.db.execute('SELECT due FROM row_layouts').fetchone()[0],0)
+  row_watch.schedule_active(self.db,now+26,45);self.assertEqual(self.db.execute('SELECT due FROM row_layouts').fetchone()[0],now+26)
+ def test_normal_alert_waits_the_normal_interval(self):
+  self.add(show(1));self.alert();now=time.time()
+  row_watch.schedule_active(self.db,now);self.db.execute('UPDATE row_layouts SET due=0,checked=?',(now,));self.db.commit()
+  row_watch.schedule_active(self.db,now+26,45);self.assertEqual(self.db.execute('SELECT due FROM row_layouts').fetchone()[0],0)
+  row_watch.schedule_active(self.db,now+46,45);self.assertEqual(self.db.execute('SELECT due FROM row_layouts').fetchone()[0],now+46)
  def test_queue_rotates_fairly_over_targets(self):
   self.add(*[show(i) for i in range(5)]);self.alert();now=time.time();picked=[]
   for _ in range(15):

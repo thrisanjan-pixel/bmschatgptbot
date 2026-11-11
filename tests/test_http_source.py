@@ -12,9 +12,9 @@ class SourceBudgetTests(unittest.TestCase):
  def test_seat_budget_is_shared_across_screens_and_survives_restart(self):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000)
   self.db.close();self.db=connect(self.path)
-  with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1050)
-  self.assertEqual(error.exception.until,1060)
-  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1060)
+  with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1020)
+  self.assertEqual(error.exception.until,1025)
+  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1025)
  def test_manual_reads_have_their_own_budget_but_honor_cooldowns(self):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000)
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1010,manual=True)
@@ -30,7 +30,7 @@ class SourceBudgetTests(unittest.TestCase):
   source.reserve(self.db,'https://in.bookmyshow.com/api/x',1250,metadata=True)
   with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/x',1255,metadata=True)
  def test_rolling_hour_cap_counts_every_attempt(self):
-  for n in range(60):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000+n*60)
+  for n in range(144):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000+n*25)
   with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4599)
   self.assertEqual(error.exception.until,4600)
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4600)
