@@ -52,6 +52,23 @@
     const say = (text, tone) => { const n = $('st'); n.textContent = text; n.className = 'status ' + (tone || ''); };
     let hello = false, gone = false, checkoutUntil = 0, attemptedCheckout = false;
     let autoPending = task.autoCheckout === true;
+    const seatPath = new URL(event.url).pathname;
+
+    function checkHandoff() {
+      if (gone) return;
+      const snacks = [...document.querySelectorAll('h1,h2,h3,[role="heading"],label,p,span,div')]
+        .some((node) => /^grab a bite!$/i.test((node.textContent || '').trim()) && node.getClientRects().length);
+      if (!snacks && location.pathname === seatPath) return;
+      if (snacks || /^\/order-summary(?:\/|$)/.test(location.pathname)) {
+        const text = snacks ? 'BookMyShow opened Grab a Bite. Take over here.' : 'BookMyShow opened the order summary. Take over here.';
+        chrome.runtime.sendMessage({ type: 'result', ok: true, text }).catch(() => {});
+      }
+      gone = true;
+      post('dismiss');
+      host.remove();
+      clearInterval(handoffTimer);
+    }
+    const handoffTimer = setInterval(checkHandoff, 500);
 
     function openCheckout(text) {
       const confirmed = !gone && !attemptedCheckout && Date.now() < checkoutUntil;
@@ -87,12 +104,12 @@
 
     window.addEventListener('message', (e) => {
       const d = e.data;
-      if (e.source !== window || !d || d.src !== 'screenwatch-page' || d.token !== token) return;
+      if (gone || e.source !== window || !d || d.src !== 'screenwatch-page' || d.token !== token) return;
       if (d.type === 'hello') { hello = true; return; }
       if (d.type === 'state') {
         say(String(d.text || ''), d.phase === 'verified' || d.phase === 'done' ? 'ok' : d.phase === 'loading' || d.phase === 'selecting' ? 'warn' : 'bad');
         $('go').disabled = attemptedCheckout || !d.canSelect || Date.now() < checkoutUntil;
-        if (autoPending && d.phase === 'verified' && d.canSelect) {
+        if (autoPending && (d.phase === 'verified' || d.phase === 'quantity') && d.canSelect) {
           autoPending = false;
           selectPair();
         } else if (d.phase === 'gone' || d.phase === 'stopped') {
@@ -112,7 +129,7 @@
     // Only a real click by the person counts. Script-made clicks have isTrusted false and are ignored.
     function selectPair() {
       $('go').disabled = true;
-      checkoutUntil = Date.now() + 15000;
+      checkoutUntil = Date.now() + 35000;
       post('select');
     }
     $('go').addEventListener('click', (e) => {
@@ -121,7 +138,7 @@
     });
     $('no').addEventListener('click', (e) => {
       if (!e.isTrusted) return;
-      gone = true; post('dismiss'); host.remove();
+      gone = true; post('dismiss'); host.remove(); clearInterval(handoffTimer);
       chrome.runtime.sendMessage({ type: 'dismiss' }).catch(() => {});
     });
 

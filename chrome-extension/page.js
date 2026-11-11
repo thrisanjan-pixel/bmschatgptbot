@@ -11,8 +11,9 @@
   let lastKey = '', lastVerify = 0, ids = [], overlay = null, rings = [];
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const stage = () => (window.Konva && window.Konva.stages && window.Konva.stages[0]) || null;
   const visible = (node) => !!node && (node.offsetParent !== null || (node.getClientRects && node.getClientRects().length > 0));
+  const groupsOn = (stage) => stage.find('Group').filter((g) => g.attrs && g.attrs.seatObj && /^Seat-/.test(String(g.attrs.id || '')));
+  const stage = () => (window.Konva?.stages || []).find((candidate) => visible(candidate.content) && groupsOn(candidate).length) || null;
 
   function post(type, data) {
     const message = Object.assign({ src: 'screenwatch-page', token, type }, data || {});
@@ -26,7 +27,7 @@
     post('state', { phase, text, canSelect: !!canSelect });
   }
 
-  const allGroups = () => { const s = stage(); return s ? s.find('Group').filter((g) => g.attrs && g.attrs.seatObj && /^Seat-/.test(String(g.attrs.id || ''))) : []; };
+  const allGroups = () => { const s = stage(); return s ? groupsOn(s) : []; };
   const isSelected = (g) => /-selected$/.test(String(g.attrs.id));
   const seatObjs = () => allGroups().filter((g) => !isSelected(g)).map((g) => Object.assign({ id: g.attrs.id }, g.attrs.seatObj));
   const selectedGroups = () => allGroups().filter(isSelected);
@@ -55,9 +56,22 @@
   }
 
   function quantityPopup() {
-    const button = Array.from(document.querySelectorAll('button')).find((b) => visible(b) && /^select seats$/i.test((b.textContent || '').trim()));
-    const items = Array.from(document.querySelectorAll('li')).filter((li) => visible(li) && /^[1-6]$/.test((li.textContent || '').trim()));
-    return button && items.length >= 2 ? { button, items } : null;
+    const label = (node) => (node.innerText || node.textContent || '').trim();
+    const title = [...document.querySelectorAll('h1,h2,h3,h4,[role="heading"],p,div,span,b,strong')]
+      .find((node) => visible(node) && /^how many seats\?$/i.test(label(node)));
+    if (!title) return null;
+    for (let panel = title.parentElement; panel && panel !== document.body; panel = panel.parentElement) {
+      const buttons = [...panel.querySelectorAll('button,[role="button"]')]
+        .filter((node) => visible(node) && /^select seats$/i.test(label(node)));
+      if (buttons.length !== 1) continue;
+      const choices = [...panel.querySelectorAll('li,button,[role="button"],[role="option"],[role="radio"],div,span')]
+        .filter((node) => visible(node) && /^[1-6]$/.test(label(node))
+          && ![...node.children].some((child) => label(child) === label(node)));
+      const twos = choices.filter((node) => label(node) === '2');
+      if (twos.length === 1 && new Set(choices.map(label)).size >= 2) return { button: buttons[0], two: twos[0] };
+      break;
+    }
+    return {};
   }
 
   // Highlight rings: fixed-position boxes that follow the seats; they never take clicks.
@@ -108,19 +122,27 @@
     try {
       const stop = stopNow();
       if (stop) { latched = stop.code !== 'terms'; state('stopped', stop.message, false); return; }
-      const first = verify();
-      if (!first.ok) return;
       if (selectedGroups().length) return finish('You already have seats selected. Clear them first.', false);
       state('selecting', 'Selecting…', false);
       const popup = quantityPopup();
       if (popup) {
-        const two = popup.items.find((li) => (li.textContent || '').trim() === '2');
-        two.click();
+        if (!popup.two || !popup.button) return finish('Choose two seats in BookMyShow’s seat-count dialog.', false);
+        popup.two.click();
         await sleep(150);
+        if (finished) return;
+        const interrupted = stopNow();
+        if (interrupted || !popup.button.isConnected || !visible(popup.button)) {
+          return finish(interrupted ? interrupted.message : 'The seat-count dialog changed. Take over on this page.', false);
+        }
         popup.button.click();
         if (!(await waitFor(() => !quantityPopup(), 5000))) return finish('The seat-count pop-up did not close. Take over on this page.', false);
-        await sleep(200);
       }
+      const ready = await waitFor(() => !!stopNow() || allGroups().length > 0, 12000, 200);
+      if (finished) return;
+      const blocked = stopNow();
+      if (blocked) return finish(blocked.message, false);
+      if (!ready) return finish('The seat map did not load after the quantity dialog. Take over on this page.', false);
+      if (selectedGroups().length) return finish('You already have seats selected. Clear them first.', false);
       const again = verify();
       if (!again.ok) { state('gone', 'Pair gone: ' + pair.row + ' ' + pair.seats.join(' + ') + ' are no longer both free. Nothing was selected.', false); return; }
       const firstGroup = groupById(again.ids[0]);
@@ -156,7 +178,7 @@
   let timer = 0;
   async function start() {
     state('loading', 'Waiting for the seat map…', false);
-    const ready = await waitFor(() => !!stage() && allGroups().length > 0, 25000, 300);
+    const ready = await waitFor(() => !!quantityPopup() || allGroups().length > 0, 25000, 300);
     if (finished) return;
     if (!ready) {
       const stop = stopNow();
@@ -170,6 +192,11 @@
       if (stop) { latched = latched || stop.code !== 'terms'; ids = []; state('stopped', stop.message, false); if (latched) { clearRings(); } return; }
       if (latched) return;
       if (!pair) { state('nopair', 'This alert names no exact pair. Pick seats yourself.', false); return; }
+      if (quantityPopup()) {
+        state('quantity', 'Ready to choose two seats on BookMyShow.', true);
+        return;
+      }
+      if (!allGroups().length) { state('loading', 'Waiting for the seat map…', false); return; }
       if (Date.now() - lastVerify >= 2000 || ticks === 1) verify();
       try { drawRings(); } catch (error) { /* the map is redrawing; try again next tick */ }
     }, 500);
