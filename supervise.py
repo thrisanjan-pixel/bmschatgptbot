@@ -25,6 +25,12 @@ def main():
     lock=open(str(db)+'.supervisor.lock','a')
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:raise SystemExit('Development supervisor already running')
+    if args.api and os.environ.get('SCREENWATCH_RATE_TEST'):
+        from rate_test import start
+        from store import connect
+        state=connect(str(db))
+        try:start(state,os.environ['SCREENWATCH_RATE_TEST'])
+        finally:state.close()
     if os.environ.get('BMS_SOURCE_NOT_BEFORE'):
         from store import connect
         from http_source import carry_over

@@ -43,6 +43,10 @@ def setmeta(db, key, value):
     db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', (key, str(value)))
 
 
+def maintenance_active(db, now=None):
+    return float(meta(db, 'rate_test_end', '0')) > (time.time() if now is None else now)
+
+
 def enqueue(db, kind, url, payload, expires=0):
     key = kind + ':' + url
     db.execute('''INSERT INTO jobs(id,kind,url,payload,expires) VALUES(?,?,?,?,?)
@@ -51,6 +55,8 @@ def enqueue(db, kind, url, payload, expires=0):
 
 
 def emit(db, event, text, photo=None, alert_id=''):
+    if alert_id != '__rate_test__' and maintenance_active(db):
+        return
     key = hashlib.sha256(event.encode()).hexdigest()
     db.execute('INSERT OR IGNORE INTO outbox(id,text,photo,created,alert_id) VALUES(?,?,?,?,?)',
                (key, text, photo, time.time(), alert_id))

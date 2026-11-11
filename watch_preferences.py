@@ -54,6 +54,9 @@ def row_targets(db,p,shows=None):
         if len(found)>=ROW_ANY_LIMIT:break
     return found
 
+def row_state_signature(show_id,p):
+    return json.dumps([show_id,sorted(set(p['rows']))]+([p['party_size']] if p.get('party_size') else []))
+
 def ensure(db):
     db.execute('''CREATE TABLE IF NOT EXISTS alerts(
         id TEXT PRIMARY KEY,payload TEXT NOT NULL,created REAL NOT NULL,
@@ -279,7 +282,7 @@ def archive_pending(db,alert_id=None):
         db.execute(f'INSERT INTO suppressed_outbox({fields}) SELECT id,text,photo,created,delivered,attempts,next_try,alert_id,? FROM outbox WHERE delivered=0',(time.time(),))
         db.execute('DELETE FROM outbox WHERE delivered=0')
 
-def save(db,data,alert_id=None,create=False):
+def save(db,data,alert_id=None,create=False,*,reset=False):
     p=validate(data)
     saved=rules(db)
     before=next((r['preferences'] for r in saved if r['id']==alert_id),None) if alert_id and not create else None
@@ -310,6 +313,17 @@ def save(db,data,alert_id=None,create=False):
     db.execute('''INSERT INTO alerts(id,payload,created,updated) VALUES(?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated=excluded.updated,completed=0''',
         (alert_id,json.dumps(p),now,now))
+    if reset:
+        db.execute('UPDATE alerts SET last_alert=0 WHERE id=?',(alert_id,))
+        if p['row_show']:
+            import row_watch
+            row_watch.schema(db)
+            db.execute('DELETE FROM row_alert_state WHERE alert_id=? OR substr(alert_id,1,?)=?',
+                       (alert_id,len(alert_id)+1,alert_id+':'))
+            # A restart gets one check of seats that are already open, even in future-only mode.
+            db.executemany('INSERT INTO row_alert_state VALUES(?,?,?)',
+                           ((alert_id+':'+show_id if p['row_show']==ANY_SHOW else alert_id,
+                             'restart:'+row_state_signature(show_id,p),'[]') for show_id in row_targets(db,p)))
     enabled=bool(db.execute("SELECT 1 FROM alerts WHERE json_extract(payload,'$.enabled')=1 LIMIT 1").fetchone())
     setmeta(db,'notifications_paused','0' if enabled else '1')
     setmeta(db,'notifications_mode','enabled' if enabled else 'paused')
@@ -324,9 +338,7 @@ def transition(db,alert_id,action):
     p=rule['preferences']
     if action=='reset':
         if rule['status']=='missed':raise ValueError('Choose a future date before resetting this alert')
-        saved=save(db,{**p,'enabled':True},alert_id)
-        db.execute('UPDATE alerts SET last_alert=0 WHERE id=?',(alert_id,));db.commit()
-        return saved
+        return save(db,{**p,'enabled':True},alert_id,reset=True)
     if action not in ('cancel','booked'):raise ValueError('Unknown alert action')
     p['enabled']=False;p['request_state']='cancelled' if action=='cancel' else 'booked'
     db.execute('BEGIN IMMEDIATE');archive_pending(db,alert_id)

@@ -1,5 +1,9 @@
 # Continue this project on the user's Windows PC
 
+## Shared handoff for Codex and Claude
+
+Use [Screenwatch shared handoff on GitHub](https://github.com/thrisanjan-pixel/bmschatgptbot/issues/4) for current changes and deployment status. Read the latest comments and check the branch and working tree before starting. After each change, add a dated entry with the agent name, summary, branch or commit, deployment status, verification, and open issues. Preserve existing features and any work in progress unless the owner requests a change. Keep credentials and private logs out of GitHub.
+
 This document transfers project context from a cloud Codex conversation. It is a handoff summary, not a full chat transcript. Read it, README.md and deploy/RAILWAY.md before continuing. The user wants the assistant to perform the work, with minimal repeated questions.
 
 ## Current state (5 Nov 2026, Claude Code session)

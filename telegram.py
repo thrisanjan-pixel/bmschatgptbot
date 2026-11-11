@@ -113,12 +113,14 @@ def claim(db, row, now):
 
 
 def drain(db, commit=True, system_only=False):
-    from store import meta,setmeta
+    from store import maintenance_active,meta,setmeta
     if meta(db,'telegram_enabled','1')!='1':return None
     now = time.time()
     # A 429 is a flood wait for the whole bot, not for one row.
     if float(meta(db,'telegram_blocked_until','0') or 0)>now:return None
-    row = db.execute("SELECT * FROM outbox WHERE delivered=0 AND next_try<=?"+(" AND alert_id='__health__'" if system_only else "")+" ORDER BY CASE WHEN alert_id='__health__' THEN 0 ELSE 1 END,created LIMIT 1", (now,)).fetchone()
+    scope = " AND alert_id='__rate_test__'" if maintenance_active(db,now) else (
+        " AND alert_id IN ('__health__','__rate_test__')" if system_only else '')
+    row = db.execute("SELECT * FROM outbox WHERE delivered=0 AND next_try<=?"+scope+" ORDER BY CASE WHEN alert_id IN ('__health__','__rate_test__') THEN 0 ELSE 1 END,created LIMIT 1", (now,)).fetchone()
     if not row:
         return None
     text = row['text']

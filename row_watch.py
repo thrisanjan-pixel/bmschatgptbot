@@ -152,12 +152,14 @@ def ingest(db,show,result):
             # A '*' alert keeps its seat memory per showtime, so seats open at one never hide another's.
             key=rule['id']+':'+show['id'] if p['row_show']==prefs.ANY_SHOW else rule['id']
             selected=set(p.get('rows',[]))
-            signature=json.dumps([show['id'],sorted(selected)]+([p['party_size']] if p.get('party_size') else []))
+            signature=prefs.row_state_signature(show['id'],p)
             state=db.execute('SELECT signature,available FROM row_alert_state WHERE alert_id=?',(key,)).fetchone()
-            before={tuple(item) for item in json.loads(state['available'])} if state and state['signature']==signature else set()
+            same_selection=bool(state and state['signature']==signature)
+            restarted=bool(state and state['signature']=='restart:'+signature)
+            before={tuple(item) for item in json.loads(state['available'])} if same_selection else set()
             current={(s['row_id'],s['seat']) for s in result['available'] if s['row_id'] in selected}
             added=[s for s in result['available'] if s['row_id'] in selected and (s['row_id'],s['seat']) not in before]
-            if not p['notify_existing'] and (not state or state['signature']!=signature):
+            if not p['notify_existing'] and not (same_selection or restarted):
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',(key,signature,json.dumps(sorted(current))))
                 continue
             if not added:
@@ -188,7 +190,7 @@ def ingest(db,show,result):
             now=time.time()
             pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone()
             # The first message for a new row selection is never held back by the repeat gap of earlier messages.
-            fresh=not state or state['signature']!=signature
+            fresh=restarted or not same_selection
             if (fresh or now-rule['last_alert']>=p['interval_minutes']*60) and not pending:
                 opened_rows=sorted({s['row_id'] for s in added})
                 lines=[]
@@ -311,6 +313,12 @@ def main():
 
 def step(db):
     now=time.time()
+    from store import maintenance_active
+    if maintenance_active(db,now):
+        from rate_test import step as test_step
+        test_step(db,now)
+        time.sleep(1)
+        return
     cloud = os.environ.get('BMS_PUBLIC')=='1'
     interval,spacing=poll_policy(db,now,cloud)
     schedule_active(db,now,interval)

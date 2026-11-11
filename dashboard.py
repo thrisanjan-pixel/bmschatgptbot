@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 DEFAULT_DB='/workspace/booking-tracker/state.sqlite3'
 PWA_FILES={'/manifest.json':('manifest.json','application/manifest+json'),'/static/icon-180.png':('icon-180.png','image/png'),'/static/icon-192.png':('icon-192.png','image/png'),'/static/icon-512.png':('icon-512.png','image/png')}
-from store import connect, coverage, meta, setmeta
+from store import connect, coverage, maintenance_active, meta, setmeta
 import watch_preferences as preferences
 
 
@@ -175,6 +175,12 @@ def handler(path, public=False):
         def local_host(self):
             return self.headers.get('Host','') in (f'localhost:{self.server.server_port}',f'127.0.0.1:{self.server.server_port}')
         def do_POST(self):
+            if public:
+                db=connect(path)
+                try:active=maintenance_active(db)
+                finally:db.close()
+                if active:
+                    self.reply_json({'error':'Screenwatch is in maintenance. See /maintenance.'},503);return
             if passwordless and self.path=='/login':
                 self.send_response(303);self.send_header('Location','/');self.end_headers();return
             if public and self.path=='/login':
@@ -397,6 +403,17 @@ def handler(path, public=False):
                 self.reply('ready' if ok else 'monitor needs attention',200 if ok else 503);return
             if self.path=='/healthz':
                 self.reply('ok');return
+            if public:
+                db=connect(path)
+                try:
+                    active=maintenance_active(db)
+                    if active or urlsplit(self.path).path in ('/maintenance','/api/rate-test'):
+                        from rate_test import page,report
+                        route=urlsplit(self.path).path
+                        if route=='/api/rate-test':self.reply_json(report(db));return
+                        if route in ('/','/maintenance'):self.reply(page(report(db)));return
+                        self.reply_json({'error':'Screenwatch is in maintenance. See /maintenance.'},503);return
+                finally:db.close()
             asset=PWA_FILES.get(urlsplit(self.path).path)
             if asset:
                 # Public on purpose: iOS fetches the manifest and home-screen icon without the session cookie. Fixed file names only.

@@ -13,7 +13,7 @@ import time
 from api_source import CATALOG,ReadError,end_day,get_json,movies,no_regional_shows,parse,seat_layout_url,show_url,today
 from http_source import SourceWait
 from local_credentials import load
-from store import connect,coverage,emit,enqueue,meta,setmeta,record_check
+from store import connect,coverage,emit,enqueue,maintenance_active,meta,setmeta,record_check
 from telegram import drain,send
 import watch_preferences as preferences
 
@@ -45,7 +45,7 @@ def ingest(db,job,data):
     changes={}
     preferences.drop_unbookable_gates(db,current)
     upcoming = meta(db, 'upcoming_event:'+args['event']) == '1'
-    if (previous is not None or args.get('notify_first') or meta(db,'waiting_show:'+job['id'])=='1') and meta(db,'notifications_paused','0')!='1':
+    if (previous is not None or args.get('notify_first') or meta(db,'waiting_show:'+job['id'])=='1') and meta(db,'notifications_paused','0')!='1' and not maintenance_active(db):
         old=previous or {}
         for rule in preferences.active(db):
             prefs=rule['preferences']
@@ -390,7 +390,7 @@ class Monitor:
             # no new delivery can begin using an earlier settings read.
             db.execute('BEGIN IMMEDIATE')
             running=preferences.active(db)
-            if running and meta(db,'notifications_paused','0')!='1':
+            if running and meta(db,'notifications_paused','0')!='1' and not maintenance_active(db):
                 # A bad stored showtime must not hold back delivery of queued alerts.
                 db.execute('SAVEPOINT prime')
                 try:preferences.prime_availability(db)

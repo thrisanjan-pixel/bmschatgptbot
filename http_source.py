@@ -1,5 +1,5 @@
 """Persistent source request budgets and safe HTTP outcome logging."""
-import math,os,time,urllib.request,urllib.error
+import json,math,os,time,urllib.request,urllib.error
 from urllib.parse import urlsplit
 from store import connect
 
@@ -41,6 +41,8 @@ def schema(db):
     db.execute('CREATE INDEX IF NOT EXISTS source_request_host_time ON source_requests(host,at)')
     if 'manual' not in {r[1] for r in db.execute('PRAGMA table_info(source_requests)')}:
         db.execute('ALTER TABLE source_requests ADD COLUMN manual INTEGER DEFAULT 0')
+    if 'rate_headers' not in {r[1] for r in db.execute('PRAGMA table_info(source_requests)')}:
+        db.execute("ALTER TABLE source_requests ADD COLUMN rate_headers TEXT NOT NULL DEFAULT '{}'")
 
 
 def reserve(db,url,now=None,manual=False,metadata=False):
@@ -53,6 +55,12 @@ def reserve(db,url,now=None,manual=False,metadata=False):
         manual=bool(manual and parts.netloc in MANUAL)
         lane=1 if manual else 2 if metadata and parts.netloc in METADATA else 0
         limit,gap=(policies,MANUAL,METADATA)[lane][parts.netloc]
+        if lane==0 and parts.netloc=='services-in.bookmyshow.com' and parts.path=='/doTrans.aspx':
+            from rate_test import test_gap
+            experiment_gap=test_gap(db,now)
+            if experiment_gap:
+                gap=experiment_gap
+                limit=3600//gap
         row=db.execute('SELECT not_before FROM source_hosts WHERE host=?',(parts.netloc,)).fetchone()
         count,oldest=db.execute('SELECT count(*),min(at) FROM source_requests WHERE host=? AND at>? AND manual=?',(parts.netloc,now-3600,lane)).fetchone()
         # Manual and metadata reads keep their gap from any read; alert reads only from other alert reads.
@@ -68,7 +76,8 @@ def reserve(db,url,now=None,manual=False,metadata=False):
 def finish(db,request_id,status,headers=None,outcome='response'):
     headers=headers or {}
     retry=str(headers.get('Retry-After',''))[:160];ray=str(headers.get('CF-Ray',''))[:160]
-    db.execute('UPDATE source_requests SET status=?,retry_after=?,cf_ray=?,outcome=? WHERE id=?',(status,retry,ray,outcome,request_id))
+    rate_headers={key:headers.get(key)[:160] for key in ('RateLimit','RateLimit-Policy','RateLimit-Limit','RateLimit-Remaining','RateLimit-Reset','X-RateLimit-Limit','X-RateLimit-Remaining','X-RateLimit-Reset') if headers.get(key)}
+    db.execute('UPDATE source_requests SET status=?,retry_after=?,cf_ray=?,outcome=?,rate_headers=? WHERE id=?',(status,retry,ray,outcome,json.dumps(rate_headers),request_id))
     if status==429:
         from api_source import retry_delay
         host=db.execute('SELECT host FROM source_requests WHERE id=?',(request_id,)).fetchone()[0]
