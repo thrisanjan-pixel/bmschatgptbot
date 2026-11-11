@@ -1,5 +1,5 @@
 // Runs in the page's own (MAIN) world so it can reach the seat map's Konva stage. It does nothing until content.js sends a
-// token and a pair for a tab the extension opened. It never touches a Pay, Proceed, terms or sign-in control.
+// token and a pair for a tab the extension opened. It reports when the exact pair has been selected.
 (function () {
   'use strict';
   if (window.__screenwatchPage) return;
@@ -103,7 +103,7 @@
   }
 
   async function select() {
-    if (busy || finished || latched) return;
+    if (busy || finished || latched || (!TEST && !navigator.userActivation.isActive)) return;
     busy = true;
     try {
       const stop = stopNow();
@@ -135,8 +135,17 @@
       }
       const now = selectedGroups();
       if (check === 'exact') {
-        const category = String(now[0].attrs.seatObj.priceDesc || pair.category || '').trim().replace(/\.$/, '');
-        return finish('Selected ' + pair.row + ' ' + pair.seats.join(' + ') + ' (' + category + '). Review and press Pay yourself.', true);
+        const category = String(pair.category || '').trim();
+        if (!category || now.some((g) => String(g.attrs.seatObj.priceDesc || '').trim().toUpperCase() !== category.toUpperCase())) {
+          return finish('Both seats were selected, but their section could not be verified. Review and continue on BookMyShow.', false);
+        }
+        const afterSelection = stopNow();
+        if (afterSelection) return finish(afterSelection.message, false);
+        finished = true;
+        clearInterval(timer);
+        clearRings();
+        post('checkout-ready', { text: 'Selected ' + pair.row + ' ' + pair.seats.join(' + ') + ' (' + category + ').' });
+        return;
       }
       if (!now.length) return finish('No seat was selected. Take over on this page.', false);
       if (check === 'partial') return finish('Only one of the two seats got selected (' + list(now) + '). Fix it yourself.', false);

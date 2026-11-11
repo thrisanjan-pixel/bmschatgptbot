@@ -114,3 +114,14 @@ test('detectStop: each stop condition', () => {
     assert.match(stop.message, /^Stopped: .+ — take over on this page$/);
   }
 });
+
+test('checkoutCandidate requires one enabled seat-total button', () => {
+  const enabled = { element: {}, label: 'Pay ₹1,280.00', enabled: true };
+  assert.strictEqual(L.checkoutCandidate([enabled]), enabled.element);
+  assert.strictEqual(L.checkoutCandidate([{ ...enabled, label: 'Pay Rs. 800' }]), enabled.element);
+  assert.strictEqual(L.checkoutCandidate([{ ...enabled, enabled: false }]), null);
+  assert.strictEqual(L.checkoutCandidate([enabled, { ...enabled, enabled: false }]), null);
+  for (const label of ['Pay', 'Pay now', 'Pay ₹800 using saved card', 'Pay $800', 'Accept and continue']) {
+    assert.strictEqual(L.checkoutCandidate([{ ...enabled, label }]), null);
+  }
+});

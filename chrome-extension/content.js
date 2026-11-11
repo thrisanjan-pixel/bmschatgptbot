@@ -42,7 +42,7 @@
       'button{font:600 13px system-ui,sans-serif;border:0;border-radius:8px;padding:9px 14px;cursor:pointer}' +
       '#go{background:#ff2d95;color:#fff}#go:disabled{background:#4b4770;color:#9a97c0;cursor:not-allowed}#no{background:#ffffff1f;color:#fff}' +
       '</style><div class="bar"><div class="info"><div class="title" id="t"></div><div class="sub" id="s"></div><div class="status" id="st">Waiting for the seat map…</div></div>' +
-      '<button id="go" disabled>Select these two seats</button><button id="no">Dismiss</button></div>';
+      '<button id="go" disabled>Select seats and open checkout</button><button id="no">Dismiss</button></div>';
     const $ = (id) => root.getElementById(id);
     $('t').textContent = 'Screenwatch · ' + [show.movie, show.venue].filter(Boolean).join(' · ') + (when(event) ? ' · ' + when(event) : '');
     $('s').textContent = pair ? 'Section ' + pair.category + ' · Row ' + pair.row + ' · Seats ' + pair.seats.join(' + ') : (event.summary || '');
@@ -50,7 +50,39 @@
 
     const post = (type) => window.postMessage({ src: 'screenwatch-content', token, type }, location.origin);
     const say = (text, tone) => { const n = $('st'); n.textContent = text; n.className = 'status ' + (tone || ''); };
-    let hello = false, gone = false;
+    let hello = false, gone = false, checkoutUntil = 0, attemptedCheckout = false;
+
+    function openCheckout(text) {
+      const confirmed = !gone && !attemptedCheckout && Date.now() < checkoutUntil;
+      checkoutUntil = 0;
+      if (!confirmed) return;
+      attemptedCheckout = true;
+      $('go').disabled = true;
+      const L = globalThis.ScreenwatchSeatLogic;
+      const exactPage = L.validSeatUrl(location.href) && new URL(event.url).pathname === location.pathname;
+      const visible = (node) => node.getClientRects().length > 0 && getComputedStyle(node).visibility === 'visible';
+      const dialog = [...document.querySelectorAll('dialog[open],[role="dialog"],[aria-modal="true"]')].some(visible);
+      const stop = L.detectStop({url: location.href, title: document.title,
+        text: (document.body?.innerText || '').slice(0, 30000),
+        hasChallenge: !!document.querySelector('iframe[src*="challenges.cloudflare.com"],#challenge-form')});
+      const controls = [...document.querySelectorAll('button,[role="button"]')]
+        .filter(visible)
+        .map((element) => ({element, label: element.getAttribute('aria-label') || element.innerText,
+          enabled: !element.matches(':disabled,[aria-disabled="true"]') && !element.closest('[inert]')}));
+      const button = exactPage && !dialog && !stop && L.checkoutCandidate(controls);
+      if (!button) {
+        say(text + ' Continue on BookMyShow.', 'warn');
+        return;
+      }
+      const bounds = button.getBoundingClientRect();
+      const top = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+      if (!top || !button.contains(top)) {
+        say(text + ' The checkout button is covered or off-screen. Continue on BookMyShow.', 'warn');
+        return;
+      }
+      say(text + ' Opening checkout. Complete payment on BookMyShow.', 'ok');
+      button.click();
+    }
 
     window.addEventListener('message', (e) => {
       const d = e.data;
@@ -58,16 +90,24 @@
       if (d.type === 'hello') { hello = true; return; }
       if (d.type === 'state') {
         say(String(d.text || ''), d.phase === 'verified' || d.phase === 'done' ? 'ok' : d.phase === 'loading' || d.phase === 'selecting' ? 'warn' : 'bad');
-        $('go').disabled = !d.canSelect;
+        $('go').disabled = attemptedCheckout || !d.canSelect;
         if (d.phase === 'stopped') chrome.runtime.sendMessage({ type: 'result', ok: false, text: String(d.text || '') }).catch(() => {});
       } else if (d.type === 'result') {
+        checkoutUntil = 0;
         $('go').disabled = true;
         chrome.runtime.sendMessage({ type: 'result', ok: !!d.ok, text: String(d.text || '') }).catch(() => {});
+      } else if (d.type === 'checkout-ready') {
+        openCheckout(String(d.text || ''));
       }
     });
 
     // Only a real click by the person counts. Script-made clicks have isTrusted false and are ignored.
-    $('go').addEventListener('click', (e) => { if (!e.isTrusted || $('go').disabled) return; $('go').disabled = true; post('select'); });
+    $('go').addEventListener('click', (e) => {
+      if (!e.isTrusted || $('go').disabled || attemptedCheckout) return;
+      $('go').disabled = true;
+      checkoutUntil = Date.now() + 15000;
+      post('select');
+    });
     $('no').addEventListener('click', (e) => {
       if (!e.isTrusted) return;
       gone = true; post('dismiss'); host.remove();

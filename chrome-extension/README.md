@@ -1,6 +1,6 @@
 # Screenwatch seat helper (Chrome extension)
 
-When an alert with "Open on PC" armed fires, this extension opens the BookMyShow seat page in a new tab, highlights the two seats the alert named and waits. **You** press "Select these two seats". You press Pay yourself.
+When an alert with "Open on PC" armed fires, this extension opens the BookMyShow seat page in a new tab, highlights the two seats the alert named and waits. Press **Select seats and open checkout**. The extension verifies the pair again, selects it, and opens the checkout flow when it can identify the seat-map button. You finish payment on BookMyShow.
 
 ## Install
 
@@ -17,7 +17,7 @@ The dashboard address is in the pop-up. Changing it to another https address mak
 1. In the dashboard, switch **Open on PC** on for an alert. It stays armed for 3 hours (the alert card shows "Opens on PC · until 9:40 pm"). Arming only works while the extension is running on this PC.
 2. For an exact pair, the alert must be a row alert with **Seats together = 2**. The alert message then names the pair ("Best 2 together"), and the banner shows the section, row and seat numbers. Without a pair the banner says "This alert names no exact pair. Pick seats yourself." and has no button.
 3. When the alert fires, a tab opens and Chrome comes to the front with a notification and a spoken "Seats open. Check Chrome."
-4. Check the banner at the top and the two pink rings on the seats. The button enables only while both seats are verified free. Press **Select these two seats**. The banner then says whether it worked. Review the seats and press Pay yourself.
+4. Check the banner at the top and the two pink rings on the seats. The button enables only while both seats are verified free. Press **Select seats and open checkout**. Review the seats and price on BookMyShow. If a terms or add-ons screen appears, continue from there yourself.
 5. The dashboard switch turns itself off after the page opens.
 
 ## Cancel
@@ -28,7 +28,7 @@ Press **Cancel** next to the alert in the extension pop-up, or turn the switch o
 
 - It acts on BookMyShow only in a tab it opened for a fresh armed alert (under 10 minutes old), and only for the show that alert names.
 - It selects seats only after you press its button (it checks the click is a real one).
-- It never clicks Pay, Proceed, or any payment, terms or consent control. It never fills a form.
+- It can click the seat map’s total button once after your confirmation and exact selection. It stops when the flow leaves the seat map. You handle terms, consent, and the final payment controls yourself.
 - It never reads or sends cookies or page data to the dashboard. The dashboard only receives "opened" and "cancel" for an alert.
 - It never retries around a sign-in page, CAPTCHA, queue or waiting room, Cloudflare check, "Access denied" page or terms pop-up. It stops and tells you where to take over. After you accept a terms pop-up, the highlighting resumes.
 - If the pair is no longer free it stops. It never picks other seats. If BookMyShow picks different neighbours, it tells you and leaves them for you to fix.
@@ -47,5 +47,5 @@ Press **Cancel** next to the alert in the extension pop-up, or turn the switch o
 - Logic: `node --test chrome-extension/test/seatlogic.test.js` (from the project folder).
 - Syntax: `node --check chrome-extension/<file>.js`.
 - Seat-map driver: `test/fixture.html` is a fake Konva seat map with a seat-count pop-up and a fake Pay button that records any click. Open it as a file with a `task` parameter, for example
-  `fixture.html?task={"pair":{"category":"Gold","row":"B","seats":["5","6"]}}`
+  `fixture.html?task={"pair":{"category":"3D GOLD.","row":"B","seats":["5","6"]}}`
   Options: `noqty=1`, `taken=6`, `dup=1`, `pick=left`, `terms=1`, `signin=1`, `late=1`, `autopress=2` (presses the simulated banner button after 2 seconds). The log shows what `page.js` reports and "Pay clicked" must stay "no". The `task` hook works only on a `file:` page that sets `window.__SCREENWATCH_TEST__` itself, so it is never active on a website. Headless example: `chrome --headless=new --allow-file-access-from-files --virtual-time-budget=12000 --dump-dom "file:///.../fixture.html?task=...&autopress=3"`.

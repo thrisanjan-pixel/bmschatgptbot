@@ -76,7 +76,15 @@
     return null;
   }
 
-  const api = { FRESH_SECONDS, num, findPair, checkSelection, isFresh, validSeatUrl, detectStop, seatLabel };
+  // On the seat map, BookMyShow labels the button that opens checkout with the seat total.
+  // A bare Pay label, a different currency, or multiple matches need manual review.
+  function checkoutCandidate(controls) {
+    const matches = controls.filter(({ label }) =>
+      /^Pay\s+(?:₹\s*|Rs\.?\s+)[0-9]+(?:,[0-9]+)*(?:\.[0-9]{1,2})?$/i.test(String(label).trim()));
+    return matches.length === 1 && matches[0].enabled ? matches[0].element : null;
+  }
+
+  const api = { FRESH_SECONDS, num, findPair, checkSelection, isFresh, validSeatUrl, detectStop, seatLabel, checkoutCandidate };
   root.ScreenwatchSeatLogic = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
