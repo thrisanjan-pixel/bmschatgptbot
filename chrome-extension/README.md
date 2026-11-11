@@ -14,11 +14,11 @@ The dashboard address is in the pop-up. Changing it to another https address mak
 
 ## Use
 
-1. In the dashboard, switch **Open on PC** on for an alert. It stays armed for 3 hours (the alert card shows "Opens on PC · until 9:40 pm"). Arming only works while the extension (or the PC helper) is running on this PC.
+1. In the dashboard, switch **Open on PC** on for an alert. It stays armed for 3 hours (the alert card shows "Opens on PC · until 9:40 pm"). Arming only works while the extension is running on this PC.
 2. For an exact pair, the alert must be a row alert with **Seats together = 2**. The alert message then names the pair ("Best 2 together"), and the banner shows the section, row and seat numbers. Without a pair the banner says "This alert names no exact pair. Pick seats yourself." and has no button.
 3. When the alert fires, a tab opens and Chrome comes to the front with a notification and a spoken "Seats open. Check Chrome."
 4. Check the banner at the top and the two pink rings on the seats. The button enables only while both seats are verified free. Press **Select these two seats**. The banner then says whether it worked. Review the seats and press Pay yourself.
-5. The dashboard switch turns itself off after the page opens. The PC helper (`pc_opener.py`) stays quiet while the extension is connected, so the page opens once.
+5. The dashboard switch turns itself off after the page opens.
 
 ## Cancel
 
@@ -36,7 +36,7 @@ Press **Cancel** next to the alert in the extension pop-up, or turn the switch o
 ## Troubleshooting
 
 - **Pop-up says "Sign in to the dashboard in this Chrome first":** open your dashboard in this Chrome and sign in.
-- **Arming fails with "Start the PC helper or enable the Screenwatch extension":** the extension is off, or has not polled in the last 2 minutes. Check the pop-up status.
+- **Arming fails with "Enable the Screenwatch extension in Chrome on this PC first":** the extension is off, or has not polled in the last 2 minutes. Check the pop-up status.
 - **No tab opened:** the alert's message was older than 10 minutes, had no seat-layout link, or the switch had expired.
 - **Banner says "Could not start on this page":** reload the tab.
 - **"Row label is not unique":** the row letter appears in more than one section. Choose seats yourself.

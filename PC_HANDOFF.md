@@ -113,6 +113,13 @@ Left open on purpose:
 - Automated seat holding or checkout from Railway or the PC was declined: it needs getting past BookMyShow's bot block (the checkout lab got HTTP 403 on Railway).
 - Railway CLI is now signed in as Thrisu; it had been signed in to another account (ItsKG) that cannot access the project.
 
+## Chrome seat helper replaces the PC opener (11 Nov 2026)
+
+- `pc_opener.py` and `start_pc_opener.bat` were removed on the owner's request. The Chrome extension in `chrome-extension/` is the only PC client. The "Open on PC" notes above describe the removed helper.
+- "Open on PC" arms an alert for 3 hours and needs the extension to have polled in the last 2 minutes. The extension opens the showtime in Chrome, highlights the two seats and selects them only when the owner presses "Select these two seats". It never presses Pay, terms or sign-in controls.
+- Install: `chrome://extensions`, Developer mode, Load unpacked, choose `chrome-extension`, then switch "Enabled on this PC" on in the pop-up. See `chrome-extension/README.md`.
+- Not verified yet: the extension in real Chrome with a real alert.
+
 ## Minimum seats and category seat photos (10 Nov 2026, commit 2be058a, deploy 00e33ee0)
 
 - `min_seats` (0 = off, 1–50): an alert fires only when at least that many seats are open in its chosen rows or opened categories.

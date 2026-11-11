@@ -15,3 +15,4 @@ Current handoff: Claude is working on the one-click seat-selection flow in the n
 - Files: `watch_preferences.py`, `dashboard.py`, `pc_opener.py`, `static/screenwatch.html`, `tests/test_features.py`, `chrome-extension/*`.
 - Verification: 290 Python tests and 14 node tests pass. The page script passed against the fake seat map in `chrome-extension/test/fixture.html`. The Konva facts it relies on were checked by hand on a live BookMyShow seat page.
 - Pending: deploy to Railway (project f7f005f3, service 18cc5ac2) is waiting for the owner's approval. The extension has not been loaded in real Chrome yet, so the banner, the handshake and a real alert are unverified.
+- Update, 11 Nov 2026: `pc_opener.py` and `start_pc_opener.bat` were removed on the owner's request. Only the Chrome extension counts as a PC client now; 289 Python tests and 14 node tests pass.

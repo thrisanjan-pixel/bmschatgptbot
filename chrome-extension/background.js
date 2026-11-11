@@ -23,7 +23,7 @@ async function dashboardGet(base, path) {
   try { return await response.json(); } catch (error) { throw new Error('Sign in to the dashboard in this Chrome first'); }
 }
 
-// Same flow as pc_opener.py: the CSRF token comes from the page's own JSON, then every POST carries it.
+// The CSRF token comes from the page's own JSON, then every POST carries it.
 async function dashboardAction(base, action, alert) {
   for (let attempt = 0; attempt < 2; attempt++) {
     if (!csrfToken) csrfToken = (await dashboardGet(base, '/api/watch?new=1')).csrf || '';

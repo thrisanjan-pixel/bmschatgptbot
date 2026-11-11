@@ -305,9 +305,9 @@ class OpenOnPcTests(Base):
   self.assertEqual(self.call(url+'/api/watch',{'action':'pc_cancel','alert':'nope'},csrf)[0],400)
   self.assertEqual(self.call(url+'/api/watch',{'action':'pc_cancel','alert':row['id']},csrf),(200,{'ok':True}))
   watch=self.call(url+'/api/watch')[1];self.assertEqual(watch['alerts'][0]['preferences']['open_on_pc_until'],0);self.assertEqual(watch['alerts'][0]['open_on_pc_until'],0)
-  self.assertEqual(watch['pc_clients']['helper'],None);self.assertLess(watch['pc_clients']['extension'],60)
+  self.assertEqual(set(watch['pc_clients']),{'extension'});self.assertLess(watch['pc_clients']['extension'],60)
   data=self.call(url+'/api/pc-alerts?since=0&client=helper')[1];self.assertTrue(data['extension']);self.assertEqual(data['armed_alerts'],[])
-  self.assertLess(self.call(url+'/api/watch')[1]['pc_clients']['helper'],60)
+  self.assertEqual(meta(self.db,'pc_helper_seen'),'')  # only the extension counts as a PC client
 
 class PcExtensionServerTests(Base):
  def test_arm_expiry(self):
@@ -329,16 +329,17 @@ class PcExtensionServerTests(Base):
   self.assertFalse(prefs.rules(self.db)[0]['preferences']['open_on_pc'])  # a legacy arm with no expiry is off
   self.assertEqual(prefs.preset_preferences({**prefs.defaults(),'open_on_pc':True,'open_on_pc_until':99})['open_on_pc_until'],0)
  def test_arming_needs_a_live_pc_client(self):
-  self.add(show(1));message='Start the PC helper or enable the Screenwatch extension on this PC first'
+  self.add(show(1));message='Enable the Screenwatch extension in Chrome on this PC first'
   with self.assertRaises(ValueError) as caught:self.alert(open_on_pc=True)
   self.assertEqual(str(caught.exception),message)
-  off=self.alert();self.assertEqual(prefs.pc_clients(self.db),{'extension':None,'helper':None})
+  off=self.alert();self.assertEqual(prefs.pc_clients(self.db),{'extension':None})
   with self.assertRaises(ValueError):prefs.set_open_on_pc(self.db,off['id'],True)
   self.client('extension',age=200)
   with self.assertRaises(ValueError):prefs.set_open_on_pc(self.db,off['id'],True)  # seen more than 120 s ago
-  self.client('helper',age=100);prefs.set_open_on_pc(self.db,off['id'],True);self.assertTrue(prefs.rules(self.db)[0]['preferences']['open_on_pc'])
+  self.client('helper',age=100)
+  with self.assertRaises(ValueError):prefs.set_open_on_pc(self.db,off['id'],True)  # the old helper no longer counts
+  self.client('extension',age=100);prefs.set_open_on_pc(self.db,off['id'],True);self.assertTrue(prefs.rules(self.db)[0]['preferences']['open_on_pc'])
   prefs.set_open_on_pc(self.db,off['id'],False);self.assertFalse(prefs.rules(self.db)[0]['preferences']['open_on_pc'])
-  self.assertFalse(prefs.pc_alerts(self.db,0,client='helper')['extension']);self.assertLess(prefs.pc_clients(self.db)['helper'],5)
   self.assertTrue(prefs.pc_alerts(self.db,0,client='extension')['extension']);self.assertFalse(prefs.pc_alerts(self.db,0,now=time.time()+500)['extension'])
   prefs.pc_alerts(self.db,0,client='other');self.assertEqual(meta(self.db,'pc_other_seen'),'')
  def test_event_show_and_pair(self):
@@ -349,14 +350,6 @@ class PcExtensionServerTests(Base):
   first,second=prefs.pc_alerts(self.db,0)['events']
   self.assertEqual(first['show'],{'movie':'Big Film','venue':'Alu Cinema','date':'20261111','time':'09:40 PM','screen':'PCX'})
   self.assertEqual(first['pair'],{'category':'Gold','row':'B','seats':['09','10']});self.assertNotIn('show',second);self.assertNotIn('pair',second)
- def test_helper_skips_events_when_extension_is_connected(self):
-  import pc_opener
-  event=lambda i:{'id':i,'alert':'a'+i,'url':'https://in.bookmyshow.com/movies/x/seat-layout/y','summary':'s'}
-  data={'extension':True,'events':[event('1')]};seen=set()
-  self.assertEqual(pc_opener.new_events(data,seen),[]);self.assertEqual(seen,set())
-  data={'extension':False,'events':[event('1'),event('1'),{**event('2'),'url':'https://evil.example/'}]}
-  self.assertEqual([e['id'] for e in pc_opener.new_events(data,seen)],['1']);self.assertEqual(pc_opener.new_events(data,seen),[])
-  d=pc_opener.Dashboard('http://x');d.get=lambda path:path;self.assertIn('client=helper',d.alerts(5))
 
 class SeatCountTests(Base):
  """Minimum seats open (row and category alerts) and the seat-map photo that follows every category alert."""

@@ -524,9 +524,9 @@ PC_WINDOW=600
 PC_ARM=3*3600  # Open on PC stays armed for 3 hours
 PC_SEEN=120  # a PC client counts as live for 2 minutes after its last poll
 def pc_clients(db,now=None):
-    """Seconds since the extension and the helper last polled, or None: {extension,helper}."""
+    """Seconds since the Chrome extension last polled, or None: {extension}."""
     now=time.time() if now is None else now;seen={}
-    for name in ('extension','helper'):
+    for name in ('extension',):
         at=float(meta(db,f'pc_{name}_seen','0') or 0);seen[name]=round(max(0,now-at),1) if at else None
     return seen
 def arm_until(db,on,before=None,now=None):
@@ -534,7 +534,7 @@ def arm_until(db,on,before=None,now=None):
     now=time.time() if now is None else now
     if not on:return 0
     if before and before.get('open_on_pc') and before.get('open_on_pc_until',0)>now:return before['open_on_pc_until']
-    if not any(v is not None and v<=PC_SEEN for v in pc_clients(db,now).values()):raise ValueError('Start the PC helper or enable the Screenwatch extension on this PC first')
+    if not any(v is not None and v<=PC_SEEN for v in pc_clients(db,now).values()):raise ValueError('Enable the Screenwatch extension in Chrome on this PC first')
     return now+PC_ARM
 def expire_arms(db,now=None):
     """An expired (or legacy, expiry-less) arm is off: clear it in storage."""
@@ -554,7 +554,7 @@ def pc_show(db,url):
     return {'movie':s.get('movie',''),'venue':s.get('venue',''),'date':s.get('date',''),'time':s.get('time',''),'screen':s.get('format','')}
 
 def pc_link(text):
-    """The one BookMyShow link the PC helper opens: the seat layout when a message has several, else the last."""
+    """The one BookMyShow link the extension opens: the seat layout when a message has several, else the last."""
     links=re.findall(r'https://in\.bookmyshow\.com/[^\s<>"\x27]+',text or '')
     return next((l for l in links if '/seat-layout/' in l),links[-1] if links else '')
 
@@ -573,9 +573,9 @@ def pc_seat_pair(text,url):
     return {'category':category,'row':row,'seats':[left,right]}
 
 def pc_alerts(db,since,now=None,client=''):
-    """Queued messages of alerts with Open on PC on, newer than `since`, for the PC client (extension or helper): {armed,now,extension,armed_alerts,events}."""
+    """Queued messages of alerts with Open on PC on, newer than `since`, for the Chrome extension: {armed,now,extension,armed_alerts,events}."""
     now=time.time() if now is None else now;ensure(db);expire_arms(db,now)
-    if client in ('extension','helper'):setmeta(db,f'pc_{client}_seen',now);db.commit()
+    if client=='extension':setmeta(db,f'pc_{client}_seen',now);db.commit()
     on={};armed=False;listed=[]
     for r in db.execute('SELECT id,payload FROM alerts'):
         try:p=json.loads(r['payload'])
