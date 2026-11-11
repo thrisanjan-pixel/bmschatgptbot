@@ -187,7 +187,9 @@ def ingest(db,show,result):
             seen_signatures.add(signature)
             now=time.time()
             pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone()
-            if now-rule['last_alert']>=p['interval_minutes']*60 and not pending:
+            # The first message for a new row selection is never held back by the repeat gap of earlier messages.
+            fresh=not state or state['signature']!=signature
+            if (fresh or now-rule['last_alert']>=p['interval_minutes']*60) and not pending:
                 opened_rows=sorted({s['row_id'] for s in added})
                 lines=[]
                 for r in opened_rows:

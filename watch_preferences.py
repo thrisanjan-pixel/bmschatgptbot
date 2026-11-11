@@ -585,6 +585,8 @@ def pc_alerts(db,since,now=None,client=''):
     if on:
         for r in db.execute(f"SELECT id,alert_id,created,text FROM outbox WHERE created>? AND created>? AND text NOT LIKE '{PHOTO_MARK}%' AND alert_id IN ({','.join('?'*len(on))}) ORDER BY created",(since,now-PC_WINDOW,*on)):
             url=pc_link(r['text'])
+            # A row alert opens only for its row messages, never for older listing messages of the same alert.
+            if on[r['alert_id']] and not r['text'].startswith('🎟'):continue
             if url:
                 event={'id':r['id'],'alert':r['alert_id'],'created':r['created'],'summary':history_summary(r['text'],on[r['alert_id']]),'url':url}
                 pair=pc_seat_pair(r['text'],url) if on[r['alert_id']] else None

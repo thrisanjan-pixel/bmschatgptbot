@@ -342,11 +342,17 @@ class PcExtensionServerTests(Base):
   prefs.set_open_on_pc(self.db,off['id'],False);self.assertFalse(prefs.rules(self.db)[0]['preferences']['open_on_pc'])
   self.assertTrue(prefs.pc_alerts(self.db,0,client='extension')['extension']);self.assertFalse(prefs.pc_alerts(self.db,0,now=time.time()+500)['extension'])
   prefs.pc_alerts(self.db,0,client='other');self.assertEqual(meta(self.db,'pc_other_seen'),'')
+ def test_row_alert_ignores_listing_messages(self):
+  self.client();self.add(show(1));row=self.alert(open_on_pc=True);p=json.loads(self.db.execute('SELECT payload FROM alerts WHERE id=?',(row['id'],)).fetchone()[0])
+  p.update(row_show='x',rows=['Gold / B']);self.db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),row['id']))
+  link='https://in.bookmyshow.com/movies/hyderabad/seat-layout/ET00523251/ALUC/6249/20261111'
+  emit(self.db,'old','🎬 Film'+chr(10)+'Seats already available for this alert:'+chr(10)+link,alert_id=row['id']);emit(self.db,'new','🎟 2 seats now available'+chr(10)+link,alert_id=row['id']);self.db.commit()
+  events=prefs.pc_alerts(self.db,0)['events'];self.assertEqual(len(events),1);self.assertTrue(events[0]['summary'].startswith('🎟'))
  def test_event_show_and_pair(self):
   self.client();s={**show('x'),'id':'ALUC:20261111:6249:ET00523251','movie':'Big Film','venue':'Alu Cinema','date':'20261111','time':'09:40 PM','format':'PCX'};self.add(s)
   row=self.alert(open_on_pc=True);seat='https://in.bookmyshow.com/movies/hyderabad/seat-layout/ET00523251/ALUC/6249/20261111'
   other='https://in.bookmyshow.com/movies/hyderabad/seat-layout/ET00523251/ALUC/9999/20261111'
-  emit(self.db,'a','⭐ Best 2 together: Gold / B · seats 09, 10\n\n'.replace('\\n','\n')+seat,alert_id=row['id']);emit(self.db,'b','🎟 plain\n'.replace('\\n','\n')+other,alert_id=row['id']);self.db.commit()
+  emit(self.db,'a','🎟 2 seats now available'+chr(10)*2+'⭐ Best 2 together: Gold / B · seats 09, 10\n\n'.replace('\\n','\n')+seat,alert_id=row['id']);emit(self.db,'b','🎟 plain\n'.replace('\\n','\n')+other,alert_id=row['id']);self.db.commit()
   first,second=prefs.pc_alerts(self.db,0)['events']
   self.assertEqual(first['show'],{'movie':'Big Film','venue':'Alu Cinema','date':'20261111','time':'09:40 PM','screen':'PCX'})
   self.assertEqual(first['pair'],{'category':'Gold','row':'B','seats':['09','10']});self.assertNotIn('show',second);self.assertNotIn('pair',second)
