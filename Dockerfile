@@ -11,4 +11,5 @@ COPY --chown=app:app http_source.py api_watch.py api_source.py store.py telegram
 COPY --chown=app:app static/screenwatch.html static/manifest.json static/icon-180.png static/icon-192.png static/icon-512.png ./static/
 COPY --chmod=755 deploy/railway-entrypoint.sh /usr/local/bin/bms-entrypoint
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/bms-entrypoint"]
-CMD ["python", "-u", "supervise.py", "--api"]
+COPY --chown=app:app restore_wait.py ./
+CMD ["python", "-u", "restore_wait.py"]
