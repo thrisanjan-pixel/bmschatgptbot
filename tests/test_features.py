@@ -86,8 +86,8 @@ class AnyShowTests(Base):
  def test_urgent_alert_rereads_its_showtimes_sooner(self):
   self.add(show(1));self.alert(urgent=True);now=time.time()
   row_watch.schedule_active(self.db,now);self.db.execute('UPDATE row_layouts SET due=0,checked=?',(now,));self.db.commit()
-  row_watch.schedule_active(self.db,now+24,45);self.assertEqual(self.db.execute('SELECT due FROM row_layouts').fetchone()[0],0)
-  row_watch.schedule_active(self.db,now+26,45);self.assertEqual(self.db.execute('SELECT due FROM row_layouts').fetchone()[0],now+26)
+  row_watch.schedule_active(self.db,now+19,45);self.assertEqual(self.db.execute('SELECT due FROM row_layouts').fetchone()[0],0)
+  row_watch.schedule_active(self.db,now+21,45);self.assertEqual(self.db.execute('SELECT due FROM row_layouts').fetchone()[0],now+21)
  def test_normal_alert_waits_the_normal_interval(self):
   self.add(show(1));self.alert();now=time.time()
   row_watch.schedule_active(self.db,now);self.db.execute('UPDATE row_layouts SET due=0,checked=?',(now,));self.db.commit()

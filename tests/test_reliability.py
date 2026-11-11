@@ -223,11 +223,11 @@ class ReliabilityTests(unittest.TestCase):
   setmeta(self.db,'seat_cooldown_until',86500);self.db.commit()
   self.assertEqual(row_watch.poll_policy(self.db,86501),(120,60))
   self.assertEqual(row_watch.poll_policy(self.db,87399),(120,60))
-  self.assertEqual(row_watch.poll_policy(self.db,87401),(45,25))
+  self.assertEqual(row_watch.poll_policy(self.db,87401),(45,30))
   self.assertEqual(row_watch.poll_policy(self.db,86501,False),(60,0))
 
  def test_normal_seat_policy_is_conservative_without_a_previous_restriction(self):
-  self.assertEqual(row_watch.poll_policy(self.db,1000),(45,25))
+  self.assertEqual(row_watch.poll_policy(self.db,1000),(45,30))
 
  def test_new_watched_listing_queues_behind_long_overdue_and_ahead_of_routine(self):
   prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)

@@ -227,8 +227,9 @@ def targets(db,now=None):
         if p.get('urgent'):urgent.update(found)
     return sorted(active),urgent
 
-# Seconds between seat reads of one showtime: normal alerts, urgent alerts, and the gap between any two alert seat reads.
-NORMAL_INTERVAL,URGENT_INTERVAL,SEAT_SPACING=45,25,25
+# Seconds between seat reads of one showtime (normal, urgent) and the gap after a normal or urgent seat read.
+# Normal reads leave 30 s (at most 120 an hour); urgent reads leave 20 s, the fastest pace the rate test held.
+NORMAL_INTERVAL,URGENT_INTERVAL,SEAT_SPACING,URGENT_SPACING=45,20,30,20
 
 def schedule_active(db,now,interval=30):
     schema(db);prefs.prune_seat_photos(db,now)
@@ -339,6 +340,8 @@ def step(db):
     try:
         if cloud:
             # Persist request spacing so restarting cannot release a burst.
+            # An urgent showtime's read leaves the shorter gap, except while recovering from a rate limit.
+            if not manual and spacing==SEAT_SPACING and job['show_id'] in targets(db,now)[1]:spacing=URGENT_SPACING
             if not manual:setmeta(db,'seat_next_request_at',now+spacing)
             db.commit()
             from cloud_row_reader import read
