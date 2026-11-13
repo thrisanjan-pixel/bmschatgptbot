@@ -16,7 +16,7 @@ from urllib.parse import parse_qs,urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 DEFAULT_DB='/workspace/booking-tracker/state.sqlite3'
-PWA_FILES={'/manifest.json':('manifest.json','application/manifest+json'),'/static/icon-180.png':('icon-180.png','image/png'),'/static/icon-192.png':('icon-192.png','image/png'),'/static/icon-512.png':('icon-512.png','image/png')}
+PWA_FILES={'/manifest.json':('manifest.json','application/manifest+json'),'/static/icon-180.png':('icon-180.png','image/png'),'/static/icon-192.png':('icon-192.png','image/png'),'/static/icon-512.png':('icon-512.png','image/png'),'/static/geist.woff2':('geist.woff2','font/woff2'),'/static/geist-mono.woff2':('geist-mono.woff2','font/woff2')}
 from store import connect, coverage, meta, setmeta
 import watch_preferences as preferences
 
