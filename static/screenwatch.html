@@ -1681,6 +1681,8 @@ html.sw-hidden *,html.sw-hidden *::before,html.sw-hidden *::after{animation-play
 #activity #telegram-toggle[aria-checked="true"]{border-color:var(--glass-line-2);background:var(--glass-2);color:var(--text)}
 #activity #telegram-toggle[aria-checked="true"]::before{border-color:#fff;background:#f5f5f7}
 #activity #telegram-toggle[aria-checked="true"]::after{background:#000;transform:translateX(24px)}
+/* The switch is also a .button: the shared sheen rule put its ::after (the knob) behind the track and animated it away on hover. */
+#activity #telegram-toggle::after{z-index:1;bottom:auto;animation:none!important}
 
 /* ---- Activity: settings controls ---- */
 #activity .stale-controls .toggle{padding:0 16px;border:1px solid var(--glass-line);border-radius:16px;background:var(--glass)}
@@ -1831,7 +1833,9 @@ function prettyDate(raw){const d=istDate(raw);if(!(d instanceof Date)||isNaN(d))
 async function retrySeatNow(){const button=$('seat-retry');button.disabled=true;try{const response=await fetch('/api/seat-retry',{method:'POST',headers:{'X-CSRF-Token':watchData.csrf}});if(!response.ok)throw Error();watchData.seat_ready_at=0;updateSeatClock();const show=$('row-show').value;if(show){const selected=[...document.querySelectorAll('#row-choices input:checked')].map(i=>i.value);await queueRows(show);loadRows(show,selected)}}catch{$('seat-clock').textContent='Retry failed. Try again.'}finally{button.disabled=false}}
 let checkQueue=null,checkQueueOffset=0;
 async function refreshCheckQueue(){try{const response=await fetch('/api/check-queue');if(!response.ok)return;checkQueue=await response.json();checkQueueOffset=checkQueue.now-Date.now()/1000;renderCheckQueue()}catch{}}
-function checkItem(item,when){const row=el('li','cq-item'+(item.ok===false?' bad':'')),top=el('div','cq-top');top.append(el('span','cq-chip '+item.kind,item.kind==='seats'?'Seats':'Showtimes'),el('span','cq-time',when));row.append(top,el('div','cq-title',item.movie+(item.date?' · '+prettyDate(item.date):'')),el('div','cq-detail',(item.kind==='seats'&&item.alert===false?'Load seat rows · ':'')+item.detail+(item.error?' · '+item.error:'')));return row}
+function checkItem(item,when){const row=el('li','cq-item'+(item.ok===false?' bad':'')),top=el('div','cq-top');top.append(el('span','cq-chip '+item.kind,item.kind==='seats'?'Seats':'Showtimes'),el('span','cq-time',when));row.append(top,el('div','cq-title',item.movie+(item.date?' · '+prettyDate(item.date):'')),el('div','cq-detail',(item.kind==='seats'&&item.alert===false?'Load seat rows · ':'')+item.detail+(item.error?' · '+plainError(item.error):'')));return row}
+// Raw source errors ("Source HTTP 403") read like a fault in this app. Say what happened in plain words.
+function plainError(text){const code=(/HTTP (\d{3})/.exec(text)||[])[1];if(code==='403')return'BookMyShow turned this check away · retrying';if(code==='429')return'BookMyShow asked us to slow down · retrying';if(code&&code[0]==='5')return'BookMyShow is having trouble · retrying';if(/connection/i.test(text))return'Could not reach BookMyShow · retrying';return text}
 let cqBuilt=null,cqTimes=[];
 function renderCheckQueue(){if(!checkQueue)return;const now=Date.now()/1000+checkQueueOffset,when=(item,isNext)=>{if(isNext){const wait=Math.round(item.eta-now);return wait<=5?'now':wait<90?'in '+wait+' s':'in '+Math.round(wait/60)+' min'}return(item.ok?'✓ ':'✗ ')+duration(Math.max(0,now-item.at))+' ago'};
  if(cqBuilt!==checkQueue){cqBuilt=checkQueue;cqTimes=[];const next=checkQueue.upcoming||[],recent=checkQueue.recent||[],make=(item,isNext)=>{const row=checkItem(item,'');cqTimes.push([row.querySelector('.cq-time'),item,isNext]);return row};$('cq-next').replaceChildren(...(next.length?next.map(i=>make(i,true)):[el('li','cq-empty','No alert checks waiting.')]));$('cq-recent').replaceChildren(...(recent.length?recent.map(i=>make(i,false)):[el('li','cq-empty','No alert checks yet.')]))}
