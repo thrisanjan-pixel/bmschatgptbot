@@ -117,11 +117,11 @@ class AlertRuleTests(unittest.TestCase):
         self.assertIn('PCX HDR BY BARCO',options['venue_options']['PRHN']['screens'])
         self.assertEqual(options['showtimes'],[])
 
-    def test_active_request_uses_conservative_sixty_second_target_interval(self):
+    def test_active_request_uses_thirty_second_target_interval(self):
         job={**self.job,'kind':'discovery'}
         self.assertEqual(poll_interval(self.db,job),120)
         alert_id=prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'enabled':True},create=True)
-        self.assertEqual(poll_interval(self.db,job),60)
+        self.assertEqual(poll_interval(self.db,job),30.0)
         prefs.transition(self.db,alert_id,'cancel')
         self.assertEqual(poll_interval(self.db,job),120)
 

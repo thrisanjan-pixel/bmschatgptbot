@@ -89,6 +89,34 @@ class ApiTests(unittest.TestCase):
         with self.assertRaises(ReadError):ingest(self.db,self.job,bad)
         self.assertEqual(coverage(self.db)['sessions'],1)
 
+    def test_incomplete_show_does_not_hide_verified_dolby_opening(self):
+        from watch_preferences import save
+
+        save(self.db,{**defaults(),'movies':['Test Movie'],'cinemas':['TEST'],
+                     'screens':['DOLBY CINEMA'],'enabled':True,'once':False})
+        baseline=response()
+        shows=baseline['data']['showtimeWidgets'][0]['data'][0]['data'][0]['showtimes']
+        incomplete=shows[0]
+        incomplete['screenAttr']='DOLBY CINEMA'
+        verified=copy.deepcopy(incomplete)
+        verified['additionalData']['sessionId']='2'
+        shows.append(verified)
+        ingest(self.db,self.job,baseline)
+
+        partial=copy.deepcopy(baseline)
+        shows=partial['data']['showtimeWidgets'][0]['data'][0]['data'][0]['showtimes']
+        shows[0]['additionalData']['categories']=[]
+        shows[1]['additionalData']['categories'][0]['availStatus']='3'
+        self.assertEqual(ingest(self.db,self.job,partial),1)
+        self.assertEqual(coverage(self.db)['sessions'],2)
+        queued=[row[0] for row in self.db.execute('SELECT text FROM outbox')]
+        self.assertEqual(len(queued),1)
+        self.assertIn(f'/seat-layout/{EVENT}/TEST/2/{DAY}',queued[0])
+
+        saved=json.loads(self.db.execute('SELECT payload FROM snapshots').fetchone()[0])
+        self.assertEqual(saved[f'TEST:{DAY}:1:{EVENT}']['categories']['1']['status'],'0')
+        self.assertEqual(saved[f'TEST:{DAY}:2:{EVENT}']['categories']['1']['status'],'3')
+
 
 class ThrottleTests(unittest.TestCase):
     setUp=ApiTests.setUp

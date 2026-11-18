@@ -1,5 +1,5 @@
 """Independent in-service health checks; never claim to survive a host outage."""
-import argparse,datetime as dt,json,os,time
+import argparse,datetime as dt,json,logging,os,time
 from store import connect,meta,setmeta,emit
 import watch_preferences as prefs
 
@@ -72,20 +72,26 @@ def check(db,now=None):
  return current
 
 def main():
+ from log_config import configure
+ configure()
  p=argparse.ArgumentParser();p.add_argument('--db',required=True);a=p.parse_args();db=connect(a.db)
  from telegram import drain
  from local_credentials import load
- # Grace period restarts on every deploy, otherwise old worker heartbeats look like a stopped monitor.
- setmeta(db,'health_watch_started',time.time());db.commit()
- while True:
-  try:
-   check(db)
-   from backup import automatic
-   try:automatic(db,a.db);setmeta(db,'backup_error','');db.commit()
-   except Exception:setmeta(db,'backup_error','Automatic backup failed; download a backup and check storage.');db.commit()
-   if load():
-    db.execute('BEGIN IMMEDIATE');drain(db,commit=False,system_only=True);db.commit()
-  except Exception:
-   db.rollback()
-  time.sleep(15)
+ try:
+  # Grace period restarts on every deploy, otherwise old worker heartbeats look like a stopped monitor.
+  setmeta(db,'health_watch_started',time.time());db.commit()
+  while True:
+   try:
+    check(db)
+    from backup import automatic
+    try:automatic(db,a.db);setmeta(db,'backup_error','');db.commit()
+    except Exception:setmeta(db,'backup_error','Automatic backup failed; download a backup and check storage.');db.commit()
+    if load():
+     db.execute('BEGIN IMMEDIATE');drain(db,commit=False,system_only=True);db.commit()
+   except Exception as error:
+    db.rollback()
+    logging.warning('health worker: %s; retrying',type(error).__name__)
+   time.sleep(15)
+ finally:
+  db.close()
 if __name__=='__main__':main()

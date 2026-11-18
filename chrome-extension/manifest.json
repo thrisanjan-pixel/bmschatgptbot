@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Screenwatch seat helper",
-  "version": "1.0.0",
-  "description": "Opens the seat page of a Screenwatch alert on this PC and highlights your two seats. You press the button; it never pays.",
+  "version": "1.2.15",
+  "description": "Opens armed Screenwatch alerts and selects the requested seats for BookMyShow checkout.",
   "minimum_chrome_version": "111",
   "permissions": ["storage", "alarms", "notifications", "tabs", "tts"],
   "host_permissions": [

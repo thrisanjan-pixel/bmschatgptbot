@@ -54,6 +54,9 @@ def row_targets(db,p,shows=None):
         if len(found)>=ROW_ANY_LIMIT:break
     return found
 
+def row_state_signature(show_id,p):
+    return json.dumps([show_id,sorted(set(p['rows']))]+([p['party_size']] if p.get('party_size') else []))
+
 def ensure(db):
     db.execute('''CREATE TABLE IF NOT EXISTS alerts(
         id TEXT PRIMARY KEY,payload TEXT NOT NULL,created REAL NOT NULL,
@@ -105,6 +108,12 @@ def rules(db):
                 error=next((l['error'] for l in layouts if latest and l['show_id']==latest[0]),'')
         elif not p['row_show']:
             jobs=[r for r in db.execute('SELECT id,payload,checked,error,due FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
+            if p['dates']:
+                # Health must describe the requested days. A successful unrelated
+                # date must not hide a rejected Dec 17 response.
+                dated=[r for r in jobs if json.loads(r['payload']).get('date') in p['dates']]
+                covered={json.loads(r['payload']).get('event') for r in dated}
+                jobs=dated+[r for r in jobs if not json.loads(r['payload']).get('date') and json.loads(r['payload']).get('event') not in covered]
             checked=max((r['checked'] for r in jobs),default=0)
             # Report the latest listing check, not an old failure on any of the movie's listings.
             ids=[r['id'] for r in jobs];latest=None
@@ -122,8 +131,10 @@ def rules(db):
         delivery=db.execute('SELECT count(*),coalesce(max(attempts),0) FROM outbox WHERE alert_id=? AND delivered=0',(rule['id'],)).fetchone()
         # Routine 1-minute spacing is normal; only a long budget wait is worth showing.
         health='Source unavailable' if error else 'Waiting for request budget' if budget>now+300 else 'Checks delayed' if checked and cooldown<=now and time.time()-checked>(max(180,240*row_count) if p['row_show'] else 180) else 'Watching seats' if p['row_show'] else 'Waiting for bookings' if waiting_for_bookings else 'Watching availability' if checked else 'Waiting for listings'
+        if 'HTTP 403' in error:health='BMS blocked one check'
+        elif error=='Screening event/date mismatch':health='Waiting for requested date'
         rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'retry_until':max(cooldown,budget) if max(cooldown,budget)>now else 0,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
-        keys=targets if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
+        keys=targets if p['row_show'] else [r['id'] for r in jobs]
         source='rows' if p['row_show'] else 'listings'
         intervals=[]
         for key in keys:
@@ -279,7 +290,7 @@ def archive_pending(db,alert_id=None):
         db.execute(f'INSERT INTO suppressed_outbox({fields}) SELECT id,text,photo,created,delivered,attempts,next_try,alert_id,? FROM outbox WHERE delivered=0',(time.time(),))
         db.execute('DELETE FROM outbox WHERE delivered=0')
 
-def save(db,data,alert_id=None,create=False):
+def save(db,data,alert_id=None,create=False,*,reset=False):
     p=validate(data)
     saved=rules(db)
     before=next((r['preferences'] for r in saved if r['id']==alert_id),None) if alert_id and not create else None
@@ -310,6 +321,17 @@ def save(db,data,alert_id=None,create=False):
     db.execute('''INSERT INTO alerts(id,payload,created,updated) VALUES(?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated=excluded.updated,completed=0''',
         (alert_id,json.dumps(p),now,now))
+    if reset:
+        db.execute('UPDATE alerts SET last_alert=0 WHERE id=?',(alert_id,))
+        if p['row_show']:
+            import row_watch
+            row_watch.schema(db)
+            db.execute('DELETE FROM row_alert_state WHERE alert_id=? OR substr(alert_id,1,?)=?',
+                       (alert_id,len(alert_id)+1,alert_id+':'))
+            # A restart gets one check of seats that are already open, even in future-only mode.
+            db.executemany('INSERT INTO row_alert_state VALUES(?,?,?)',
+                           ((alert_id+':'+show_id if p['row_show']==ANY_SHOW else alert_id,
+                             'restart:'+row_state_signature(show_id,p),'[]') for show_id in row_targets(db,p)))
     enabled=bool(db.execute("SELECT 1 FROM alerts WHERE json_extract(payload,'$.enabled')=1 LIMIT 1").fetchone())
     setmeta(db,'notifications_paused','0' if enabled else '1')
     setmeta(db,'notifications_mode','enabled' if enabled else 'paused')
@@ -324,9 +346,7 @@ def transition(db,alert_id,action):
     p=rule['preferences']
     if action=='reset':
         if rule['status']=='missed':raise ValueError('Choose a future date before resetting this alert')
-        saved=save(db,{**p,'enabled':True},alert_id)
-        db.execute('UPDATE alerts SET last_alert=0 WHERE id=?',(alert_id,));db.commit()
-        return saved
+        return save(db,{**p,'enabled':True},alert_id,reset=True)
     if action not in ('cancel','booked'):raise ValueError('Unknown alert action')
     p['enabled']=False;p['request_state']='cancelled' if action=='cancel' else 'booked'
     db.execute('BEGIN IMMEDIATE');archive_pending(db,alert_id)
@@ -409,6 +429,50 @@ def seat_photo_shows(db,now=None):
     """Showtimes with a follow-up due now: they are read like urgent seat alerts."""
     photo_schema(db);now=time.time() if now is None else now
     return sorted({r[0] for r in db.execute('SELECT show_id FROM pending_seat_photos WHERE next_read<=?',(now,))})
+
+PHOTO_HOLD=480  # seat-map messages of one alert wait at most this long for its other showtimes, then go out together
+HELD_MARGIN=125  # a row a sender has claimed is hidden for 120 s; anything hidden longer is a held message
+
+def release_seat_photos(db):
+    """Send an alert's held seat-map messages together once none of its showtimes still waits for a first seat read."""
+    photo_schema(db);edge=time.time()+HELD_MARGIN
+    # A retried row has attempts>0 and a claimed one is below the edge; neither is touched.
+    for (alert_id,) in db.execute('SELECT DISTINCT alert_id FROM outbox WHERE delivered=0 AND attempts=0 AND next_try>?',(edge,)).fetchall():
+        if not db.execute('SELECT 1 FROM pending_seat_photos WHERE alert_id=? AND next_read<=created LIMIT 1',(alert_id,)).fetchone():
+            db.execute('UPDATE outbox SET next_try=0 WHERE delivered=0 AND attempts=0 AND alert_id=? AND next_try>?',(alert_id,edge))
+
+def pending_deliveries(db,now=None):
+    """Messages not sent yet and seat-map reads still owed, for the dashboard's cancel list."""
+    photo_schema(db);now=time.time() if now is None else now;items=[]
+    for r in db.execute("SELECT id,text,created,attempts,next_try FROM outbox WHERE delivered=0 AND alert_id<>'__health__' ORDER BY created").fetchall():
+        lines=[line.strip() for line in (r['text'] or '').splitlines() if line.strip()]
+        state='retrying' if r['attempts'] else 'held' if r['next_try']>now+HELD_MARGIN else 'sending'
+        items.append({'id':'m:'+r['id'],'title':lines[0][:80] if lines else 'Alert','detail':' · '.join(lines[1:3])[:140],'state':state,'created':r['created']})
+    for r in db.execute('SELECT alert_id,show_id,mode,created,next_read FROM pending_seat_photos ORDER BY created').fetchall():
+        row=db.execute('SELECT payload FROM sessions WHERE id=?',(r['show_id'],)).fetchone()
+        try:show=json.loads(row[0]) if row else {}
+        except ValueError:show={}
+        items.append({'id':'p:'+r['alert_id']+'|'+r['show_id'],'title':show.get('movie','') or 'Showtime',
+            'detail':' · '.join(filter(None,[show.get('venue',''),show.get('time','')])),
+            'state':'seats' if r['mode']=='gate' and r['next_read']>r['created'] else 'map','created':r['created']})
+    return items
+
+def cancel_deliveries(db,item_id=None):
+    """Cancel one waiting message or seat-map read (an id from pending_deliveries), or all of them.
+    Cancelled messages are kept in suppressed_outbox; alerts stay on and can queue new messages."""
+    photo_schema(db)
+    if item_id is None:
+        fields=suppressed_table(db)
+        db.execute(f"INSERT INTO suppressed_outbox({fields}) SELECT id,text,photo,created,delivered,attempts,next_try,alert_id,? FROM outbox WHERE delivered=0 AND alert_id<>'__health__'",(time.time(),))
+        db.execute("DELETE FROM outbox WHERE delivered=0 AND alert_id<>'__health__'")
+        db.execute('DELETE FROM pending_seat_photos')
+    elif item_id.startswith('m:'):archive_message(db,item_id[2:])
+    elif item_id.startswith('p:') and '|' in item_id:
+        alert_id,show_id=item_id[2:].split('|',1)
+        db.execute('DELETE FROM pending_seat_photos WHERE alert_id=? AND show_id=?',(alert_id,show_id))
+    else:raise ValueError('Unknown queue item')
+    # Messages that were waiting for a cancelled seat read can go now.
+    release_seat_photos(db)
 
 def delivered(db,alert_id=None):
     saved=rules(db)

@@ -42,40 +42,100 @@
       'button{font:600 13px system-ui,sans-serif;border:0;border-radius:8px;padding:9px 14px;cursor:pointer}' +
       '#go{background:#ff2d95;color:#fff}#go:disabled{background:#4b4770;color:#9a97c0;cursor:not-allowed}#no{background:#ffffff1f;color:#fff}' +
       '</style><div class="bar"><div class="info"><div class="title" id="t"></div><div class="sub" id="s"></div><div class="status" id="st">Waiting for the seat map…</div></div>' +
-      '<button id="go" disabled>Select these two seats</button><button id="no">Dismiss</button></div>';
+      '<button id="go" disabled>Select seats and open checkout</button><button id="no">Dismiss</button></div>';
     const $ = (id) => root.getElementById(id);
     $('t').textContent = 'Screenwatch · ' + [show.movie, show.venue].filter(Boolean).join(' · ') + (when(event) ? ' · ' + when(event) : '');
-    $('s').textContent = pair ? 'Section ' + pair.category + ' · Row ' + pair.row + ' · Seats ' + pair.seats.join(' + ') : (event.summary || '');
+    const details = pair && (event.partySize === undefined || event.partySize === pair.seats.length)
+      ? 'Section ' + pair.category + ' · Row ' + pair.row + ' · Seats ' + pair.seats.join(' + ') : (event.summary || '');
+    $('s').textContent = task.autoCheckout && event.partySize ? event.partySize + ' seats together · ' + details : details;
     document.documentElement.appendChild(host);
 
     const post = (type) => window.postMessage({ src: 'screenwatch-content', token, type }, location.origin);
     const say = (text, tone) => { const n = $('st'); n.textContent = text; n.className = 'status ' + (tone || ''); };
     let hello = false, gone = false;
+    let autoPending = task.autoCheckout === true;
+    let selectionTimer, checkoutDeadline = 0;
+    const seatPath = new URL(event.url).pathname;
+
+    function checkHandoff() {
+      if (gone) return;
+      const snacks = [...document.querySelectorAll('h1,h2,h3,[role="heading"],label,p,span,div')]
+        .some((node) => /^grab a bite!$/i.test((node.textContent || '').trim()) && node.getClientRects().length);
+      const summary = /^\/order-summary(?:\/|$)/.test(location.pathname);
+      if (snacks || summary) {
+        const text = snacks ? 'BookMyShow opened Grab a Bite. Take over here.' : 'BookMyShow opened the order summary. Take over here.';
+        chrome.runtime.sendMessage({ type: 'result', ok: true, text }).catch(() => {});
+        closeBanner();
+      } else if (checkoutDeadline && Date.now() >= checkoutDeadline) {
+        checkoutDeadline = 0;
+        if (location.pathname !== seatPath) { closeBanner(); return; }
+        const text = 'BookMyShow did not open checkout. Review the page to continue.';
+        say(text, 'warn');
+        chrome.runtime.sendMessage({ type: 'result', ok: false, text }).catch(() => {});
+        clearInterval(handoffTimer);
+      } else if (!checkoutDeadline && location.pathname !== seatPath) {
+        closeBanner();
+      }
+    }
+    function closeBanner() {
+      gone = true;
+      clearTimeout(selectionTimer);
+      post('dismiss');
+      host.remove();
+      clearInterval(handoffTimer);
+    }
+    const handoffTimer = setInterval(checkHandoff, 500);
 
     window.addEventListener('message', (e) => {
       const d = e.data;
-      if (e.source !== window || !d || d.src !== 'screenwatch-page' || d.token !== token) return;
+      if (gone || e.source !== window || !d || d.src !== 'screenwatch-page' || d.token !== token) return;
       if (d.type === 'hello') { hello = true; return; }
       if (d.type === 'state') {
-        say(String(d.text || ''), d.phase === 'verified' || d.phase === 'done' ? 'ok' : d.phase === 'loading' || d.phase === 'selecting' ? 'warn' : 'bad');
+        clearTimeout(selectionTimer);
+        const text = String(d.text || '');
+        if (d.phase === 'done') checkoutDeadline = Date.now() + 10000;
+        const waitingForClick = d.canSelect && !autoPending;
+        const message = waitingForClick ? text + ' Click “Select seats and open checkout” to continue.' : text;
+        say(message, ['verified', 'done'].includes(d.phase) ? 'ok' : ['loading', 'selecting', 'quantity', 'quantity-manual'].includes(d.phase) ? 'warn' : 'bad');
         $('go').disabled = !d.canSelect;
+        if (autoPending && (d.phase === 'verified' || d.phase === 'quantity') && d.canSelect) {
+          autoPending = false;
+          selectPair();
+        } else if (d.phase === 'gone' || d.phase === 'stopped') {
+          autoPending = false;
+        }
         if (d.phase === 'stopped') chrome.runtime.sendMessage({ type: 'result', ok: false, text: String(d.text || '') }).catch(() => {});
       } else if (d.type === 'result') {
+        clearTimeout(selectionTimer);
+        checkoutDeadline = 0;
         $('go').disabled = true;
         chrome.runtime.sendMessage({ type: 'result', ok: !!d.ok, text: String(d.text || '') }).catch(() => {});
       }
     });
 
     // Only a real click by the person counts. Script-made clicks have isTrusted false and are ignored.
-    $('go').addEventListener('click', (e) => { if (!e.isTrusted || $('go').disabled) return; $('go').disabled = true; post('select'); });
+    function selectPair() {
+      $('go').disabled = true;
+      say('Starting seat selection…', 'warn');
+      selectionTimer = setTimeout(() => {
+        if (gone) return;
+        say('Screenwatch did not start seat selection. Click the pink button to retry.', 'warn');
+        $('go').disabled = false;
+      }, 2500);
+      post('select');
+    }
+    $('go').addEventListener('click', (e) => {
+      if (!e.isTrusted || $('go').disabled) return;
+      selectPair();
+    });
     $('no').addEventListener('click', (e) => {
       if (!e.isTrusted) return;
-      gone = true; post('dismiss'); host.remove();
+      closeBanner();
       chrome.runtime.sendMessage({ type: 'dismiss' }).catch(() => {});
     });
 
     // Give page.js its token and the pair. It may load a moment after this script, so repeat until it answers.
-    const detail = JSON.stringify({ token, pair });
+    const detail = JSON.stringify({ token, pair, partySize: event.partySize, allowedRows: event.allowedRows, allowedCategories: event.allowedCategories, layoutRows: event.layoutRows, autoCheckout: autoPending, autoAcceptTerms: task.autoAcceptTerms === true });
     for (let i = 0; i < 12 && !hello && !gone; i++) {
       window.dispatchEvent(new CustomEvent('screenwatch-init', { detail }));
       await sleep(i < 4 ? 250 : 1000);

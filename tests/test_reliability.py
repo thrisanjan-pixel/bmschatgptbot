@@ -58,25 +58,46 @@ class ReliabilityTests(unittest.TestCase):
   self.db.execute("INSERT INTO jobs(id,kind,url,payload,due,checked) VALUES('small','discovery','https://example.test/s',?,990,500)",(json.dumps({'movie':'Small','date':''}),))
   self.db.execute("UPDATE jobs SET checked=900 WHERE id='big0'");setmeta(self.db,'listing_background_attempt',995);self.db.commit()
   self.assertEqual(api_watch.next_job(self.db,1000)['id'],'small')
- def test_versions_that_never_played_on_the_alert_screen_are_background(self):
-  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'screens':['DOLBY CINEMA'],'enabled':True},create=True)
-  for session,event,language,screen in [('1','ETDOLBY','Telugu • DOLBY CINEMA 3D','DOLBY CINEMA'),('2','ET2D','Telugu • 2D','LASER 4K ATMOS')]:
-   self.db.execute('INSERT INTO sessions VALUES(?,?,?,1)',(session,json.dumps({'event':event,'language':language,'format':screen}),9e9))
-  self.db.commit();wanted=api_watch.wanted_dates(self.db)
-  self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'ETDOLBY','date':''},wanted))
-  self.assertFalse(api_watch.is_watched({'movie':'Epic','event':'ET2D','date':''},wanted))
-  self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'ETNEW','date':''},wanted))
-  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
-  self.assertTrue(api_watch.is_watched({'movie':'Epic','event':'ET2D','date':''},api_watch.wanted_dates(self.db)))
+ def test_screen_filter_keeps_discovery_for_new_cinemas_in_alert_queue(self):
+  movie='Avengers: Doomsday'
+  alert={**prefs.defaults(),'movies':[movie],'cinemas':['ALUC'],'screens':['DOLBY CINEMA'],'enabled':True,'urgent':True}
+  prefs.save(self.db,alert,create=True)
+  now=time.time()
+  existing={'movie':movie,'event':'ET00439706','language':'English • 2D','format':'Infinity Vision Dolby Atmos',
+            'venue_code':'AACN','date':D1,'categories':{}}
+  self.db.execute('INSERT INTO sessions VALUES(?,?,?,1)',('existing',json.dumps(existing),now+3600))
+  api_watch.schedule(self.db,existing['event'],'',movie)
+  api_watch.schedule(self.db,existing['event'],D1,movie)
+  setmeta(self.db,'listing_background_attempt',now)
+  self.db.commit()
+  job=api_watch.next_job(self.db,now)
+  self.assertIsNotNone(job)
+  self.assertEqual(json.loads(job['payload'])['date'],D1)
+  self.assertTrue(api_watch.is_watched(json.loads(job['payload']),api_watch.wanted_dates(self.db,urgent=True)))
+  at_allu={**existing,'venue_code':'ALUC'}
+  self.assertFalse(prefs.matches(at_allu,alert))
+  self.assertTrue(prefs.matches({**at_allu,'format':'DOLBY CINEMA'},alert))
+ def test_version_language_and_format_still_filter_listing_priority(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'languages':['English'],'formats':['2D'],'enabled':True})
+  for event,language in [('ET1','English • 2D'),('ET2','Telugu • 2D'),('ET3','English • 3D')]:
+   self.db.execute('INSERT INTO sessions VALUES(?,?,?,1)',(event,json.dumps({'event':event,'language':language,'format':''}),9e9))
+  wanted=api_watch.wanted_dates(self.db)
+  for event,expected in [('ET1',True),('ET2',False),('ET3',False),('ETNEW',True)]:
+   with self.subTest(event=event):
+    self.assertEqual(api_watch.is_watched({'movie':'Epic','event':event,'date':''},wanted),expected)
  def test_check_queue_lists_alert_checks_next_and_recent(self):
   import dashboard
   prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True},create=True)
   now=time.time()
   for name,movie,due,checked in [('a','Epic',now-30,now-400),('b','Epic',now+500,now-100),('bg','Other',now-30,0)]:
    self.db.execute('INSERT INTO jobs(id,kind,url,payload,due,checked) VALUES(?,?,?,?,?,?)',(name,'discovery','https://example.test/'+name,json.dumps({'movie':movie,'date':D1,'event':'ET1'}),due,checked))
+  profile={'event':'ET1','language':'English • MS-Infinity Vsn 3d','format':'LASER 4K ATMOS'}
+  self.db.execute('INSERT INTO sessions VALUES(?,?,?,1)',('version-example',json.dumps(profile),now+3600))
   record_check(self.db,'listings','b',now-100,now=now-100);self.db.commit()
   data=dashboard.check_queue(self.db)
   self.assertEqual([(i['kind'],i['movie']) for i in data['upcoming']],[('showtimes','Epic'),('showtimes','Epic')])
+  self.assertEqual(data['upcoming'][0]['detail'],'Listing version · English · MS-Infinity Vsn 3d')
+  self.assertEqual(data['upcoming'][0]['event'],'ET1')
   self.assertLess(data['upcoming'][0]['eta'],data['upcoming'][1]['eta'])
   self.assertEqual([(i['movie'],i['ok']) for i in data['recent']],[('Epic',True)])
  def test_stalled_check_warning_follows_minutes_and_off_switch(self):
@@ -197,17 +218,81 @@ class ReliabilityTests(unittest.TestCase):
    self.assertEqual(api_watch.poll_interval(f.db,job),120)
   finally:f.tearDown()
 
- def test_three_denied_jobs_cannot_pause_other_movies(self):
+ def test_refusals_on_one_movie_leave_other_listings_due(self):
   from api_source import ReadError
   prefs.save(self.db,{**prefs.defaults(),'movies':['Denied','Other'],'enabled':True})
+  api_watch.schedule(self.db,'ET1000','','Denied')
+  api_watch.schedule(self.db,'ET1001','','Other')
   for i in range(3):
    key='denied'+str(i)
-   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(key,'movie','https://example.test/'+key,json.dumps({'movie':'Denied'}),1))
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(key,'discovery','https://example.test/'+key,json.dumps({'movie':'Denied'}),1))
    job=self.db.execute('SELECT * FROM jobs WHERE id=?',(key,)).fetchone()
    api_watch.record_listing_failure(self.db,job,ReadError('Source HTTP 403',403,180),1000+i,1000+i)
   self.assertEqual(float(api_watch.meta(self.db,'source_cooldown','0')),0)
+  ready=[json.loads(r['payload'])['event'] for r in api_watch.listing_order(self.db,1002)]
+  self.assertEqual(set(ready),{'ET1000','ET1001'})
   api_watch.record_listing_failure(self.db,job,ReadError('Source HTTP 429',429,600),1010,1010)
   self.assertEqual(float(api_watch.meta(self.db,'source_cooldown','0')),1610)
+
+ def test_repeated_403_across_movies_cools_listing_worker_until_a_retry(self):
+  import dashboard
+  from api_source import ReadError
+  monitor=api_watch.Monitor(self.path)
+  for i,movie in enumerate(('First','First','Second')):
+   api_watch.schedule(self.db,f'ET{i+1000}','',movie)
+  denied=ReadError('Source HTTP 403',403,180)
+  jobs=self.db.execute('SELECT * FROM jobs ORDER BY id').fetchall()
+  for job,now in zip(jobs,(1000,1060,1120)):
+   api_watch.record_listing_failure(self.db,job,denied,now,now)
+  self.db.commit()
+  self.assertEqual(float(api_watch.meta(self.db,'source_cooldown','0')),1420)
+  self.db.close()
+  self.db=connect(self.path)
+  prefs.save(self.db,{**prefs.defaults(),'movies':['First'],'enabled':True})
+  with patch('api_watch.time.time',return_value=1180):
+   self.assertGreaterEqual(dashboard.check_queue(self.db)['upcoming'][0]['eta'],1420)
+  with patch('api_watch.get_json',return_value={}) as get,patch('api_watch.no_regional_shows',return_value=True),patch.object(monitor.stop,'wait'):
+   with patch('api_watch.time.time',return_value=1419):
+    monitor.check(self.db)
+   get.assert_not_called()
+   with patch('api_watch.time.time',return_value=1420):
+    monitor.check(self.db)
+   get.assert_called_once()
+  self.assertEqual(json.loads(api_watch.meta(self.db,'listing_refused_movies','[]')),[])
+
+ def test_one_403_after_cooldown_does_not_restart_the_shared_wait(self):
+  from api_source import ReadError
+  for event,movie in [('ET1000','First'),('ET1001','First'),('ET1002','Second')]:
+   api_watch.schedule(self.db,event,'',movie)
+  jobs=self.db.execute('SELECT * FROM jobs ORDER BY id').fetchall()
+  denied=ReadError('Source HTTP 403',403,180)
+  for job,now in zip(jobs,(1000,1060,1120)):
+   api_watch.record_listing_failure(self.db,job,denied,now,now)
+  self.assertEqual(float(api_watch.meta(self.db,'source_cooldown','0')),1420)
+  resumed=self.db.execute('SELECT * FROM jobs WHERE id=?',(jobs[0]['id'],)).fetchone()
+  api_watch.record_listing_failure(self.db,resumed,denied,1420,1420)
+  self.assertEqual(float(api_watch.meta(self.db,'source_cooldown','0')),1420)
+  self.assertEqual(self.db.execute('SELECT due FROM jobs WHERE id=?',(resumed['id'],)).fetchone()[0],1720)
+
+ def test_repeated_listing_identity_error_defers_only_the_bad_listing(self):
+  import dashboard
+  from api_source import ListingIdentityError,parse
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Epic'],'enabled':True,'urgent':True})
+  for event in ('ET1000','ET1001'):
+   api_watch.schedule(self.db,event,D1,'Epic')
+  self.db.commit()
+  jobs=self.db.execute('SELECT * FROM jobs ORDER BY id').fetchall()
+  bad={'data':{'additionalData':{'eventCode':'ET1000','dateCode':D2},'showtimeWidgets':[]}}
+  with self.assertRaises(ListingIdentityError) as mismatch:
+   parse(bad,'ET1000',D1)
+  self.assertEqual((mismatch.exception.event,mismatch.exception.day),('ET1000',D2))
+  api_watch.record_listing_failure(self.db,jobs[0],mismatch.exception,1000,1000)
+  failed=self.db.execute('SELECT * FROM jobs WHERE id=?',(jobs[0]['id'],)).fetchone()
+  self.assertEqual(failed['due'],1060)
+  api_watch.record_listing_failure(self.db,failed,mismatch.exception,1060,1060)
+  expected=[('ET1001',D1,0),('ET1000',D1,1120)]
+  self.assertEqual([(r['event'],r['date'],r['due']) for r in dashboard.listing_queue(self.db)],expected)
+  self.assertEqual(api_watch.next_job(self.db,1120)['id'],jobs[1]['id'])
 
  def test_refusal_diagnostics_never_include_cookies_or_body(self):
   from api_source import get_json,ReadError,retry_delay

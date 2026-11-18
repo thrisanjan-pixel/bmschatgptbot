@@ -50,10 +50,12 @@ def enqueue(db, kind, url, payload, expires=0):
                (key, kind, url, json.dumps(payload), expires))
 
 
-def emit(db, event, text, photo=None, alert_id=''):
+def emit(db, event, text, photo=None, alert_id='', hold=0):
+    """Queue a message. hold: seconds it may wait for related messages before it is sent anyway."""
     key = hashlib.sha256(event.encode()).hexdigest()
-    db.execute('INSERT OR IGNORE INTO outbox(id,text,photo,created,alert_id) VALUES(?,?,?,?,?)',
-               (key, text, photo, time.time(), alert_id))
+    now = time.time()
+    db.execute('INSERT OR IGNORE INTO outbox(id,text,photo,created,alert_id,next_try) VALUES(?,?,?,?,?,?)',
+               (key, text, photo, now, alert_id, now+hold if hold else 0))
 
 
 def snapshot(db, key, current, message, photo=None, baseline=False):

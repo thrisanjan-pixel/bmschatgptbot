@@ -15,7 +15,7 @@
 <h3>Fake seat map for page.js</h3>
 <p>Open as <code>fixture.html?task={"pair":{"category":"Gold","row":"B","seats":["5","6"]}}</code>. Options: <code>&amp;noqty=1</code> (quantity already 2), <code>&amp;taken=6</code> (seat 6 taken), <code>&amp;dup=1</code> (row B exists in two areas), <code>&amp;pick=left</code> (the map picks the left neighbour), <code>&amp;terms=1</code> (terms pop-up first), <code>&amp;signin=1</code> (sign-in page text), <code>&amp;late=1</code> (map appears after 3 s), <code>&amp;autopress=2</code> (presses the simulated banner button after 2 s).</p>
 <div id="qty"><b>How many seats?</b><ul><li>1</li><li>2</li><li>3</li><li>4</li><li>5</li><li>6</li></ul><button id="qtyGo">Select Seats</button></div>
-<div id="termsBox" hidden><p>Terms and conditions</p><button id="accept">Accept</button></div>
+<div id="termsBox" hidden><p>Terms &amp; Conditions</p><button>Cancel</button><button id="accept">Accept</button></div>
 <div id="signinBox" hidden><p>Sign in to continue</p></div>
 <div id="konva"></div>
 <button id="pay" hidden>Pay Rs. 800</button>
@@ -28,10 +28,40 @@
   var qtyWanted = q.get('noqty') ? 2 : 0, pick = q.get('pick') || 'right';
   var pay = document.getElementById('pay'), konva = document.getElementById('konva'), log = document.getElementById('log');
   document.getElementById('qty').hidden = !!q.get('noqty');
+  if (q.has('genericqty')) {
+    document.getElementById('qty').outerHTML = '<div id="qty" role="dialog"><header><h5>How many seats?</h5><div>Select Seats</div></header><ul><li>1</li><li><span>2</span></li><li>3</li></ul><footer><div id="qtyGo" tabindex="0"><span>Select Seats</span></div></footer></div>';
+    if (q.get('genericqty') === '1') document.querySelector('#qty header div').remove();
+  }
   document.getElementById('termsBox').hidden = !q.get('terms');
+  if (q.has('customTerms')) {
+    document.getElementById('accept').outerHTML = '<div id="accept" style="cursor:pointer"><span>Accept</span></div>';
+  }
   document.getElementById('signinBox').hidden = !q.get('signin');
-  pay.addEventListener('click', function () { window.__payClicked = true; document.getElementById('payState').textContent = 'YES (failure)'; });
-  document.getElementById('accept').addEventListener('click', function () { document.getElementById('termsBox').hidden = true; });
+  pay.addEventListener('click', function () {
+    if (q.has('checkoutTerms')) {
+      document.getElementById('termsBox').hidden = false;
+      if (q.has('delayTerms')) {
+        const accept = document.getElementById('accept');
+        accept.setAttribute('aria-disabled', 'true');
+        setTimeout(() => accept.removeAttribute('aria-disabled'), 600);
+      }
+      return;
+    }
+    showCheckout();
+  });
+  function showCheckout() {
+    window.__payClicked = true;
+    document.getElementById('payState').textContent = q.get('checkout') === '1' ? 'Grab a Bite!' : 'YES (failure)';
+    if (q.get('checkout') === '1' && !q.has('stay')) {
+      const heading = document.createElement('h2');
+      heading.textContent = 'Grab a Bite!';
+      document.body.appendChild(heading);
+    }
+  }
+  document.getElementById('accept').addEventListener('click', function () {
+    document.getElementById('termsBox').hidden = true;
+    if (q.has('checkoutTerms')) showCheckout();
+  });
 
   // A tiny Konva look-alike: Groups with attrs, children Rects, find / findOne / fill / fire / getClientRect.
   function Rect(group, fill) { this.group = group; this.attrs = { fill: fill }; }
@@ -42,32 +72,47 @@
   Group.prototype.getClientRect = function () { return { x: this.x, y: this.attrs.seatObj.rowNumber === 'B' ? 20 : 60, width: 26, height: 26 }; };
   var groups = [], areaOf = { A: 'A1', B: 'A1' };
   function mk(area, row, n, taken) {
-    var obj = { areaCode: area, rowNumber: row, displaySeatNumber: String(n), cinemaSeatNumber: String(n), seatNumber: ('0' + n).slice(-2), priceCode: '0001', curPrice: 400, seatType: taken ? 'Booked / Held' : 'Available', seatStatus: taken ? 2 : 1 };
+    var obj = { areaCode: area, rowNumber: row, displaySeatNumber: String(n), cinemaSeatNumber: String(n), seatNumber: ('0' + n).slice(-2), priceCode: '0001', priceDesc: '3D GOLD.', curPrice: 400, seatType: taken ? 'Booked / Held' : 'Available', seatStatus: taken ? 2 : 1 };
+    if (q.has('unnamed')) delete obj.priceDesc;
+    if (q.has('stringStatus')) obj.seatStatus = String(taken ? 2 : 1);
     var g = new Group({ id: 'Seat-' + area + '-' + row + '-' + n, seatObj: obj }, 10 + (n - 1) * 30);
     g.onClick = function () { clickSeat(g); };
     return g;
   }
   function build() {
     var takenNo = Number(q.get('taken') || 0), n;
-    for (n = 1; n <= 10; n++) { groups.push(mk('A1', 'B', n, n === takenNo)); groups.push(mk('A1', 'C', n, false)); }
+    for (n = 1; n <= 10; n++) { groups.push(mk('A1', 'B', n, n === takenNo || q.has('rowTaken'))); groups.push(mk('A1', 'C', n, false)); }
     if (q.get('dup')) for (n = 1; n <= 10; n++) groups.push(mk('A2', 'B', n, false));
     draw();
   }
   function clickSeat(g) {
     if (document.getElementById('qty').hidden === false) return;                    // the seat count must be chosen first
-    if (g.attrs.seatObj.seatStatus !== 1 || g.attrs.id.endsWith('-selected')) return;
-    var row = g.attrs.seatObj.rowNumber, n = Number(g.attrs.seatObj.cinemaSeatNumber), buddy = null;
-    if (qtyWanted === 2) {                                                          // one click selects two neighbours
-      var order = pick === 'left' ? [n - 1, n + 1] : [n + 1, n - 1];
-      order.forEach(function (m) { if (!buddy) buddy = groups.find(function (x) { return x.attrs.seatObj.rowNumber === row && Number(x.attrs.seatObj.cinemaSeatNumber) === m && x.attrs.seatObj.seatStatus === 1 && x.attrs.seatObj.areaCode === g.attrs.seatObj.areaCode; }) || null; });
+    if (Number(g.attrs.seatObj.seatStatus) !== 1 || g.attrs.id.endsWith('-selected')) return;
+    var row = g.attrs.seatObj.rowNumber, n = Number(g.attrs.seatObj.cinemaSeatNumber);
+    if (row === 'B' && n === Number(q.get('miss'))) { g.attrs.seatObj.seatStatus = 2; return; }
+    const block = [g];
+    if (!q.has('individual')) {
+      for (const direction of pick === 'left' ? [-1, 1] : [1, -1]) {
+        for (let offset = 1; block.length < qtyWanted; offset++) {
+          const next = groups.find((seat) => seat.attrs.seatObj.rowNumber === row && Number(seat.attrs.seatObj.cinemaSeatNumber) === n + direction * offset && Number(seat.attrs.seatObj.seatStatus) === 1 && seat.attrs.seatObj.areaCode === g.attrs.seatObj.areaCode);
+          if (!next) break;
+          block.push(next);
+        }
+      }
     }
-    [g, buddy].forEach(function (x) { if (x) select(x); });
-    pay.hidden = false;
+    block.forEach(select);
+    pay.hidden = groups.filter((seat) => seat.attrs.id.endsWith('-selected')).length !== qtyWanted;
     draw();
   }
   function select(g) {
-    var i = groups.indexOf(g), obj = Object.assign({}, g.attrs.seatObj, { priceDesc: '3D GOLD.' });
-    var s = new Group({ id: g.attrs.id + '-selected', seatObj: obj }, g.x); s.onClick = function () {};
+    var i = groups.indexOf(g), obj = { ...g.attrs.seatObj };
+    var s = new Group({ id: g.attrs.id + '-selected', seatObj: obj }, g.x);
+    s.onClick = function () {
+      if (q.has('noClear')) return;
+      groups[groups.indexOf(s)] = g;
+      pay.hidden = true;
+      draw();
+    };
     groups.splice(i, 1, s);
   }
   window.Konva = { stages: [{
@@ -101,7 +146,25 @@
 
   // Test hook: page.js reads ?task= only because this flag is set and the page is a file: URL.
   window.__SCREENWATCH_TEST__ = true;
-  ['../seatlogic.js', '../page.js'].reduce(function (chain, src) {
+  const scripts = ['../seatlogic.js', '../page.js'];
+  if (q.has('extension')) {
+    const pair = JSON.parse(q.get('task')).pair;
+    const nativePost = window.postMessage.bind(window);
+    window.postMessage = (message, origin) => nativePost(message, origin === 'null' ? '*' : origin);
+    window.chrome.runtime = { async sendMessage(message) {
+      if (message.type === 'get-task') return { task: {
+        autoCheckout: true, autoAcceptTerms: q.has('autoTerms'),
+        event: { url: location.href, pair: q.has('count') ? null : pair, partySize: q.has('count') ? Number(q.get('count')) : undefined,
+          allowedRows: q.has('allRows') ? null : q.has('twoRows') ? ['3D GOLD. / B', '3D GOLD. / C'] : ['3D GOLD. / B'],
+          allowedCategories: q.has('seatType') ? [q.get('seatType')] : [],
+          layoutRows: q.has('unnamed') ? [{row:'B',category:'3D GOLD.'}, ...(q.has('ambiguous') ? [{row:'B',category:'PLATINUM'}] : [])] : undefined }
+      } };
+      if (message.type === 'result') log.textContent += 'extension result ' + message.ok + ' ' + message.text + '\n';
+      return {};
+    } };
+    scripts.push('../content.js');
+  }
+  scripts.reduce(function (chain, src) {
     return chain.then(function () { return new Promise(function (ok) { var s = document.createElement('script'); s.src = src; s.onload = ok; document.body.appendChild(s); }); });
   }, Promise.resolve());
 })();

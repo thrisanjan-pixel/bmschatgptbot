@@ -17,18 +17,18 @@ class SourceBudgetTests(unittest.TestCase):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1060)
  def test_manual_reads_have_their_own_budget_but_honor_cooldowns(self):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000)
-  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1010,manual=True)
-  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1015,manual=True)
-  for n in range(1,10):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1010+n*10,manual=True)
-  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1200,manual=True)
-  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1200)
+  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1030,manual=True)
+  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1045,manual=True)
+  for n in range(1,10):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1030+n*30,manual=True)
+  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1330,manual=True)
+  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1330)
   self.db.execute("INSERT INTO source_hosts VALUES('services-in.bookmyshow.com',9999)");self.db.commit()
   with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4700,manual=True)
  def test_seat_metadata_lane_is_not_starved_by_listing_checks(self):
   for n in range(5):source.reserve(self.db,'https://in.bookmyshow.com/api/x',1000+n*60)
   with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/x',1250)
-  source.reserve(self.db,'https://in.bookmyshow.com/api/x',1250,metadata=True)
-  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/x',1255,metadata=True)
+  source.reserve(self.db,'https://in.bookmyshow.com/api/x',1270,metadata=True)
+  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/x',1299,metadata=True)
  def test_rolling_hour_cap_counts_every_attempt(self):
   for n in range(60):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000+n*60)
   with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4599)
@@ -56,8 +56,8 @@ class SourceBudgetTests(unittest.TestCase):
  def test_listing_and_seat_hosts_have_independent_budgets(self):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000)
   source.reserve(self.db,'https://in.bookmyshow.com/api/test',1000)
-  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/test',1059)
-  source.reserve(self.db,'https://in.bookmyshow.com/api/test',1060)
+  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/test',1029)
+  source.reserve(self.db,'https://in.bookmyshow.com/api/test',1030)
  def test_budget_denial_sends_no_network_request(self):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',time.time())
   with patch.dict(os.environ,{'BMS_REQUEST_BUDGET':'1','BMS_DB':self.path}),patch('urllib.request.urlopen') as call:

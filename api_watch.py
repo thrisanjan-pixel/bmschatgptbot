@@ -10,11 +10,11 @@ from pathlib import Path
 import signal
 import threading
 import time
-from api_source import CATALOG,ReadError,end_day,get_json,movies,no_regional_shows,parse,seat_layout_url,show_url,today
-from http_source import SourceWait
+from api_source import CATALOG,ListingIdentityError,ReadError,end_day,get_json,movies,no_regional_shows,parse,seat_layout_url,show_url,today
+from http_source import LISTING_SPACING,SourceWait
 from local_credentials import load
 from store import connect,coverage,emit,enqueue,meta,setmeta,record_check
-from telegram import drain,send
+from telegram import drain,send,flush as telegram_flush
 import watch_preferences as preferences
 
 def schedule(db,event,day,title,notify=False):
@@ -40,8 +40,13 @@ def ingest(db,job,data):
     args=json.loads(job['payload']);result=parse(data,args['event'],args['date'])
     key='api:'+args['event']+':'+result['day'];row=db.execute('SELECT payload FROM snapshots WHERE id=?',(key,)).fetchone()
     previous=json.loads(row[0]) if row else None;current=result['shows']
+    missing=result['missing_availability']
     title=result['film'] or args['movie']
     for show in current.values():show['movie']=show['movie'] or title
+    # Keep the last verified state of incomplete shows for the next comparison.
+    snapshot=current.copy()
+    if previous:
+        snapshot.update((identity,previous[identity]) for identity in missing if identity in previous)
     changes={}
     preferences.drop_unbookable_gates(db,current)
     upcoming = meta(db, 'upcoming_event:'+args['event']) == '1'
@@ -81,7 +86,7 @@ def ingest(db,job,data):
                     group['lines'].append((change,seat_layout_url(show),show,names))
             if groups:changes[rule['id']]=(rule,groups)
     deferred=False
-    if previous!=current:
+    if previous!=snapshot:
         revision=int(meta(db,'revision:'+key,'0'))+1
         if changes:
             date=dt.datetime.strptime(result['day'],'%Y%m%d').strftime('%d %b %Y')
@@ -126,10 +131,10 @@ def ingest(db,job,data):
     # keeps the flag so its retry still says "Booking open".
     if upcoming and not deferred and any(c['status'] in ('1','2','3') for show in current.values() for c in show['categories'].values()):
         db.execute('DELETE FROM meta WHERE key=?',('upcoming_event:'+args['event'],))
-    if not deferred:db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',(key,json.dumps(current)))
+    if not deferred:db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',(key,json.dumps(snapshot)))
     for old in db.execute('SELECT id,payload FROM sessions WHERE active=1').fetchall():
         show=json.loads(old['payload'])
-        if show['event']==args['event'] and show['date']==result['day'] and old['id'] not in current:
+        if show['event']==args['event'] and show['date']==result['day'] and old['id'] not in current and old['id'] not in missing:
             db.execute('UPDATE sessions SET active=0 WHERE id=?',(old['id'],))
     for show in current.values():
         db.execute('INSERT OR REPLACE INTO sessions VALUES(?,?,?,1)',(show['id'],json.dumps(show),show['cutoff']))
@@ -139,6 +144,7 @@ def ingest(db,job,data):
     for variant in result['variants']:schedule(db,variant,'',title,args['notify_first'])
     db.execute('DELETE FROM meta WHERE key=?',('waiting_show:'+job['id'],))
     setmeta(db,'api_last_success',time.time())
+    return len(missing)
 
 def seed(db,previous_db=None):
     enqueue(db,'catalog',CATALOG,{})
@@ -161,8 +167,7 @@ def poll_interval(db,job):
     movie=json.loads(job['payload']).get('movie','')
     if not is_watched(json.loads(job['payload']),wanted_dates(db)):
         return 120
-    # Keep a conservative target until real source access is stable.
-    return 60
+    return LISTING_SPACING
 
 
 def watched_movies(db):
@@ -175,13 +180,14 @@ BACKGROUND_SPACING=300
 
 def wanted_dates(db,urgent=False):
     """What showtime alerts need: per movie, each alert's dates (None = any date) and
-    its language, format and screen filters, plus what each known version has shown.
+    its language and format filters, plus what each known version has shown.
     A '*' row alert needs fresh showtime lists too, to find new showtimes. With urgent=True only urgent alerts count."""
     movies={}
     for rule in preferences.active(db):
         p=rule['preferences']
         if p['row_show'] not in ('',preferences.ANY_SHOW) or (urgent and not p['urgent']):continue
-        probe={**preferences.defaults(),**{k:p[k] for k in ('languages','formats','screens')}}
+        # A screen belongs to a showtime. The same version can add a show on a new screen.
+        probe={**preferences.defaults(),'languages':p['languages'],'formats':p['formats']}
         for movie in p['movies']:
             movies.setdefault(preferences.normalized(movie),[]).append((set(p['dates']) or None,probe))
     profiles={}
@@ -197,8 +203,8 @@ def wanted_dates(db,urgent=False):
 def is_watched(payload,wanted):
     # Background work cannot crowd out the listings alerts depend on. A listing is
     # background when no alert asks for its date, or when its version (event) has
-    # only ever shown in languages, formats or screens no alert asks for. Versions
-    # with no showtimes seen yet, and undated listings, still count.
+    # only ever shown in languages or formats no alert asks for. Versions with
+    # no showtimes seen yet still count.
     entries=wanted['movies'].get(preferences.normalized(payload.get('movie','')))
     if not entries:return False
     day=payload.get('date','');event=payload.get('event');shows=wanted['profiles'].get(event)
@@ -229,8 +235,7 @@ def listing_order(db, now):
     slots = ','.join('?' for _ in movies) or "''"
     cooldown_until = float(meta(db, 'source_cooldown', '0'))
     recovering = bool(cooldown_until and 0 <= now - cooldown_until < 60)
-    # Listing requests are one a minute, so a 60 s window would hand background
-    # work every turn. Give it at most one turn in five.
+    # Give background discovery at most one turn in each five-minute window.
     background_recent = now-float(meta(db,'listing_background_attempt','0')) < BACKGROUND_SPACING
     background_paused = float(meta(db, 'background_cooldown_until', '0')) > now
     rows = db.execute(f"""WITH eligible AS (
@@ -251,19 +256,47 @@ def listing_order(db, now):
     return sorted(rows, key=order)
 
 
+def pause_listings(db, now, delay):
+    if now+delay <= float(meta(db, 'source_cooldown', '0')):
+        return
+    setmeta(db, 'source_cooldown', now+delay)
+    setmeta(db, 'source_cooldown_started', now)
+    setmeta(db, 'source_cooldown_duration', delay)
+
+
 def record_listing_failure(db, job, error, started, now):
     status = error.status if isinstance(error, ReadError) else 0
-    # A transport error or status-0 read retries after the 60 s request gap the budget already enforces.
+    # Transport failures retry after 60 seconds; HTTP failures use their backoff.
     delay = error.retry if isinstance(error, ReadError) and error.status else 60
     message = str(error) if isinstance(error, ReadError) else type(error).__name__
     if getattr(error,'diagnostic',None):
         setmeta(db,'listing_last_refusal',json.dumps({**error.diagnostic,'at':now}))
-    if status == 403 and job['error'] == 'Source HTTP 403':
+    # One refusal ends this check cycle; no fresh-session retry.
+    db.execute('DELETE FROM meta WHERE key=?',('listing_403_retry:'+job['id'],))
+    if status==403:
+        setmeta(db,'listing_blocked_count',int(meta(db,'listing_blocked_count','0'))+1)
+        setmeta(db,'listing_blocked_at',now)
+    if job['error']==message and status==403:
         delay = max(300, delay)
 
     setmeta(db, 'listing_success_streak:'+job['id'], 0)
-    db.execute('UPDATE jobs SET due=?,error=? WHERE id=?', (now+delay, message, job['id']))
+    due=now+delay
+    db.execute('UPDATE jobs SET due=?,error=? WHERE id=?', (due, message, job['id']))
     record_check(db, 'listings', job['id'], started, message, now=now)
+
+    if job['kind']=='discovery':
+        if status==403:
+            movie=preferences.normalized(json.loads(job['payload']).get('movie',''))
+            refused=json.loads(meta(db,'listing_refused_movies','[]'))[-2:]+[movie]
+            setmeta(db,'listing_refused_movies',json.dumps(refused))
+            # A refused listing should only delay the other checks if refusals span movies.
+            affected=set(filter(None,refused))
+            if len(refused)==3 and len(affected)>1:
+                pause_listings(db,now,max(300,delay))
+                # A new shared cooldown needs a fresh series after the source wait.
+                db.execute("DELETE FROM meta WHERE key='listing_refused_movies'")
+        else:
+            db.execute("DELETE FROM meta WHERE key='listing_refused_movies'")
 
     if status == 403:
         active_movies = set(watched_movies(db))
@@ -283,15 +316,13 @@ def record_listing_failure(db, job, error, started, now):
             setmeta(db, 'background_cooldown_until', now+max(300, delay))
 
     if status == 429:
-        delay = max(300, delay)
-        setmeta(db, 'source_cooldown', now+delay)
-        setmeta(db, 'source_cooldown_started', now)
-        setmeta(db, 'source_cooldown_duration', delay)
+        pause_listings(db,now,max(300,delay))
     return message
 
 
 class Monitor:
-    def __init__(self,path,dry_run=False):self.path=path;self.dry_run=dry_run;self.stop=threading.Event()
+    def __init__(self,path,dry_run=False):
+        self.path=path;self.dry_run=dry_run;self.stop=threading.Event();self.delivery_ready=threading.Event()
     def worker(self):
         db=connect(self.path)
         try:
@@ -305,22 +336,25 @@ class Monitor:
         finally:db.close()
     def check(self,db):
         cooldown=float(meta(db,'source_cooldown','0'))
-        if cooldown>time.time():self.stop.wait(min(1,cooldown-time.time()));return
+        if cooldown>time.time():self.stop.wait(max(0,cooldown-time.time()));return
         # Pick a job only once the request budget is free, so waiting never reshuffles the queue.
         budget=float(meta(db,'listing_budget_until','0'))
-        if budget>time.time():self.stop.wait(min(1,budget-time.time()));return
+        if budget>time.time():self.stop.wait(max(0,budget-time.time()));return
         now=time.time()
         job=next_job(db,now)
         if not job:self.stop.wait(1);return
+        payload=json.loads(job['payload'])
+        listing=f"event={payload.get('event') or '-'} date={payload.get('date') or '-'}"
         try:
             started=time.time()
             setmeta(db,'listing_check_started',started)
-            stamped=not is_watched(json.loads(job['payload']),wanted_dates(db))
+            stamped=not is_watched(payload,wanted_dates(db))
             if stamped:
                 previous_attempt=meta(db,'listing_background_attempt','0')
                 setmeta(db,'listing_background_attempt',started)
             db.commit()
             data=get_json(job['url'])
+            incomplete=0
             if job['kind']=='catalog':
                 listings=movies(data);initialized=bool(meta(db,'catalog_initialized'))
                 for movie in listings:
@@ -332,14 +366,19 @@ class Monitor:
                 # Keep prior show state and wait for a verified showtime payload.
                 setmeta(db,'waiting_show:'+job['id'],'1')
                 # Only the undated listing says the event has no shows yet; a dated one may just be an empty day.
-                if not json.loads(job['payload']).get('date'):setmeta(db,'upcoming_event:'+json.loads(job['payload'])['event'],'1')
+                if not payload.get('date'):setmeta(db,'upcoming_event:'+payload['event'],'1')
                 setmeta(db,'api_last_success',time.time())
-            else:ingest(db,job,data)
+            else:incomplete=ingest(db,job,data)
+            if job['kind']=='discovery':
+                db.execute("DELETE FROM meta WHERE key='listing_refused_movies'")
             streak_key='listing_success_streak:'+job['id']
+            db.execute('DELETE FROM meta WHERE key=?',('listing_403_retry:'+job['id'],))
             setmeta(db,streak_key,min(5,int(meta(db,streak_key,'0'))+1))
-            db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(time.time(),time.time()+poll_interval(db,job),job['id']))
+            db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(time.time(),started+poll_interval(db,job),job['id']))
             record_check(db,'listings',job['id'],started)
-            db.commit();logging.info('%s checked',job['kind'])
+            db.commit();logging.info('%s checked %s',job['kind'],listing)
+            if incomplete:
+                logging.warning('Incomplete category availability %s showtimes=%s',listing,incomplete)
         except Exception as error:
             db.rollback()
             if isinstance(error,SourceWait):
@@ -354,10 +393,17 @@ class Monitor:
                 db.commit()
             else:
                 message=record_listing_failure(db,job,error,started,time.time())
-                db.commit();logging.warning('%s: %s',job['kind'],message)
+                if isinstance(error,ListingIdentityError):
+                    listing+=f" returned_event={error.event or '-'} returned_date={error.day or '-'}"
+                db.commit()
+                if isinstance(error,ListingIdentityError):
+                    logging.info('Discarded wrong-date/event response %s',listing)
+                elif isinstance(error,ReadError) and error.status==403:
+                    logging.warning('BMS blocked one check count=%s %s',meta(db,'listing_blocked_count','0'),listing)
+                else:logging.warning('%s: %s %s',job['kind'],message,listing)
         finally:
             setmeta(db,'listing_check_started','0');db.commit()
-        self.stop.wait(2)
+        self.delivery_ready.set()
     def run(self,seconds=0):
         db=connect(self.path);thread=threading.Thread(target=self.worker,daemon=True);thread.start();start=time.monotonic()
         try:
@@ -372,6 +418,7 @@ class Monitor:
         finally:
             self.stop.set();thread.join(timeout=30);setmeta(db,'city_state','stopped');db.commit();db.close()
     def tick(self,db):
+        self.delivery_ready.clear()
         running=preferences.active(db)
         muted=meta(db,'notifications_paused','0')=='1' or not running
         # A seat-photo follow-up is still sent after its alert finished or was paused.
@@ -398,10 +445,9 @@ class Monitor:
                     db.execute('ROLLBACK TO prime');logging.warning('initial availability check: %s',type(error).__name__)
                 db.execute('RELEASE prime')
             if (running and meta(db,'notifications_paused','0')!='1') or followup:
-                delivered_id=drain(db,commit=False)
-                if delivered_id:preferences.delivered(db,delivered_id)
+                telegram_flush(db)
             db.commit()
-        self.stop.wait(1)
+        self.delivery_ready.wait(1)
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--db',default=os.environ.get('BMS_DB','runtime/api.sqlite3'))
@@ -412,7 +458,8 @@ def main():
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:raise SystemExit('API monitor already running')
     db=connect(args.db);seed(db,args.seed_db);db.close()
-    logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
+    from log_config import configure
+    configure()
     monitor=Monitor(args.db,args.dry_run)
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:monitor.stop.set())
     monitor.run(args.seconds)
