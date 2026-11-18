@@ -88,7 +88,9 @@ def send(text, photo=None):
         # link) goes first; the map is optional, so its failure is not retried.
         request('sendMessage', message)
         try:request('sendPhoto', {'chat_id': chat, 'caption': 'Current public seat map · Hyderabad'}, photo)
-        except DeliveryError as error:logging.warning('Telegram seat map skipped: HTTP %s', error.code)
+        except DeliveryError as error:
+            logging.warning('Telegram seat map skipped: HTTP %s', error.code)
+            return error  # The text succeeded; honour a photo flood wait without sending the text twice.
         return
     try:
         request('sendPhoto', {'chat_id': chat, 'caption': text}, photo)
@@ -133,9 +135,10 @@ def drain(db, commit=True, system_only=False):
     # Release the write lock while talking to Telegram; a crash before the mark below resends after the claim expires.
     db.commit()
     try:
-        send(text, row['photo'])
+        optional_error=send(text, row['photo'])
     except Exception as error:
         if not isinstance(error, DeliveryError):error = DeliveryError(reason=type(error).__name__)
+        now = time.time()  # Retry-After starts when Telegram responds, including slow sends.
         logging.warning('Telegram delivery failed: HTTP %s, retry in %ss, attempt %s%s', error.code, error.retry,
                         row['attempts']+1, ' ('+error.reason+')' if error.reason else '')
         db.execute('BEGIN IMMEDIATE')
@@ -149,8 +152,23 @@ def drain(db, commit=True, system_only=False):
         delivered_id=None
     else:
         db.execute('BEGIN IMMEDIATE')
+        if isinstance(optional_error,DeliveryError) and optional_error.code==429:
+            setmeta(db,'telegram_blocked_until',str(time.time()+optional_error.retry))
         # The alert may have been paused or deleted (message archived) while sending.
         marked = db.execute('UPDATE outbox SET delivered=? WHERE id=? AND delivered=0', (time.time(), row['id'])).rowcount
         delivered_id=(row['alert_id'] if 'alert_id' in row.keys() else '') if marked else None
     if commit:db.commit()
     return delivered_id
+
+
+def flush(db):
+    """Send all due messages without a polling pause between messages."""
+    from watch_preferences import delivered
+    # Bound one turn so source checks and settings still get time on a busy queue.
+    for _ in range(100):
+        alert_id=drain(db,commit=False)
+        if alert_id is None:
+            db.commit()
+            return
+        if alert_id:delivered(db,alert_id)
+        db.commit()

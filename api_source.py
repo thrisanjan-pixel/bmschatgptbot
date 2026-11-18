@@ -18,6 +18,14 @@ class ReadError(RuntimeError):
     def __init__(self,message,status=0,retry=300):
         super().__init__(message);self.status=status;self.retry=retry
 
+
+class ListingIdentityError(ReadError):
+    def __init__(self,event,day):
+        super().__init__('Screening event/date mismatch')
+        self.event=event if isinstance(event,str) and re.fullmatch(r'ET[0-9]{1,16}',event) else ''
+        self.day=day if re.fullmatch(r'[0-9]{8}',day) else ''
+
+
 def today():return dt.datetime.now(IST).strftime('%Y%m%d')
 def end_day(day):return (dt.datetime.strptime(day,'%Y%m%d').replace(tzinfo=IST)+dt.timedelta(days=1)).timestamp()
 def seat_layout_url(show):
@@ -34,7 +42,7 @@ def nodes(value):
 
 def refusal_details(error):
     # Never persist cookies, authorization headers or response bodies.
-    allowed=('Retry-After','Server','Content-Type','CF-Mitigated')
+    allowed=('Retry-After','Server','Content-Type','CF-Mitigated','CF-Ray')
     headers={key: str(error.headers.get(key))[:160] for key in allowed
              if error.headers and error.headers.get(key) is not None}
     return {'status':error.code,'headers':headers}
@@ -60,11 +68,15 @@ def get_json(url):
     req=urllib.request.Request(url,headers={'User-Agent':'BMSLocalNotifier/0.1','Accept':'application/json',
         'x-app-code':'WEB','x-region-code':'HYD','x-region-slug':'hyderabad','x-platform-code':'DESKTOP-WEB','x-location-selection':'manual'})
     try:
-        with open_request(req,timeout=25) as response:return json.load(response)
+        with open_request(req,timeout=25) as response:
+            result=json.load(response)
+        if not isinstance(result,dict):raise ReadError('Source response is not a JSON object')
+        return result
     except urllib.error.HTTPError as error:
         status=error.code
         retry=retry_delay(status,error.headers.get('Retry-After') if error.headers else None)
         failure=ReadError(f'Source HTTP {status}',status,retry)
+        failure.retry_after=error.headers.get('Retry-After','') if error.headers else ''
         failure.diagnostic=refusal_details(error)
         error.close()
         raise failure from None
@@ -105,10 +117,14 @@ def no_regional_shows(data):
 
 def parse(data,event,requested_day='',now=None):
     now=dt.datetime.now(IST).timestamp() if now is None else now
-    body=data.get('data',{});identity=body.get('additionalData',{})
+    body=data.get('data') if isinstance(data,dict) else None
+    if not isinstance(body,dict) or not isinstance(body.get('additionalData'),dict):
+        raise ReadError('Showtime identity is missing')
+    identity=body['additionalData']
     day=str(identity.get('dateCode',''))
-    if identity.get('eventCode')!=event or not re.fullmatch(r'\d{8}',day) or (requested_day and requested_day!=day):
-        raise ReadError('Screening event/date mismatch')
+    observed_event=identity.get('eventCode')
+    if observed_event!=event or not re.fullmatch(r'\d{8}',day) or (requested_day and requested_day!=day):
+        raise ListingIdentityError(observed_event,day)
     if not isinstance(body.get('showtimeWidgets'),list):raise ReadError('Showtime schema changed')
     dates=set();variants=set();language='';film=''
     for widget in body.get('topStickyWidgets',[]):
@@ -130,6 +146,7 @@ def parse(data,event,requested_day='',now=None):
         if isinstance(url,str) and '/hyderabad/' in url:
             variants.update(re.findall(r'ET\d+',url))
     shows={}
+    missing_availability=set()
     for widget in body['showtimeWidgets']:
         if widget.get('type')!='groupList':continue
         for group in widget.get('data',[]):
@@ -153,8 +170,10 @@ def parse(data,event,requested_day='',now=None):
                     except ValueError:raise ReadError('Unknown show start time') from None
                     cutoff=min(cutoff,start)
                     if cutoff<=now:continue
+                    show_id=f'{code}:{day}:{session}:{event}'
                     if not isinstance(item.get('categories'),list) or not item['categories']:
-                        raise ReadError('Missing category availability')
+                        missing_availability.add(show_id)
+                        continue
                     categories={}
                     for c in item.get('categories',[]):
                         status=str(c.get('availStatus'))
@@ -162,10 +181,12 @@ def parse(data,event,requested_day='',now=None):
                         key=str(c.get('priceCode') or c.get('priceDesc') or '')
                         if not key:raise ReadError('Unknown seat category')
                         categories[key]={'name':str(c.get('priceDesc') or key),'status':status,'price':str(c.get('curPrice') or '')}
-                    key=f'{code}:{day}:{session}:{event}'
                     # Upstream nulls become text so alerts and filters never fail on a missing label.
-                    shows[key]={'id':key,'event':event,'session':session,'venue_code':code,'venue':str(venue.get('venueName') or code),
+                    shows[show_id]={'id':show_id,'event':event,'session':session,'venue_code':code,'venue':str(venue.get('venueName') or code),
                         'date':day,'movie':film,'language':language,'format':str(raw.get('screenAttr') or item.get('attributes') or ''),
                         'time':str(raw.get('title') or item.get('showTime') or ''),'cutoff':cutoff,'categories':categories,
                         'url':booking or f'{BASE}/movies/hyderabad/movie/buytickets/{event}/{day}'}
-    return {'day':day,'dates':sorted(dates),'variants':sorted(variants),'shows':shows,'film':film}
+    if missing_availability and not shows:
+        raise ReadError('Missing category availability')
+    return {'day':day,'dates':sorted(dates),'variants':sorted(variants),'shows':shows,'film':film,
+            'missing_availability':missing_availability-shows.keys()}

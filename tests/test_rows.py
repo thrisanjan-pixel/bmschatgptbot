@@ -21,6 +21,38 @@ class RowTests(unittest.TestCase):
  def configure(self):
   row_watch.ingest(self.db,self.show,copy.deepcopy(self.result))
   prefs.save(self.db,{**prefs.defaults(),'movies':['Movie'],'categories':['Gold'],'row_show':self.show['id'],'rows':['Gold / A'],'enabled':True})
+ def test_restarting_row_alert_reports_open_seats_again(self):
+  self.configure()
+  alert_id=prefs.rules(self.db)[0]['id']
+  result=copy.deepcopy(self.result)
+  result['available'].append({'row_id':'Gold / A','seat':'2'})
+  row_watch.ingest(self.db,self.show,copy.deepcopy(result))
+  self.db.execute('UPDATE outbox SET delivered=? WHERE alert_id=?',(time.time(),alert_id));self.db.commit()
+  prefs.transition(self.db,alert_id,'cancel')
+  prefs.transition(self.db,alert_id,'reset')
+  row_watch.ingest(self.db,self.show,copy.deepcopy(result))
+  self.assertEqual(self.db.execute('SELECT count(*) FROM outbox WHERE alert_id=? AND delivered=0',(alert_id,)).fetchone()[0],1)
+ def test_explicit_restart_checks_open_seats_even_in_future_only_mode(self):
+  self.configure()
+  rule=prefs.rules(self.db)[0]
+  alert_id=rule['id']
+  prefs.save(self.db,{**rule['preferences'],'notify_existing':False},alert_id)
+  result=copy.deepcopy(self.result)
+  result['available'].append({'row_id':'Gold / A','seat':'2'})
+  row_watch.ingest(self.db,self.show,copy.deepcopy(result))
+  count=lambda:self.db.execute('SELECT count(*) FROM outbox WHERE alert_id=?',(alert_id,)).fetchone()[0]
+  self.assertEqual(count(),0)
+  prefs.transition(self.db,alert_id,'reset')
+  row_watch.ingest(self.db,self.show,copy.deepcopy(result))
+  self.assertEqual(count(),1)
+  self.assertFalse(prefs.rules(self.db)[0]['preferences']['notify_existing'])
+  self.db.execute('UPDATE outbox SET delivered=? WHERE alert_id=?',(time.time(),alert_id));self.db.commit()
+  row_watch.ingest(self.db,self.show,copy.deepcopy(result))
+  self.assertEqual(count(),1)
+  row_watch.ingest(self.db,self.show,copy.deepcopy(self.result))
+  self.db.execute('UPDATE alerts SET last_alert=0 WHERE id=?',(alert_id,));self.db.commit()
+  row_watch.ingest(self.db,self.show,copy.deepcopy(result))
+  self.assertEqual(count(),2)
  def test_new_showtime_jumps_queue_and_reports_source_wait(self):
   now=time.time()
   self.db.execute("INSERT INTO row_layouts(show_id,payload,checked,due) VALUES('alert-show','{}',?,?)",(now-900,now-800))
@@ -56,6 +88,25 @@ class RowTests(unittest.TestCase):
   self.assertTrue(read.call_args.kwargs['manual'])
   self.assertEqual(float(meta(self.db,'seat_next_request_at')),now+50)
   self.assertEqual(self.db.execute('SELECT manual,due FROM row_layouts WHERE show_id=?',(self.show['id'],)).fetchone()[:],(0,0))
+ def test_delivery_failure_does_not_change_successful_seat_read(self):
+  def fail():raise RuntimeError('sender failed')
+  with patch.dict(os.environ,{'BMS_PUBLIC':'1'}),patch('cloud_row_reader.read',return_value=copy.deepcopy(self.result)),patch('row_watch.time.sleep') as sleep:
+   with self.assertRaisesRegex(RuntimeError,'sender failed'):row_watch.step(self.db,on_match=fail)
+  saved=self.db.execute('SELECT checked,error FROM row_layouts').fetchone()
+  self.assertGreater(saved['checked'],0);self.assertEqual(saved['error'],'')
+  sleep.assert_not_called()
+ def test_removed_showtime_never_reads_or_sends(self):
+  self.db.execute('UPDATE sessions SET active=0');self.db.commit()
+  with patch.dict(os.environ,{'BMS_PUBLIC':'1'}),patch('cloud_row_reader.read') as read:
+   row_watch.step(self.db)
+  read.assert_not_called()
+ def test_gate_match_queues_immediately_even_when_other_maps_are_pending(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Movie'],'enabled':True,'min_seats':1})
+  alert=prefs.rules(self.db)[0]['id']
+  prefs.queue_seat_photo(self.db,alert,self.show['id'],['Gold'],'gate','Seats open')
+  prefs.queue_seat_photo(self.db,alert,'other-show',['Gold'],'photo')
+  row_watch.process_seat_photos(self.db,self.show,copy.deepcopy(self.result))
+  self.assertEqual(self.db.execute('SELECT next_try FROM outbox').fetchone()[0],0)
   setmeta(self.db,'seat_cooldown_until',time.time()+600);self.db.commit()
   self.db.execute('UPDATE row_layouts SET due=?,manual=1',(time.time(),));self.db.commit()
   self.assertIsNone(row_watch.manual_job(self.db,time.time()+1))
@@ -185,6 +236,7 @@ class RowTests(unittest.TestCase):
    self.assertEqual(data['show_id'],self.show['id'])
    self.assertEqual(data['data']['rows'][0]['id'],'Gold / A')
   finally:server.shutdown();server.server_close();thread.join()
+ @unittest.skipUnless(hasattr(os,'killpg'), 'Process groups require POSIX')
  def test_timed_out_reader_kills_the_browser_process_group(self):
   process=Mock(pid=321)
   process.communicate.side_effect=[subprocess.TimeoutExpired('reader',1),('','')]

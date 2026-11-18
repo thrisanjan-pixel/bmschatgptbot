@@ -45,105 +45,97 @@
       '<button id="go" disabled>Select seats and open checkout</button><button id="no">Dismiss</button></div>';
     const $ = (id) => root.getElementById(id);
     $('t').textContent = 'Screenwatch · ' + [show.movie, show.venue].filter(Boolean).join(' · ') + (when(event) ? ' · ' + when(event) : '');
-    $('s').textContent = pair ? 'Section ' + pair.category + ' · Row ' + pair.row + ' · Seats ' + pair.seats.join(' + ') : (event.summary || '');
+    const details = pair && (event.partySize === undefined || event.partySize === pair.seats.length)
+      ? 'Section ' + pair.category + ' · Row ' + pair.row + ' · Seats ' + pair.seats.join(' + ') : (event.summary || '');
+    $('s').textContent = task.autoCheckout && event.partySize ? event.partySize + ' seats together · ' + details : details;
     document.documentElement.appendChild(host);
 
     const post = (type) => window.postMessage({ src: 'screenwatch-content', token, type }, location.origin);
     const say = (text, tone) => { const n = $('st'); n.textContent = text; n.className = 'status ' + (tone || ''); };
-    let hello = false, gone = false, checkoutUntil = 0, attemptedCheckout = false;
+    let hello = false, gone = false;
     let autoPending = task.autoCheckout === true;
+    let selectionTimer, checkoutDeadline = 0;
     const seatPath = new URL(event.url).pathname;
 
     function checkHandoff() {
       if (gone) return;
       const snacks = [...document.querySelectorAll('h1,h2,h3,[role="heading"],label,p,span,div')]
         .some((node) => /^grab a bite!$/i.test((node.textContent || '').trim()) && node.getClientRects().length);
-      if (!snacks && location.pathname === seatPath) return;
-      if (snacks || /^\/order-summary(?:\/|$)/.test(location.pathname)) {
+      const summary = /^\/order-summary(?:\/|$)/.test(location.pathname);
+      if (snacks || summary) {
         const text = snacks ? 'BookMyShow opened Grab a Bite. Take over here.' : 'BookMyShow opened the order summary. Take over here.';
         chrome.runtime.sendMessage({ type: 'result', ok: true, text }).catch(() => {});
+        closeBanner();
+      } else if (checkoutDeadline && Date.now() >= checkoutDeadline) {
+        checkoutDeadline = 0;
+        if (location.pathname !== seatPath) { closeBanner(); return; }
+        const text = 'BookMyShow did not open checkout. Review the page to continue.';
+        say(text, 'warn');
+        chrome.runtime.sendMessage({ type: 'result', ok: false, text }).catch(() => {});
+        clearInterval(handoffTimer);
+      } else if (!checkoutDeadline && location.pathname !== seatPath) {
+        closeBanner();
       }
+    }
+    function closeBanner() {
       gone = true;
+      clearTimeout(selectionTimer);
       post('dismiss');
       host.remove();
       clearInterval(handoffTimer);
     }
     const handoffTimer = setInterval(checkHandoff, 500);
 
-    function openCheckout(text) {
-      const confirmed = !gone && !attemptedCheckout && Date.now() < checkoutUntil;
-      checkoutUntil = 0;
-      if (!confirmed) return;
-      attemptedCheckout = true;
-      $('go').disabled = true;
-      const L = globalThis.ScreenwatchSeatLogic;
-      const exactPage = L.validSeatUrl(location.href) && new URL(event.url).pathname === location.pathname;
-      const visible = (node) => node.getClientRects().length > 0 && getComputedStyle(node).visibility === 'visible';
-      const dialog = [...document.querySelectorAll('dialog[open],[role="dialog"],[aria-modal="true"]')].some(visible);
-      const stop = L.detectStop({url: location.href, title: document.title,
-        text: (document.body?.innerText || '').slice(0, 30000),
-        hasChallenge: !!document.querySelector('iframe[src*="challenges.cloudflare.com"],#challenge-form')});
-      const controls = [...document.querySelectorAll('button,[role="button"]')]
-        .filter(visible)
-        .map((element) => ({element, label: element.getAttribute('aria-label') || element.innerText,
-          enabled: !element.matches(':disabled,[aria-disabled="true"]') && !element.closest('[inert]')}));
-      const button = exactPage && !dialog && !stop && L.checkoutCandidate(controls);
-      if (!button) {
-        say(text + ' Continue on BookMyShow.', 'warn');
-        return;
-      }
-      const bounds = button.getBoundingClientRect();
-      const top = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
-      if (!top || !button.contains(top)) {
-        say(text + ' The checkout button is covered or off-screen. Continue on BookMyShow.', 'warn');
-        return;
-      }
-      say(text + ' Opening checkout. Complete payment on BookMyShow.', 'ok');
-      button.click();
-    }
-
     window.addEventListener('message', (e) => {
       const d = e.data;
       if (gone || e.source !== window || !d || d.src !== 'screenwatch-page' || d.token !== token) return;
       if (d.type === 'hello') { hello = true; return; }
       if (d.type === 'state') {
-        say(String(d.text || ''), d.phase === 'verified' || d.phase === 'done' ? 'ok' : d.phase === 'loading' || d.phase === 'selecting' ? 'warn' : 'bad');
-        $('go').disabled = attemptedCheckout || !d.canSelect || Date.now() < checkoutUntil;
+        clearTimeout(selectionTimer);
+        const text = String(d.text || '');
+        if (d.phase === 'done') checkoutDeadline = Date.now() + 10000;
+        const waitingForClick = d.canSelect && !autoPending;
+        const message = waitingForClick ? text + ' Click “Select seats and open checkout” to continue.' : text;
+        say(message, ['verified', 'done'].includes(d.phase) ? 'ok' : ['loading', 'selecting', 'quantity', 'quantity-manual'].includes(d.phase) ? 'warn' : 'bad');
+        $('go').disabled = !d.canSelect;
         if (autoPending && (d.phase === 'verified' || d.phase === 'quantity') && d.canSelect) {
           autoPending = false;
           selectPair();
         } else if (d.phase === 'gone' || d.phase === 'stopped') {
           autoPending = false;
-          checkoutUntil = 0;
         }
         if (d.phase === 'stopped') chrome.runtime.sendMessage({ type: 'result', ok: false, text: String(d.text || '') }).catch(() => {});
       } else if (d.type === 'result') {
-        checkoutUntil = 0;
+        clearTimeout(selectionTimer);
+        checkoutDeadline = 0;
         $('go').disabled = true;
         chrome.runtime.sendMessage({ type: 'result', ok: !!d.ok, text: String(d.text || '') }).catch(() => {});
-      } else if (d.type === 'checkout-ready') {
-        openCheckout(String(d.text || ''));
       }
     });
 
     // Only a real click by the person counts. Script-made clicks have isTrusted false and are ignored.
     function selectPair() {
       $('go').disabled = true;
-      checkoutUntil = Date.now() + 35000;
+      say('Starting seat selection…', 'warn');
+      selectionTimer = setTimeout(() => {
+        if (gone) return;
+        say('Screenwatch did not start seat selection. Click the pink button to retry.', 'warn');
+        $('go').disabled = false;
+      }, 2500);
       post('select');
     }
     $('go').addEventListener('click', (e) => {
-      if (!e.isTrusted || $('go').disabled || attemptedCheckout) return;
+      if (!e.isTrusted || $('go').disabled) return;
       selectPair();
     });
     $('no').addEventListener('click', (e) => {
       if (!e.isTrusted) return;
-      gone = true; post('dismiss'); host.remove(); clearInterval(handoffTimer);
+      closeBanner();
       chrome.runtime.sendMessage({ type: 'dismiss' }).catch(() => {});
     });
 
     // Give page.js its token and the pair. It may load a moment after this script, so repeat until it answers.
-    const detail = JSON.stringify({ token, pair, autoCheckout: autoPending });
+    const detail = JSON.stringify({ token, pair, partySize: event.partySize, allowedRows: event.allowedRows, allowedCategories: event.allowedCategories, layoutRows: event.layoutRows, autoCheckout: autoPending, autoAcceptTerms: task.autoAcceptTerms === true });
     for (let i = 0; i < 12 && !hello && !gone; i++) {
       window.dispatchEvent(new CustomEvent('screenwatch-init', { detail }));
       await sleep(i < 4 ? 250 : 1000);

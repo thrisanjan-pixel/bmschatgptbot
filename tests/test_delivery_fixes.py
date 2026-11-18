@@ -13,6 +13,9 @@ class DeliveryFixTests(unittest.TestCase):
     setUp=fixtures.ApiTests.setUp
     tearDown=fixtures.ApiTests.tearDown
     def alert(self,**values):
+        prefs.ensure(self.db)
+        self.db.execute('DELETE FROM alerts')
+        setmeta(self.db,'alerts_migration_complete','1')
         self.db.commit();prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'enabled':True,**values},create=True)
         return prefs.rules(self.db)[0]['id']
     def test_once_alert_completes_only_after_last_message(self):

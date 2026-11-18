@@ -1,6 +1,5 @@
 """Automatic Hyderabad-wide polling with durable state and delivery queue."""
 import argparse
-import fcntl
 import json
 import logging
 import os
@@ -216,6 +215,7 @@ class Runtime:
 
 
 def main():
+    import fcntl  # The browser worker's process lock is used only on Linux.
     parser=argparse.ArgumentParser()
     parser.add_argument('--db',default=os.environ.get('BMS_DB',DEFAULT_DB))
     parser.add_argument('--seconds',type=int,default=0)
@@ -228,7 +228,8 @@ def main():
     except BlockingIOError:raise SystemExit('A monitor already owns this database')
     if not args.dry_run and not args.allow_local_setup and not all(os.environ.get(k) for k in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')):
         raise SystemExit('Configure Telegram credentials securely before starting')
-    logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
+    from log_config import configure
+    configure()
     runtime=Runtime(args.db,args.dry_run,args.allow_local_setup)
     for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:runtime.stop.set())
     runtime.run(args.seconds)

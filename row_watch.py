@@ -1,5 +1,5 @@
 """Durable on-demand row loads and polling of one selected show."""
-import argparse,json,os,re,signal,subprocess,sys,time
+import argparse,json,os,re,signal,sqlite3,subprocess,sys,time
 from datetime import datetime
 from pathlib import Path
 from store import connect,meta,setmeta,emit,record_check
@@ -12,7 +12,9 @@ def schema(db):
     prefs.photo_schema(db)
     # manual=1: someone pressed Load seat rows; it runs at once on the manual budget.
     if 'manual' not in {r[1] for r in db.execute('PRAGMA table_info(row_layouts)')}:
-        db.execute('ALTER TABLE row_layouts ADD COLUMN manual INTEGER DEFAULT 0')
+        try:db.execute('ALTER TABLE row_layouts ADD COLUMN manual INTEGER DEFAULT 0')
+        except sqlite3.OperationalError as error:
+            if 'duplicate column name' not in str(error):raise
 
 def request(db,show_id):
     schema(db)
@@ -134,6 +136,7 @@ def process_seat_photos(db,show,result):
         emit(db,r['mode']+':'+r['alert_id']+':'+r['show_id']+':'+str(time.time_ns()),text,photo,alert_id=r['alert_id'])
         if r['mode']=='gate':db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,r['alert_id']))
         db.execute('DELETE FROM pending_seat_photos WHERE alert_id=? AND show_id=?',(r['alert_id'],r['show_id']))
+    prefs.release_seat_photos(db)
 
 def ingest(db,show,result):
     schema(db);old=get(db,show['id']);previous=old['data']
@@ -152,12 +155,14 @@ def ingest(db,show,result):
             # A '*' alert keeps its seat memory per showtime, so seats open at one never hide another's.
             key=rule['id']+':'+show['id'] if p['row_show']==prefs.ANY_SHOW else rule['id']
             selected=set(p.get('rows',[]))
-            signature=json.dumps([show['id'],sorted(selected)]+([p['party_size']] if p.get('party_size') else []))
+            signature=prefs.row_state_signature(show['id'],p)
             state=db.execute('SELECT signature,available FROM row_alert_state WHERE alert_id=?',(key,)).fetchone()
-            before={tuple(item) for item in json.loads(state['available'])} if state and state['signature']==signature else set()
+            same_selection=bool(state and state['signature']==signature)
+            restarted=bool(state and state['signature']=='restart:'+signature)
+            before={tuple(item) for item in json.loads(state['available'])} if same_selection else set()
             current={(s['row_id'],s['seat']) for s in result['available'] if s['row_id'] in selected}
             added=[s for s in result['available'] if s['row_id'] in selected and (s['row_id'],s['seat']) not in before]
-            if not p['notify_existing'] and (not state or state['signature']!=signature):
+            if not p['notify_existing'] and not (same_selection or restarted):
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',(key,signature,json.dumps(sorted(current))))
                 continue
             if not added:
@@ -188,7 +193,7 @@ def ingest(db,show,result):
             now=time.time()
             pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone()
             # The first message for a new row selection is never held back by the repeat gap of earlier messages.
-            fresh=not state or state['signature']!=signature
+            fresh=restarted or not same_selection
             if (fresh or now-rule['last_alert']>=p['interval_minutes']*60) and not pending:
                 opened_rows=sorted({s['row_id'] for s in added})
                 lines=[]
@@ -226,7 +231,7 @@ def targets(db,now=None):
     return sorted(active),urgent
 
 def schedule_active(db,now,interval=30):
-    schema(db);prefs.prune_seat_photos(db,now)
+    schema(db);prefs.prune_seat_photos(db,now);prefs.release_seat_photos(db)
     # A seat photo is read even when every alert is paused or finished.
     for show_id in prefs.seat_photo_shows(db,now):
         db.execute("INSERT OR IGNORE INTO row_layouts(show_id,payload) VALUES(?,'{}')",(show_id,))
@@ -292,6 +297,8 @@ def dequeue(db,show_id):
     db.execute('UPDATE row_layouts SET due=0,manual=0 WHERE show_id=?',(show_id,));db.commit()
 
 def main():
+    from log_config import configure
+    configure()
     parser=argparse.ArgumentParser();parser.add_argument('--db',required=True);args=parser.parse_args()
     if os.environ.get('BMS_ROWS_ENABLED')!='1':return
     db=connect(args.db);schema(db);db.commit();stop=False
@@ -299,8 +306,12 @@ def main():
         nonlocal stop
         stop=True
     signal.signal(signal.SIGTERM,halt);signal.signal(signal.SIGINT,halt)
+    def send_ready():
+        from local_credentials import load
+        from telegram import flush
+        if load():flush(db)
     while not stop:
-        try:step(db)
+        try:step(db,on_match=send_ready)
         except Exception as error:
             # A locked database or unexpected state must not end the worker; retry shortly.
             try:db.rollback()
@@ -309,7 +320,7 @@ def main():
             time.sleep(5)
     db.close()
 
-def step(db):
+def step(db,on_match=None):
     now=time.time()
     cloud = os.environ.get('BMS_PUBLIC')=='1'
     interval,spacing=poll_policy(db,now,cloud)
@@ -318,7 +329,7 @@ def step(db):
     job=manual_job(db,now) if cloud else None;manual=bool(job)
     job=job or next_job(db,now)
     if not job:time.sleep(1);return
-    row=db.execute('SELECT payload FROM sessions WHERE id=? AND cutoff>?',(job['show_id'],now)).fetchone()
+    row=db.execute('SELECT payload FROM sessions WHERE id=? AND cutoff>? AND active=1',(job['show_id'],now)).fetchone()
     if not row:
         db.execute("UPDATE row_layouts SET due=0,manual=0,error='Showtime has expired' WHERE show_id=?",(job['show_id'],));db.commit();return
     show=json.loads(row[0])
@@ -360,4 +371,8 @@ def step(db):
         if job['show_id'] not in queue_order(db,time.time())[2]:retry_at=0
         db.execute('UPDATE row_layouts SET error=?,due=?,manual=0 WHERE show_id=?',(message,retry_at,job['show_id']))
         db.commit()
+        return
+    # Sending is independent of the successful source read. A delivery failure
+    # must not mark the seat data as failed or postpone its next read.
+    if on_match:on_match()
 if __name__=='__main__':main()

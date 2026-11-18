@@ -2,6 +2,14 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const L = require('../seatlogic.js');
+const manifest = require('../manifest.json');
+
+test('the seat logic and page driver load together in the main world only', () => {
+  const registrations = manifest.content_scripts.filter(({ js }) => js.includes('seatlogic.js'));
+  assert.strictEqual(registrations.length, 1);
+  assert.strictEqual(registrations[0].world, 'MAIN');
+  assert.ok(registrations[0].js.indexOf('page.js') > registrations[0].js.indexOf('seatlogic.js'));
+});
 
 // Seats shaped like the live map: id "Seat-<area>-<n>-..." plus seatObj fields, seatStatus 1 free, 2 taken.
 const seat = (row, number, extra = {}) => Object.assign({
@@ -11,6 +19,32 @@ const seat = (row, number, extra = {}) => Object.assign({
 const rowOf = (row, from, to, extra) => { const list = []; for (let n = from; n <= to; n++) list.push(seat(row, n, extra)); return list; };
 const pair = { category: 'Gold', row: 'D', seats: ['8', '9'] };
 const selected = (row, number) => ({ rowNumber: row, cinemaSeatNumber: String(number), priceDesc: '3D GOLD.' });
+
+test('rankBlocks prefers the hall centre over a narrower row midpoint or an older suggested pair', () => {
+  const wide = rowOf('D', 1, 12).map((seat, i) => ({ ...seat, priceDesc: 'Gold', x: i * 25, width: 20, y: 50 }));
+  const narrow = rowOf('E', 1, 4).map((seat, i) => ({ ...seat, priceDesc: 'Gold', x: i * 25, width: 20, y: 75 }));
+  const preferred = { category: 'Gold', row: 'E', seats: ['2', '3'] };
+  const map = [...narrow, ...wide];
+  assert.deepStrictEqual(L.rankBlocks(map, 2, preferred, null)[0].pair.seats, [6, 7]);
+  assert.strictEqual(L.rankBlocks(map, 2, preferred, ['Gold / E'])[0].pair.row, 'E');
+});
+
+test('rankBlocks favours a near-centre block farther from the screen over the front row', () => {
+  const rows = [
+    ['A', 0, []],
+    ['J', 8, []],
+    ['Q', 15, [22, 23]],
+    ['R', 16, [10, 11]],
+    ['S', 17, [16, 17]]
+  ];
+  const map = rows.flatMap(([row, depth, free]) => rowOf(row, 1, 33).map((seat, i) => ({
+    ...seat, priceDesc: 'Gold', x: i * 25, width: 20, y: depth * 24,
+    seatStatus: free.includes(i + 1) ? 1 : 2
+  })));
+  const front = { category: 'Gold', row: 'S', seats: [16, 17] };
+  assert.deepStrictEqual(L.rankBlocks(map, 2, front, null)[0].pair, { category: 'Gold', row: 'Q', seats: [22, 23] });
+  assert.deepStrictEqual(L.rankBlocks(map, 2, front, ['Gold / S'])[0].pair, front);
+});
 
 test('findPair: both free gives the ids in the pair order', () => {
   const r = L.findPair(rowOf('D', 1, 12), pair);
@@ -126,16 +160,18 @@ test('checkoutCandidate requires one enabled seat-total button', () => {
   }
 });
 
-test('automatic checkout requires a fresh exact pair after local opt-in for this arming', () => {
-  const dashboard = 'https://screenwatch.example';
-  const alert = { id: 'a1', until: 1200 };
-  const grant = { dashboard, until: 1200, armedAt: 1040000 };
+test('Open on PC ignores events from before this arming, expired arms, and other alerts', () => {
+  const alert = { id: 'a1', until: 1040 + 10800 };
   const event = { alert: 'a1', created: 1041, pair };
-  const eligible = (g, e = event, a = alert) => L.canAutoCheckout(g, dashboard, a, e, 1050, 1050000);
-  assert.strictEqual(eligible(grant), true);
-  assert.strictEqual(eligible(null), false);
-  assert.strictEqual(eligible(grant, { ...event, created: 1039 }), false);
-  assert.strictEqual(eligible(grant, { ...event, alert: 'a2' }), false);
-  assert.strictEqual(eligible(grant, event, { ...alert, until: 1300 }), false);
-  assert.strictEqual(eligible(grant, { ...event, pair: { ...pair, seats: ['8', '10'] } }), false);
+  assert.strictEqual(L.isArmedEvent(alert, event, 1050), true);
+  assert.strictEqual(L.isArmedEvent(alert, { ...event, created: 1039 }, 1050), false);
+  assert.strictEqual(L.isArmedEvent(alert, { ...event, alert: 'a2' }, 1050), false);
+  assert.strictEqual(L.isArmedEvent(alert, event, 1700), false);
+  assert.strictEqual(L.isArmedEvent(alert, { ...event, created: alert.until - 1 }, alert.until), false);
+});
+
+test('an eligible event can proceed automatically only with an exact adjacent pair', () => {
+  assert.strictEqual(L.canAutoCheckout({pair}), true);
+  assert.strictEqual(L.canAutoCheckout({}), false);
+  assert.strictEqual(L.canAutoCheckout({pair: { ...pair, seats: ['8', '10'] }}), false);
 });

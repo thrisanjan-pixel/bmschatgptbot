@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Screenwatch seat helper",
-  "version": "1.2.1",
-  "description": "Opens a Screenwatch seat alert in Chrome and prepares BookMyShow checkout after your confirmation.",
+  "version": "1.2.15",
+  "description": "Opens armed Screenwatch alerts and selects the requested seats for BookMyShow checkout.",
   "minimum_chrome_version": "111",
   "permissions": ["storage", "alarms", "notifications", "tabs", "tts"],
   "host_permissions": [
@@ -16,7 +16,7 @@
   "content_scripts": [
     {
       "matches": ["https://in.bookmyshow.com/movies/*/seat-layout/*"],
-      "js": ["seatlogic.js", "content.js"],
+      "js": ["content.js"],
       "run_at": "document_idle"
     },
     {

@@ -24,6 +24,7 @@ import watch_preferences as preferences
 def check_queue(db):
     """Live view for the dashboard: alert checks coming up next and the ones just done."""
     import api_watch,row_watch
+    from http_source import LISTING_SPACING
     import watch_preferences as prefs
     now=time.time();wanted=api_watch.wanted_dates(db)
     def version(payload):
@@ -31,15 +32,17 @@ def check_queue(db):
         return shows[0]['language'].replace('•','·') if shows else ''
     def listing(row):
         payload=json.loads(row['payload'])
-        return {'kind':'showtimes','movie':payload.get('movie',''),'date':payload.get('date',''),'detail':version(payload) or 'All versions','checked':row['checked'],'error':row['error']}
+        label=version(payload)
+        event=payload.get('event','')
+        detail='Listing version · '+label if label else 'BookMyShow listing'
+        return {'kind':'showtimes','movie':payload.get('movie',''),'event':event,'date':payload.get('date',''),'detail':detail,'checked':row['checked'],'error':row['error']}
     order=api_watch.listing_order(db,now)
     alert_rows=[r for r in order if r['watched']]
     later=sorted((r for r in db.execute('SELECT * FROM jobs WHERE due>? AND (expires=0 OR expires>?)',(now,now)) if api_watch.is_watched(json.loads(r['payload']),wanted)),key=lambda r:r['due'])
     has_requests=db.execute("SELECT 1 FROM sqlite_master WHERE name='source_requests'").fetchone()
     last=(db.execute("SELECT max(at) FROM source_requests WHERE host='in.bookmyshow.com'").fetchone()[0] if has_requests else 0) or 0
-    # One listing request a minute; background work takes about one turn in five.
-    step=75 if len(order)>len(alert_rows) else 60
-    at=max(now,float(meta(db,'listing_budget_until','0')),last+60);upcoming=[]
+    step=LISTING_SPACING/(1-LISTING_SPACING/api_watch.BACKGROUND_SPACING) if len(order)>len(alert_rows) else LISTING_SPACING
+    at=max(now,float(meta(db,'listing_budget_until','0')),float(meta(db,'source_cooldown','0')),last+LISTING_SPACING);upcoming=[]
     for row in alert_rows+later:
         at=max(at,row['due']);upcoming.append({**listing(row),'eta':at});at+=step
     for item in row_watch.queue(db,now):
@@ -57,16 +60,21 @@ def check_queue(db):
         else:continue
         recent.append({**item,'at':stat['last_attempt'],'ok':stat['last_success']>=stat['last_attempt'],'error':stat['error']})
         if len(recent)>=8:break
-    return {'now':now,'upcoming':upcoming[:10],'recent':recent}
+    return {'now':now,'upcoming':upcoming[:10],'recent':recent,'deliveries':prefs.pending_deliveries(db,now)}
 
 
 def listing_queue(db):
     """Read-only view of the listing jobs alerts depend on, in the order they are due."""
     from api_watch import is_watched,wanted_dates
     wanted=wanted_dates(db)
-    rows=[dict(id=r['id'][-60:],movie=json.loads(r['payload']).get('movie',''),date=json.loads(r['payload']).get('date',''),due=r['due'],checked=r['checked'],expires=r['expires'],error=r['error'])
-          for r in db.execute('SELECT id,payload,due,checked,expires,error FROM jobs') if is_watched(json.loads(r['payload']),wanted)]
-    return sorted(rows,key=lambda r:r['due'])[:30]
+    rows=[]
+    for row in db.execute('SELECT id,payload,due,checked,expires,error FROM jobs WHERE expires=0 OR expires>? ORDER BY due',(time.time(),)):
+        payload=json.loads(row['payload'])
+        if is_watched(payload,wanted):
+            rows.append(dict(id=row['id'][-60:],movie=payload.get('movie',''),event=payload.get('event',''),
+                date=payload.get('date',''),due=row['due'],checked=row['checked'],expires=row['expires'],error=row['error']))
+            if len(rows)>=30:break
+    return rows
 
 def status(path):
     db=connect(path)
@@ -78,6 +86,8 @@ def status(path):
         health_issues=json.loads(meta(db,'health_watch_issues','{}'))
         return {'reliability':{'requests':[dict(r) for r in db.execute('SELECT at,host,endpoint,status,retry_after,cf_ray,outcome FROM source_requests ORDER BY at DESC LIMIT 12')] if db.execute("SELECT 1 FROM sqlite_master WHERE name='source_requests'").fetchone() else [],'checks':[dict(r) for r in db.execute('SELECT * FROM check_stats ORDER BY last_attempt DESC LIMIT 100')],
                 'listing_queue':listing_queue(db),
+                'blocked_checks':{'count':int(meta(db,'listing_blocked_count','0')),'last_at':float(meta(db,'listing_blocked_at','0'))},
+                'source_observations':{str(code):json.loads(meta(db,'source_observation:in.bookmyshow.com:'+str(code),'{}')) for code in (200,403,429)},
                 'issues':health_issues,'health_heartbeat':float(meta(db,'health_watch_heartbeat','0')),
                 'row_heartbeat':float(meta(db,'row_reader_heartbeat','0')),
                 'delivery':dict(db.execute("SELECT count(*) AS pending,coalesce(max(attempts),0) AS attempts,coalesce(min(created),0) AS oldest FROM outbox WHERE delivered=0").fetchone()),
@@ -251,6 +261,26 @@ def handler(path, public=False):
                 except sqlite3.Error:self.reply('Seat reader is busy. Please retry shortly.',503);return
                 except (ValueError,TypeError) as e:self.reply(html.escape(str(e)),400);return
                 self.reply_json({'queue':items});return
+            if self.path=='/api/deliveries':
+                # Cancel one waiting Telegram message or seat-map read ({"id":...}) or all of them ({"all":true}).
+                if not self.authorized():return
+                if (not public and not self.local_host()) or not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<2048:raise ValueError('Invalid request')
+                    data=json.loads(self.rfile.read(length))
+                    if not isinstance(data,dict):raise ValueError('Invalid request')
+                    item_id=None if data.get('all') is True else data.get('id')
+                    if data.get('all') is not True and not isinstance(item_id,str):raise ValueError('Choose a queued alert')
+                    import watch_preferences as prefs
+                    db=connect(path)
+                    try:
+                        db.execute('BEGIN IMMEDIATE');prefs.cancel_deliveries(db,item_id);db.commit()
+                        items=prefs.pending_deliveries(db)
+                    finally:db.close()
+                except sqlite3.Error:self.reply('The queue is busy. Please retry shortly.',503);return
+                except (ValueError,TypeError) as e:self.reply(html.escape(str(e)),400);return
+                self.reply_json({'deliveries':items});return
             if self.path=='/api/health-settings':
                 if not self.authorized():return
                 if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return

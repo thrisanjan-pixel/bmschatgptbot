@@ -1,6 +1,6 @@
 # Screenwatch seat helper (Chrome extension)
 
-When an alert with "Open on PC" armed fires, this extension opens the BookMyShow seat page in a new tab, highlights the two seats the alert named and waits. Press **Select seats and open checkout**. The extension verifies the pair again, selects it, and opens the checkout flow when it can identify the seat-map button. You finish payment on BookMyShow.
+When an alert with "Open on PC" armed fires, this extension opens the BookMyShow seat page in a new tab. For a row alert with two adjacent seats, the extension verifies the pair, selects it, and opens checkout automatically. You finish payment on BookMyShow.
 
 ## Install
 
@@ -15,12 +15,13 @@ The dashboard address is in the pop-up. Changing it to another https address mak
 ## Use
 
 1. In the dashboard, switch **Open on PC** on for an alert. It stays armed for 3 hours (the alert card shows "Opens on PC · until 9:40 pm"). Arming only works while the extension is running on this PC.
-2. For an exact pair, the alert must be a row alert with **Seats together = 2**. The alert message then names the pair ("Best 2 together"), and the banner shows the section, row and seat numbers. Without a pair the banner says "This alert names no exact pair. Pick seats yourself." and has no button.
+2. Set **Minimum seats open** in the dashboard alert. For 1–10 seats, the extension looks for an adjacent group at the exact showtime that triggered the alert. Selecting rows is optional. Chrome respects your saved rows and seat types when you choose them. Higher counts are for notifications.
 3. When the alert fires, a tab opens and Chrome comes to the front with a notification and a spoken "Seats open. Check Chrome."
-4. Press **Select seats and open checkout** when the banner is ready. If the seat-count dialog is open, the extension chooses two before verifying the exact pair. Take over when BookMyShow opens **Grab a Bite!** or the order summary. Review any terms that appear.
+4. The extension checks the live map. It tries the seats named in the alert when available and otherwise looks for the most central adjacent group of the requested size that matches your alert. Take over at **Grab a Bite!** or the order summary.
 5. The dashboard switch turns itself off after the page opens.
 
-For automatic selection, arm **Open on PC** for the alert first. In the extension pop-up, choose **Auto checkout once** next to that armed alert. The next matching alert with an exact pair can select those seats and open checkout without a second click. Use **Turn auto off** to revoke that permission while leaving Open on PC armed. Restarting Chrome clears it. BookMyShow prompts and payment are yours to handle.
+To accept the cinema terms during automatic checkout, open the extension popup and turn on **Accept BookMyShow cinema terms automatically**. The switch is off by default. The extension can accept a recognized cinema terms dialog in the same tab after verifying the selected pair. Other prompts need your review.
+
 
 ## Cancel
 
@@ -29,11 +30,11 @@ Press **Cancel** next to the alert in the extension pop-up, or turn the switch o
 ## What it never does
 
 - It acts on BookMyShow only in a tab it opened for a fresh armed alert (under 10 minutes old), and only for the show that alert names.
-- It selects seats after a real click on the seat banner or a one-use permission granted for that alert in the extension pop-up.
-- It can click the seat map’s total button once after your confirmation and exact selection. It stops when the flow leaves the seat map. You handle terms, consent, and the final payment controls yourself.
+- Turning on **Open on PC** authorizes one automatic attempt for the next matching alert. It ignores alert messages from before that switch was turned on.
+- It can click the seat map’s total button once after it confirms an eligible pair is selected. You handle the final payment controls yourself.
 - It never reads or sends cookies or page data to the dashboard. The dashboard only receives "opened" and "cancel" for an alert.
-- It never retries around a sign-in page, CAPTCHA, queue or waiting room, Cloudflare check, "Access denied" page or terms pop-up. It stops and tells you where to take over. After you accept a terms pop-up, the highlighting resumes.
-- If the pair is no longer free it stops. It never picks other seats. If BookMyShow picks different neighbours, it tells you and leaves them for you to fix.
+- It stops for a sign-in page, CAPTCHA, queue or waiting room, Cloudflare check, or access denial.
+- If no adjacent pair is available in the selected rows, it stops. If BookMyShow selects a pair outside those rows, the extension asks you to take over.
 
 ## Troubleshooting
 

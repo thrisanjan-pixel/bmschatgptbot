@@ -23,7 +23,7 @@ class ImprovementTests(RowTests):
   self.configure()
   self.db.execute("UPDATE row_layouts SET error='Seat source HTTP 403'");self.db.commit()
   health=prefs.rules(self.db)[0]['health']
-  self.assertEqual(health['label'],'Source unavailable')
+  self.assertEqual(health['label'],'BMS blocked one check')
   self.assertGreater(health['last_success'],0)
  def test_future_only_category_skips_initial_available_notification(self):
   row_watch.ingest(self.db,self.show,copy.deepcopy(self.result))
