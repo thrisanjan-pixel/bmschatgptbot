@@ -78,6 +78,7 @@ Every request to BookMyShow goes through `http_source.open_request`, which keeps
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
+| `BMS_BACKGROUND_LISTINGS` | `1` | `0` stops listing checks for movies no alert asks for while an alert has listings to check, so alert listings get every showtime request. |
 | `BMS_SEAT_GAP` | `60` | Seconds between seat-layout requests; the hourly seat limit becomes 3600 divided by it. Never below 20: a one-hour test at 20 s got no 429, while 10 s drew a 21-hour block. |
 | `BMS_REQUEST_JITTER` | `15` | Maximum random extra seconds between alert checks to one host. `0` turns jitter off. |
 | `BMS_403_BACKOFF_BASE` | `180` | First rest after a 403, in seconds. It doubles on each repeat. |

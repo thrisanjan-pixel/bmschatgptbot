@@ -241,7 +241,10 @@ def listing_order(db, now):
     # Listing requests are one a minute, so a 60 s window would hand background
     # work every turn. Give it at most one turn in five.
     background_recent = now-float(meta(db,'listing_background_attempt','0')) < BACKGROUND_SPACING
-    background_paused = float(meta(db, 'background_cooldown_until', '0')) > now
+    # BMS_BACKGROUND_LISTINGS=0 gives every listing request to alert listings while any alert
+    # watches one; movies no alert asks for wait until no alert listing is due.
+    background_paused = float(meta(db, 'background_cooldown_until', '0')) > now or (
+        os.environ.get('BMS_BACKGROUND_LISTINGS','1')=='0' and bool(movies))
     rows = db.execute(f"""WITH eligible AS (
         SELECT *, id IN ({slots}) AS watched
         FROM jobs WHERE due<=? AND (expires=0 OR expires>?)
