@@ -19,8 +19,11 @@ class ReadError(RuntimeError):
         super().__init__(message);self.status=status;self.retry=retry
 
 class WrongDateError(ReadError):
-    def __init__(self,message):
+    """unlisted=True: the right event, but BookMyShow answered another date because it does
+    not list the requested one (it falls back to its first date, usually today)."""
+    def __init__(self,message,unlisted=False):
         super().__init__(message,status=0,retry=300)
+        self.unlisted=unlisted
 
 def today():return dt.datetime.now(IST).strftime('%Y%m%d')
 def end_day(day):return (dt.datetime.strptime(day,'%Y%m%d').replace(tzinfo=IST)+dt.timedelta(days=1)).timestamp()
@@ -111,8 +114,10 @@ def parse(data,event,requested_day='',now=None):
     now=dt.datetime.now(IST).timestamp() if now is None else now
     body=data.get('data',{});identity=body.get('additionalData',{})
     day=str(identity.get('dateCode',''))
-    if identity.get('eventCode')!=event or not re.fullmatch(r'\d{8}',day) or (requested_day and requested_day!=day):
+    if identity.get('eventCode')!=event or not re.fullmatch(r'\d{8}',day):
         raise WrongDateError('Screening event/date mismatch')
+    if requested_day and requested_day!=day:
+        raise WrongDateError('Requested date is not listed',unlisted=True)
     if not isinstance(body.get('showtimeWidgets'),list):raise ReadError('Showtime schema changed')
     dates=set();variants=set();language='';film=''
     for widget in body.get('topStickyWidgets',[]):

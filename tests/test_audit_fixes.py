@@ -93,3 +93,26 @@ class AlertStateTests(unittest.TestCase):
         setmeta(self.db, 'health_watch_issues', json.dumps({key: 'No successful check for Test Movie'}));self.db.commit()
         health_watch.check(self.db)
         self.assertIsNone(self.db.execute("SELECT 1 FROM outbox WHERE text LIKE '%recovered%'").fetchone())
+
+
+class UnlistedDateTests(unittest.TestCase):
+    def test_unlisted_date_is_a_successful_check_with_no_shows(self):
+        import api_source, api_watch
+        from api_source import parse
+        tmp = tempfile.TemporaryDirectory();db = connect(str(Path(tmp.name) / 's.db'))
+        try:
+            show = next(iter(parse(response(status='3'), EVENT, DAY)['shows'].values()))
+            db.execute('INSERT INTO sessions VALUES(?,?,?,1)', (show['id'], json.dumps(show), show['cutoff']))
+            job_id = 'discovery:' + show_url(EVENT, DAY)
+            db.execute("INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,'discovery',?,?,0)",
+                (job_id, show_url(EVENT, DAY), json.dumps({'event': EVENT, 'date': DAY, 'movie': 'Test Movie'})))
+            db.commit()
+            data = response();data['data']['additionalData']['dateCode'] = '20000101'
+            with self.assertRaises(api_source.WrongDateError) as caught:parse(data, EVENT, DAY)
+            job = db.execute('SELECT * FROM jobs').fetchone()
+            api_watch.record_listing_failure(db, job, caught.exception, 990, 1000)
+            self.assertEqual(tuple(db.execute('SELECT checked,due,error FROM jobs').fetchone()), (1000, 1300, ''))
+            self.assertEqual(db.execute('SELECT active FROM sessions').fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT failures FROM check_stats WHERE source='listings'").fetchone()[0], 0)
+        finally:
+            db.close();tmp.cleanup()

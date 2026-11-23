@@ -261,9 +261,23 @@ def listing_order(db, now):
 
 
 def record_listing_failure(db, job, error, started, now):
+    if isinstance(error, WrongDateError) and error.unlisted:
+        # BookMyShow does not list this date for this version: a successful check that found no
+        # shows. Its showtimes stop matching alerts, and an empty baseline makes them count as
+        # new if BookMyShow lists the date again.
+        args=json.loads(job['payload'])
+        for old in db.execute('SELECT id,payload FROM sessions WHERE active=1').fetchall():
+            show=json.loads(old['payload'])
+            if show.get('event')==args.get('event') and show.get('date')==args.get('date'):
+                db.execute('UPDATE sessions SET active=0 WHERE id=?',(old['id'],))
+        key='api:'+str(args.get('event'))+':'+str(args.get('date'))
+        db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',(key,'{}'))
+        db.execute('DELETE FROM snapshots WHERE id>=? AND id<?',(key+'#',key+'$'))
+        db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(now,now+error.retry,job['id']))
+        record_check(db,'listings',job['id'],started,now=now)
+        return 'Date not listed by BookMyShow; no shows'
     if isinstance(error, WrongDateError):
-        # BookMyShow answers a date it no longer lists for this version with another date (usually today).
-        message='BookMyShow is not listing this date for this version right now'
+        message='BookMyShow answered for another event or an invalid date'
         db.execute('UPDATE jobs SET due=?,error=? WHERE id=?',(now+error.retry,message,job['id']))
         record_check(db,'listings',job['id'],started,message,now=now)
         return message

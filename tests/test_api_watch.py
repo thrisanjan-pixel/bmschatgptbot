@@ -145,10 +145,15 @@ def test_wrong_date_retries_only_the_affected_listing(tmp_path):
         try:
             api_source.parse(data,EVENT,DAY)
         except api_source.WrongDateError as error:
-            assert api_watch.record_listing_failure(db,job,error,990,1000)=='BookMyShow is not listing this date for this version right now'
+            assert error.unlisted
+            data['data']['additionalData']['eventCode']='ET99999999'
+            try:api_source.parse(data,EVENT,DAY)
+            except api_source.WrongDateError as other:error=other
+            assert not error.unlisted
+            assert api_watch.record_listing_failure(db,job,error,990,1000)=='BookMyShow answered for another event or an invalid date'
         else:
             raise AssertionError('Expected the mismatched response to be rejected')
-        assert tuple(db.execute('SELECT due,checked,error FROM jobs').fetchone())==(1300,0,'BookMyShow is not listing this date for this version right now')
+        assert tuple(db.execute('SELECT due,checked,error FROM jobs').fetchone())==(1300,0,'BookMyShow answered for another event or an invalid date')
         assert meta(db,'source_cooldown')=='2000'
         assert json.loads(db.execute('SELECT payload FROM snapshots').fetchone()[0])=={'kept':True}
         assert db.execute('SELECT count(*) FROM outbox').fetchone()[0]==0
