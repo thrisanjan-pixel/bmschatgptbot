@@ -55,8 +55,9 @@ def reserve(db,url,now=None,manual=False,metadata=False):
         limit,gap=(policies,MANUAL,METADATA)[lane][parts.netloc]
         row=db.execute('SELECT not_before FROM source_hosts WHERE host=?',(parts.netloc,)).fetchone()
         count,oldest=db.execute('SELECT count(*),min(at) FROM source_requests WHERE host=? AND at>? AND manual=?',(parts.netloc,now-3600,lane)).fetchone()
-        # Manual and metadata reads keep their gap from any read; alert reads only from other alert reads.
-        last=db.execute('SELECT max(at) FROM source_requests WHERE host=? AND at>?'+('' if lane else ' AND manual=0'),(parts.netloc,now-3600)).fetchone()[0]
+        # Every lane honors the host spacing, including manual and metadata reads.
+        gap=max(gap,policies[parts.netloc][1])
+        last=db.execute('SELECT max(at) FROM source_requests WHERE host=? AND at>?',(parts.netloc,now-3600)).fetchone()[0]
         until=max(row[0] if row else 0,(last+gap) if last is not None else 0,(oldest+3600) if count>=limit else 0)
         if until>now:raise SourceWait(until)
         cursor=db.execute('INSERT INTO source_requests(at,host,endpoint,manual) VALUES(?,?,?,?)',(now,parts.netloc,parts.path,lane))

@@ -17,18 +17,23 @@ class SourceBudgetTests(unittest.TestCase):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1060)
  def test_manual_reads_have_their_own_budget_but_honor_cooldowns(self):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000)
-  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1010,manual=True)
-  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1015,manual=True)
-  for n in range(1,10):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1010+n*10,manual=True)
-  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1200,manual=True)
-  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1200)
+  with self.assertRaises(source.SourceWait) as error:
+   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1010,manual=True)
+  self.assertEqual(error.exception.until,1060)
+  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1060,manual=True)
+  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1115,manual=True)
+  for n in range(1,10):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1060+n*60,manual=True)
+  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1660,manual=True)
+  source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1660)
   self.db.execute("INSERT INTO source_hosts VALUES('services-in.bookmyshow.com',9999)");self.db.commit()
   with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4700,manual=True)
  def test_seat_metadata_lane_is_not_starved_by_listing_checks(self):
   for n in range(5):source.reserve(self.db,'https://in.bookmyshow.com/api/x',1000+n*60)
   with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/x',1250)
-  source.reserve(self.db,'https://in.bookmyshow.com/api/x',1250,metadata=True)
-  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/x',1255,metadata=True)
+  with self.assertRaises(source.SourceWait):
+   source.reserve(self.db,'https://in.bookmyshow.com/api/x',1250,metadata=True)
+  source.reserve(self.db,'https://in.bookmyshow.com/api/x',1300,metadata=True)
+  with self.assertRaises(source.SourceWait):source.reserve(self.db,'https://in.bookmyshow.com/api/x',1359,metadata=True)
  def test_rolling_hour_cap_counts_every_attempt(self):
   for n in range(60):source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',1000+n*60)
   with self.assertRaises(source.SourceWait) as error:source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',4599)

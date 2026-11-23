@@ -16,6 +16,7 @@ class DeliveryFixTests(unittest.TestCase):
         self.db.commit();prefs.save(self.db,{**prefs.defaults(),'movies':['Test Movie'],'enabled':True,**values},create=True)
         return prefs.rules(self.db)[0]['id']
     def test_once_alert_completes_only_after_last_message(self):
+        setmeta(self.db,'watch_preferences','{}')  # This scenario has no other active alert.
         a=self.alert(once=True)
         for i in range(3):emit(self.db,f'm{i}',f'message {i}',alert_id=a)
         self.db.commit()

@@ -18,6 +18,10 @@ class ReadError(RuntimeError):
     def __init__(self,message,status=0,retry=300):
         super().__init__(message);self.status=status;self.retry=retry
 
+class WrongDateError(ReadError):
+    def __init__(self,message):
+        super().__init__(message,status=0,retry=300)
+
 def today():return dt.datetime.now(IST).strftime('%Y%m%d')
 def end_day(day):return (dt.datetime.strptime(day,'%Y%m%d').replace(tzinfo=IST)+dt.timedelta(days=1)).timestamp()
 def seat_layout_url(show):
@@ -108,7 +112,7 @@ def parse(data,event,requested_day='',now=None):
     body=data.get('data',{});identity=body.get('additionalData',{})
     day=str(identity.get('dateCode',''))
     if identity.get('eventCode')!=event or not re.fullmatch(r'\d{8}',day) or (requested_day and requested_day!=day):
-        raise ReadError('Screening event/date mismatch')
+        raise WrongDateError('Screening event/date mismatch')
     if not isinstance(body.get('showtimeWidgets'),list):raise ReadError('Showtime schema changed')
     dates=set();variants=set();language='';film=''
     for widget in body.get('topStickyWidgets',[]):

@@ -54,8 +54,10 @@ class StoreTests(unittest.TestCase):
         with patch('telegram.send',side_effect=DeliveryError(429,60)):drain(self.db)
         row=self.db.execute('SELECT * FROM outbox').fetchone()
         self.assertEqual(row['delivered'],0);self.assertEqual(row['attempts'],1);self.assertGreater(row['next_try'],time.time()+50)
-        self.db.execute('UPDATE outbox SET next_try=0');self.db.commit()
-        with patch('telegram.send') as send:drain(self.db);send.assert_called_once()
+        with patch('telegram.send') as send:drain(self.db);send.assert_not_called()
+        retry_at=row['next_try']+1
+        with patch('telegram.time.time',return_value=retry_at),patch('telegram.send') as send:
+            drain(self.db);send.assert_called_once()
         self.assertEqual(coverage(self.db)['pending_alerts'],0)
     def test_restart_retains_snapshot_and_pending_delivery(self):
         snapshot(self.db,'s',{},str);snapshot(self.db,'s',{'B1':{}},str);self.db.commit();self.db.close();self.db=connect(self.path)

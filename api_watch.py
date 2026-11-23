@@ -10,7 +10,7 @@ from pathlib import Path
 import signal
 import threading
 import time
-from api_source import CATALOG,ReadError,end_day,get_json,movies,no_regional_shows,parse,seat_layout_url,show_url,today
+from api_source import CATALOG,ReadError,WrongDateError,end_day,get_json,movies,no_regional_shows,parse,seat_layout_url,show_url,today
 from http_source import SourceWait
 from local_credentials import load
 from store import connect,coverage,emit,enqueue,meta,setmeta,record_check
@@ -252,6 +252,12 @@ def listing_order(db, now):
 
 
 def record_listing_failure(db, job, error, started, now):
+    if isinstance(error, WrongDateError):
+        message='Wrong date response'
+        db.execute('UPDATE jobs SET due=?,error=? WHERE id=?',(now+error.retry,message,job['id']))
+        record_check(db,'listings',job['id'],started,message,now=now)
+        return message
+
     status = error.status if isinstance(error, ReadError) else 0
     # A transport error or status-0 read retries after the 60 s request gap the budget already enforces.
     delay = error.retry if isinstance(error, ReadError) and error.status else 60
@@ -294,9 +300,16 @@ class Monitor:
     def __init__(self,path,dry_run=False):self.path=path;self.dry_run=dry_run;self.stop=threading.Event()
     def worker(self):
         db=connect(self.path)
+        next_heartbeat=0
         try:
             while not self.stop.is_set():
-                try:self.check(db)
+                try:
+                    monotonic_now=time.monotonic()
+                    if monotonic_now>=next_heartbeat:
+                        setmeta(db,'listing_worker_heartbeat',time.time())
+                        db.commit()
+                        next_heartbeat=monotonic_now+5
+                    self.check(db)
                 except Exception as error:
                     # A locked database must not end the only listing worker; retry shortly.
                     try:db.rollback()

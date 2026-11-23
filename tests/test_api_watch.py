@@ -126,3 +126,29 @@ class UpcomingTests(unittest.TestCase):
         later=response('1','1');shows=later['data']['showtimeWidgets'][0]['data'][0]['data'][0]['showtimes'];shows.append(copy.deepcopy(shows[0]));shows[1]['additionalData']['sessionId']='2'
         ingest(self.db,self.job,later)
         self.assertEqual(len(texts()),2);self.assertIn('New show',texts()[1]);self.assertNotIn('Booking open',texts()[1])
+
+
+def test_wrong_date_retries_only_the_affected_listing(tmp_path):
+    import json
+    import api_source
+    import api_watch
+    from contextlib import closing
+    from store import connect, meta, setmeta
+
+    with closing(connect(str(tmp_path/'state.sqlite3'))) as db:
+        api_watch.schedule(db,EVENT,DAY,'Movie')
+        job=db.execute('SELECT * FROM jobs').fetchone()
+        data=response()
+        data['data']['additionalData']['dateCode']='20000101'
+        db.execute('INSERT INTO snapshots(id,payload) VALUES(?,?)',('existing',json.dumps({'kept':True})))
+        setmeta(db,'source_cooldown','2000')
+        try:
+            api_source.parse(data,EVENT,DAY)
+        except api_source.WrongDateError as error:
+            assert api_watch.record_listing_failure(db,job,error,990,1000)=='Wrong date response'
+        else:
+            raise AssertionError('Expected the mismatched response to be rejected')
+        assert tuple(db.execute('SELECT due,checked,error FROM jobs').fetchone())==(1300,0,'Wrong date response')
+        assert meta(db,'source_cooldown')=='2000'
+        assert json.loads(db.execute('SELECT payload FROM snapshots').fetchone()[0])=={'kept':True}
+        assert db.execute('SELECT count(*) FROM outbox').fetchone()[0]==0

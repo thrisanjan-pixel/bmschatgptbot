@@ -163,7 +163,7 @@ def read(show,timeout=20,manual=False):
     body=b''.join((f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n').encode()
         for key,value in fields.items())+f'--{boundary}--\r\n'.encode()
     headers={'Content-Type':'multipart/form-data; boundary='+boundary,'Accept':'application/json',
-        'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145.0.0.0 Safari/537.36',
+        'User-Agent':'BMSLocalNotifier/0.1',
         'x-app-code':'WEB','x-region-code':'HYD','x-region-slug':'hyderabad','x-platform-code':'DESKTOP-WEB',
         'x-location-selection':'manual','Referer':url}
     request=urllib.request.Request(ENDPOINT,body,headers)
