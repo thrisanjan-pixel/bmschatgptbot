@@ -5,8 +5,8 @@ import json
 import re
 import urllib.error
 import urllib.parse
-import urllib.request
 from http_source import open_request
+from curl_cffi import requests as cffi_requests
 from zoneinfo import ZoneInfo
 
 IST=ZoneInfo('Asia/Kolkata')
@@ -39,10 +39,10 @@ def nodes(value):
 def refusal_details(error):
     # Never persist cookies, authorization headers or response bodies.
     allowed=('Retry-After','Server','Content-Type','CF-Mitigated')
-    headers={key: str(error.headers.get(key))[:160] for key in allowed
-             if error.headers and error.headers.get(key) is not None}
-    return {'status':error.code,'headers':headers}
-
+    headers={}
+    if hasattr(error, 'response') and error.response:
+        headers={key: str(error.response.headers.get(key))[:160] for key in allowed if error.response.headers.get(key) is not None}
+    return {'status':error.response.status_code if hasattr(error,'response') and error.response else 0,'headers':headers}
 
 def retry_delay(status, header=None):
     minimum = {403: 180}.get(status, 60 if 500 <= status <= 599 else 300)
@@ -57,22 +57,26 @@ def retry_delay(status, header=None):
     except (TypeError, ValueError, OverflowError):
         return minimum
 
-
 def get_json(url):
     p=urllib.parse.urlparse(url)
     if p.scheme!='https' or p.netloc not in ('in.bookmyshow.com','in-cdn.bmscdn.com'):raise ReadError('Invalid source host')
-    req=urllib.request.Request(url,headers={'User-Agent':'BMSLocalNotifier/0.1','Accept':'application/json',
-        'x-app-code':'WEB','x-region-code':'HYD','x-region-slug':'hyderabad','x-platform-code':'DESKTOP-WEB','x-location-selection':'manual'})
     try:
-        with open_request(req,timeout=25) as response:return json.load(response)
-    except urllib.error.HTTPError as error:
-        status=error.code
-        retry=retry_delay(status,error.headers.get('Retry-After') if error.headers else None)
-        failure=ReadError(f'Source HTTP {status}',status,retry)
-        failure.diagnostic=refusal_details(error)
-        error.close()
+        with open_request(url,timeout=25) as response:
+            return response.json()
+    except Exception as error:
+        from http_source import SourceWait
+        if isinstance(error, (ReadError, SourceWait)):
+            raise
+        
+        status = 0
+        headers = {}
+        if hasattr(error, 'response') and error.response is not None:
+            status = error.response.status_code
+            headers = error.response.headers
+        retry = retry_delay(status, headers.get('Retry-After'))
+        failure = ReadError(f'Source HTTP {status}' if status else 'Source connection or JSON error', status, retry)
+        failure.diagnostic = refusal_details(error)
         raise failure from None
-    except (OSError,ValueError,urllib.error.URLError):raise ReadError('Source connection or JSON error') from None
 
 def movies(data):
     if not isinstance(data.get('listings'),list):raise ReadError('Catalogue schema changed')
