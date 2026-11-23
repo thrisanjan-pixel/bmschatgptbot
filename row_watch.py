@@ -55,8 +55,9 @@ def mark_sold_out(db,show_id,now,confirmed):
     data['available']=[];data['seats']=[{**seat,'available':False} for seat in data.get('seats',[])];data['sold_out']=True
     # Forget seats remembered as open for this showtime, so released seats alert again.
     db.execute("UPDATE row_alert_state SET available='[]' WHERE signature LIKE ?",(json.dumps([show_id])[:-1]+',%',))
-    db.execute('UPDATE row_layouts SET payload=?,error=?,sold_out_at=CASE WHEN ? THEN ? ELSE sold_out_at END WHERE show_id=?',
-        (json.dumps(data),'Sold out',int(confirmed),now,show_id))
+    # A sold-out answer (from the seat source or the listing probe) is a successful check.
+    db.execute('UPDATE row_layouts SET payload=?,error=?,checked=?,sold_out_at=CASE WHEN ? THEN ? ELSE sold_out_at END WHERE show_id=?',
+        (json.dumps(data),'Sold out',now,int(confirmed),now,show_id))
 
 def request(db,show_id):
     schema(db)
