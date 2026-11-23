@@ -274,3 +274,11 @@ class HomeWorkerTests(ProbeTests):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SoldOutHealthTests(ProbeTests):
+    def test_sold_out_alert_is_not_source_unavailable(self):
+        self.db.execute("UPDATE row_layouts SET error='Sold out',checked=? WHERE show_id=?", (time.time(), self.show['id']));self.db.commit()
+        health = next(r for r in prefs.rules(self.db) if r['status'] == 'active')['health']
+        self.assertEqual(health['label'], 'Sold out · watching for released seats')
+        self.assertEqual(health['error'], '')
