@@ -76,8 +76,11 @@ def status(path):
         if time.time()-heartbeat>90:state='stale'
         from health_watch import hosting_status
         health_issues=json.loads(meta(db,'health_watch_issues','{}'))
+        alert_health=[rule['health'] for rule in preferences.rules(db) if rule['status']=='active']
         return {'reliability':{'requests':[dict(r) for r in db.execute('SELECT at,host,endpoint,status,retry_after,cf_ray,outcome FROM source_requests ORDER BY at DESC LIMIT 12')] if db.execute("SELECT 1 FROM sqlite_master WHERE name='source_requests'").fetchone() else [],'checks':[dict(r) for r in db.execute('SELECT * FROM check_stats ORDER BY last_attempt DESC LIMIT 100')],
                 'listing_queue':listing_queue(db),
+                'refused_alerts':sum(h['source_refused'] for h in alert_health),
+                'verification_failed_alerts':sum(h['verification_failed'] for h in alert_health),
                 'issues':health_issues,'health_heartbeat':float(meta(db,'health_watch_heartbeat','0')),
                 'row_heartbeat':float(meta(db,'row_reader_heartbeat','0')),
                 'delivery':dict(db.execute("SELECT count(*) AS pending,coalesce(max(attempts),0) AS attempts,coalesce(min(created),0) AS oldest FROM outbox WHERE delivered=0").fetchone()),

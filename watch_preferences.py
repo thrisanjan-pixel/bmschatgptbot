@@ -92,9 +92,10 @@ def rules(db):
         message=db.execute('SELECT text FROM outbox WHERE alert_id=? ORDER BY created DESC LIMIT 1',(rule['id'],)).fetchone()
         link=re.search(r'https://in\.bookmyshow\.com/movies/hyderabad/seat-layout/[A-Za-z0-9/]+',message[0]) if message else None
         rule['booking_url']=link[0] if link else ''
-        checked=0;error='';due=0;waiting_for_bookings=False
+        checked=0;error='';due=0;waiting_for_bookings=False;source_rows=[]
         if p['row_show'] and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='row_layouts'").fetchone():
             layouts=db.execute(f"SELECT show_id,checked,error,due FROM row_layouts WHERE show_id IN ({','.join('?'*len(targets))})",targets).fetchall() if targets else []
+            source_rows=layouts
             read=[l['checked'] for l in layouts if l['checked']>0]
             # The oldest read is the health signal: one fresh showtime must not hide stale ones.
             checked=min(read) if read else 0
@@ -104,7 +105,14 @@ def rules(db):
                 latest=db.execute(f"SELECT job_key FROM check_stats WHERE source='rows' AND job_key IN ({','.join('?'*len(targets))}) ORDER BY last_attempt DESC LIMIT 1",targets).fetchone()
                 error=next((l['error'] for l in layouts if latest and l['show_id']==latest[0]),'')
         elif not p['row_show']:
-            jobs=[r for r in db.execute('SELECT id,payload,checked,error,due FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
+            movies={normalized(movie) for movie in p['movies']}
+            jobs=[]
+            for job in db.execute('SELECT id,payload,checked,error,due FROM jobs'):
+                payload=json.loads(job['payload'])
+                if normalized(payload.get('movie','')) in movies:
+                    jobs.append(job)
+                    if not p['dates'] or not payload.get('date') or payload['date'] in p['dates']:
+                        source_rows.append(job)
             checked=max((r['checked'] for r in jobs),default=0)
             # Report the latest listing check, not an old failure on any of the movie's listings.
             ids=[r['id'] for r in jobs];latest=None
@@ -122,7 +130,15 @@ def rules(db):
         delivery=db.execute('SELECT count(*),coalesce(max(attempts),0) FROM outbox WHERE alert_id=? AND delivered=0',(rule['id'],)).fetchone()
         # Routine 1-minute spacing is normal; only a long budget wait is worth showing.
         health='Source unavailable' if error else 'Waiting for request budget' if budget>now+300 else 'Checks delayed' if checked and cooldown<=now and time.time()-checked>(max(180,240*row_count) if p['row_show'] else 180) else 'Watching seats' if p['row_show'] else 'Waiting for bookings' if waiting_for_bookings else 'Watching availability' if checked else 'Waiting for listings'
+        refusals=[target for target in source_rows if re.search(r'\bHTTP (403|429)\b',target['error'] or '')]
+        source_refused=rule['status']=='active' and bool(refusals)
+        verification_failed=source_refused and any(
+            now-(target['checked'] or rule['created'])>=300 for target in refusals
+        )
+        if verification_failed:health='VERIFICATION_FAILED'
+        elif source_refused and not error:health='Source refused a check'
         rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'retry_until':max(cooldown,budget) if max(cooldown,budget)>now else 0,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
+        rule['health'].update(source_refused=source_refused,verification_failed=verification_failed)
         keys=targets if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
         source='rows' if p['row_show'] else 'listings'
         intervals=[]

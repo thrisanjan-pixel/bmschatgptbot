@@ -5,10 +5,11 @@ import time
 
 
 def connect(path):
-    db = sqlite3.connect(path, timeout=30)
+    db = sqlite3.connect(path, timeout=5)
     db.row_factory = sqlite3.Row
+    db.execute('PRAGMA busy_timeout=5000')
+    db.execute('PRAGMA journal_mode=WAL')
     db.executescript('''
-    PRAGMA journal_mode=WAL;
     CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT);
     CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,kind TEXT,url TEXT,payload TEXT,
       due REAL DEFAULT 0,checked REAL DEFAULT 0,expires REAL DEFAULT 0,error TEXT DEFAULT '');

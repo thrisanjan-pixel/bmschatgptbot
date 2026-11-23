@@ -305,3 +305,30 @@ class HealthScalingTests(unittest.TestCase):
    self.assertEqual(health_watch.problems(self.db,now),{})
    rules[0]['health']['last_success']=now-3000;self.assertIn('source:s0',health_watch.problems(self.db,now))
    setmeta(self.db,'seat_cooldown_until',now+500);self.assertEqual(health_watch.problems(self.db,now),{})
+
+def test_stale_refused_target_is_red_even_with_a_fresh_sibling(tmp_path):
+    from contextlib import closing
+    from unittest.mock import patch
+    import api_watch
+    import dashboard
+    import watch_preferences as prefs
+    from store import connect
+
+    path=str(tmp_path/'state.sqlite3')
+    with closing(connect(path)) as db:
+        assert db.execute('PRAGMA journal_mode').fetchone()[0]=='wal'
+        assert db.execute('PRAGMA busy_timeout').fetchone()[0]==5000
+        prefs.save(db,{**prefs.defaults(),'movies':['Movie'],'enabled':True},create=True)
+        api_watch.schedule(db,'ET12345678','','Movie')
+        api_watch.schedule(db,'ET87654321','','Movie')
+        db.execute("UPDATE jobs SET checked=900,error='Source HTTP 403' WHERE payload LIKE '%ET12345678%'")
+        db.execute("UPDATE jobs SET checked=1199 WHERE payload LIKE '%ET87654321%'")
+        db.commit()
+        with patch('watch_preferences.time.time',return_value=1200):
+            assert prefs.rules(db)[0]['health']['label']=='VERIFICATION_FAILED'
+            reliability=dashboard.status(path)['reliability']
+            assert reliability['refused_alerts']==reliability['verification_failed_alerts']==1
+        db.execute("UPDATE jobs SET checked=1201,error=''")
+        db.commit()
+        with patch('watch_preferences.time.time',return_value=1202):
+            assert not prefs.rules(db)[0]['health']['verification_failed']
