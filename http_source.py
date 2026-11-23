@@ -35,11 +35,25 @@ def seat_gap():
     return max(SEAT_GAP_FLOOR,env_seconds('BMS_SEAT_GAP',60))
 
 
-def policy(host):
-    """(hourly limit, minimum gap) for alert checks to this host."""
-    if host==SEAT_HOST:
-        gap=seat_gap();return (int(3600//gap),gap)
-    return POLICIES[host]
+def night(now=None):
+    """True inside BMS_NIGHT_HOURS ('1-7' = 01:00 to 06:59 IST; empty = never)."""
+    import datetime as dt
+    raw=os.environ.get('BMS_NIGHT_HOURS','').strip()
+    try:start,end=(int(part) for part in raw.split('-'))
+    except ValueError:return False
+    if not (0<=start<24 and 0<=end<=24) or start==end:return False
+    ist=dt.timezone(dt.timedelta(hours=5,minutes=30))
+    hour=dt.datetime.fromtimestamp(time.time() if now is None else now,ist).hour
+    return start<=hour<end if start<end else hour>=start or hour<end
+
+
+def policy(host,now=None):
+    """(hourly limit, minimum gap) for alert checks to this host. At night (BMS_NIGHT_HOURS)
+    the showtime and seat hosts run at half speed: fewer requests while few people book."""
+    limit,gap=(int(3600//seat_gap()),seat_gap()) if host==SEAT_HOST else POLICIES[host]
+    if host in (SEAT_HOST,'in.bookmyshow.com') and night(now):
+        return (max(1,limit//2),gap*2)
+    return (limit,gap)
 
 
 def jitter(seed):
@@ -115,11 +129,11 @@ def reserve(db,url,now=None,manual=False,metadata=False):
     try:
         manual=bool(manual and parts.netloc in MANUAL)
         lane=1 if manual else 2 if metadata and parts.netloc in METADATA else 0
-        limit,gap=policy(parts.netloc) if lane==0 else (MANUAL,METADATA)[lane-1][parts.netloc]
+        limit,gap=policy(parts.netloc,now) if lane==0 else (MANUAL,METADATA)[lane-1][parts.netloc]
         row=db.execute('SELECT not_before FROM source_hosts WHERE host=?',(parts.netloc,)).fetchone()
         count,oldest=db.execute('SELECT count(*),min(at) FROM source_requests WHERE host=? AND at>? AND manual=?',(parts.netloc,now-3600,lane)).fetchone()
         # Every lane honors the host spacing, including manual and metadata reads.
-        gap=max(gap,policy(parts.netloc)[1])
+        gap=max(gap,policy(parts.netloc,now)[1])
         last,last_id=db.execute('SELECT at,id FROM source_requests WHERE host=? AND at>? ORDER BY at DESC LIMIT 1',(parts.netloc,now-3600)).fetchone() or (None,None)
         # Alert checks get random extra spacing; manual and metadata reads keep their short gap.
         spacing=gap+(jitter(last_id) if lane==0 else 0)
