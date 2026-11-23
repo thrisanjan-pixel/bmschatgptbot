@@ -282,3 +282,33 @@ class SoldOutHealthTests(ProbeTests):
         health = next(r for r in prefs.rules(self.db) if r['status'] == 'active')['health']
         self.assertEqual(health['label'], 'Sold out · watching for released seats')
         self.assertEqual(health['error'], '')
+
+
+class CleanupTests(ProbeTests):
+    def test_sold_out_counts_as_a_successful_check(self):
+        row_watch.mark_sold_out(self.db, self.show['id'], time.time(), True)
+        self.assertAlmostEqual(self.row()['checked'], time.time(), delta=5)
+
+    def test_deleting_an_alert_drops_its_queued_seat_reads(self):
+        self.db.execute('UPDATE row_layouts SET due=?,manual=0 WHERE show_id=?', (time.time() + 60, self.show['id']));self.db.commit()
+        alert = next(r for r in prefs.rules(self.db))['id']
+        prefs.delete(self.db, alert)
+        self.assertEqual(self.row()['due'], 0)
+
+    def test_deleting_an_alert_keeps_a_manual_load(self):
+        self.db.execute('UPDATE row_layouts SET due=?,manual=1 WHERE show_id=?', (time.time(), self.show['id']));self.db.commit()
+        prefs.delete(self.db, next(r for r in prefs.rules(self.db))['id'])
+        self.assertGreater(self.row()['due'], 0)
+
+
+class HealthFlapTests(ProbeTests):
+    def test_budget_wait_does_not_clear_a_stale_seat_warning(self):
+        import health_watch
+        now = time.time()
+        setmeta(self.db, 'health_watch_started', now - 3600);setmeta(self.db, 'city_heartbeat', now);setmeta(self.db, 'row_reader_heartbeat', now)
+        self.db.execute('UPDATE row_layouts SET checked=? WHERE show_id=?', (now - 6 * 3600, self.show['id']))
+        self.db.execute('UPDATE alerts SET created=?', (now - 7 * 3600,));self.db.commit()
+        first = health_watch.problems(self.db, now)
+        setmeta(self.db, 'seat_budget_until', now + 40);self.db.commit()
+        self.assertEqual(health_watch.problems(self.db, now).keys(), first.keys())
+        self.assertTrue(any(k.startswith('source:') for k in first))

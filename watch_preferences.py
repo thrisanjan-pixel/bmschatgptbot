@@ -372,6 +372,13 @@ def delete(db,alert_id):
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
             # A '*' alert keeps one state row per showtime, keyed alert_id:show_id.
             db.execute(f'DELETE FROM {table} WHERE alert_id=? OR substr(alert_id,1,?)=?',(alert_id,len(alert_id)+1,alert_id+':'))
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='row_layouts'").fetchone():
+        # Queued seat reads only this alert needed would otherwise still run and show in the queue.
+        # A read someone asked for with Load seat rows (manual=1) stays.
+        import row_watch
+        needed=set(row_watch.targets(db)[0])
+        for (show_id,) in db.execute('SELECT show_id FROM row_layouts WHERE due>0 AND manual=0').fetchall():
+            if show_id not in needed:db.execute('UPDATE row_layouts SET due=0 WHERE show_id=?',(show_id,))
     enabled=bool(db.execute("SELECT 1 FROM alerts WHERE json_extract(payload,'$.enabled')=1 LIMIT 1").fetchone())
     setmeta(db,'notifications_paused','0' if enabled else '1')
     setmeta(db,'notifications_mode','enabled' if enabled else 'paused')

@@ -31,7 +31,9 @@ def problems(db,now):
  # Row reads share one 120 s gap and a 30/hour budget, so the quiet period grows with the number of watched showtimes.
  stale=stale_settings(db);quiet=stale['minutes']*60
  limit=max(quiet,240*sum(r['row_targets'] for r in row_rules))
- cooling=max(float(meta(db,k,'0')) for k in ('seat_cooldown_until','seat_budget_until'))>now
+ # Only a real source cooldown (429) excuses stale seat checks. A routine budget wait lasts about
+ # a minute; counting it made the warning clear and return on every request gap.
+ cooling=float(meta(db,'seat_cooldown_until','0'))>now
  for rule in rules if stale['enabled'] else []:
   h=rule['health'];last=h['last_success'] or rule['created']
   if rule['preferences']['row_show'] and not rule['row_targets']:continue  # an any-showtime alert with no matching showtime has nothing to read

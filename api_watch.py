@@ -253,7 +253,8 @@ def listing_order(db, now):
 
 def record_listing_failure(db, job, error, started, now):
     if isinstance(error, WrongDateError):
-        message='Wrong date response'
+        # BookMyShow answers a date it no longer lists for this version with another date (usually today).
+        message='BookMyShow is not listing this date for this version right now'
         db.execute('UPDATE jobs SET due=?,error=? WHERE id=?',(now+error.retry,message,job['id']))
         record_check(db,'listings',job['id'],started,message,now=now)
         return message
