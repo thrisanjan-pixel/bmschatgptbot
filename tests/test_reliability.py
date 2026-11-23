@@ -213,7 +213,7 @@ class ReliabilityTests(unittest.TestCase):
   from api_source import get_json,ReadError,retry_delay
   import io,urllib.error
   error=urllib.error.HTTPError('https://in.bookmyshow.com/test',429,'limited',{'Retry-After':' 600 ','Set-Cookie':'private','Server':'test'},io.BytesIO(b'private body'))
-  with patch('api_source.urllib.request.urlopen',side_effect=error):
+  with patch('http_source.urlopen',side_effect=error):
    with self.assertRaises(ReadError) as failure:get_json('https://in.bookmyshow.com/test')
   self.assertEqual(failure.exception.retry,600)
   self.assertEqual(failure.exception.diagnostic,{'status':429,'headers':{'Retry-After':' 600 ','Server':'test'}})

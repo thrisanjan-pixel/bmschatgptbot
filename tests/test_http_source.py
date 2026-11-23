@@ -65,10 +65,33 @@ class SourceBudgetTests(unittest.TestCase):
   source.reserve(self.db,'https://in.bookmyshow.com/api/test',1060)
  def test_budget_denial_sends_no_network_request(self):
   source.reserve(self.db,'https://services-in.bookmyshow.com/doTrans.aspx',time.time())
-  with patch.dict(os.environ,{'BMS_REQUEST_BUDGET':'1','BMS_DB':self.path}),patch('urllib.request.urlopen') as call:
+  with patch.dict(os.environ,{'BMS_REQUEST_BUDGET':'1','BMS_DB':self.path}),patch('http_source.urlopen') as call:
    with self.assertRaises(source.SourceWait):source.open_request(urllib.request.Request('https://services-in.bookmyshow.com/doTrans.aspx'))
   call.assert_not_called()
  def test_default_retains_standard_client(self):
-  with patch.dict(os.environ,{'BMS_REQUEST_BUDGET':''}),patch('urllib.request.urlopen',return_value=io.BytesIO(b'ok')) as call:
+  with patch.dict(os.environ,{'BMS_REQUEST_BUDGET':''}),patch('http_source.urlopen',return_value=io.BytesIO(b'ok')) as call:
    self.assertEqual(source.open_request(urllib.request.Request('https://in.bookmyshow.com/test')).read(),b'ok')
    call.assert_called_once()
+
+
+class CurlTransportTests(unittest.TestCase):
+ def _reply(self,status,headers=None,body=b'{}'):
+  from unittest.mock import MagicMock
+  r=MagicMock(status_code=status,headers=headers or {},content=body,reason='x',url='https://in.bookmyshow.com/t');return r
+
+ def test_sends_request_headers_without_overriding_browser_user_agent(self):
+  req=urllib.request.Request('https://in.bookmyshow.com/t',headers={'User-Agent':'Bot','x-app-code':'WEB'})
+  with patch('curl_cffi.requests.request',return_value=self._reply(200,body=b'ok')) as call:
+   with source.urlopen(req) as r:self.assertEqual((r.status,r.read()),(200,b'ok'))
+  sent=call.call_args.kwargs['headers']
+  self.assertEqual(sent.get('X-app-code'),'WEB');self.assertNotIn('User-agent',sent)
+  self.assertEqual(call.call_args.kwargs['impersonate'],source.IMPERSONATE)
+
+ def test_http_errors_keep_urllib_shape_and_retry_after(self):
+  with patch('curl_cffi.requests.request',return_value=self._reply(429,{'Retry-After':'600'})):
+   with self.assertRaises(urllib.error.HTTPError) as caught:source.urlopen(urllib.request.Request('https://in.bookmyshow.com/t'))
+  self.assertEqual((caught.exception.code,caught.exception.headers.get('Retry-After')),(429,'600'))
+
+ def test_connection_failures_become_url_errors(self):
+  with patch('curl_cffi.requests.request',side_effect=RuntimeError('boom')):
+   with self.assertRaises(urllib.error.URLError):source.urlopen(urllib.request.Request('https://in.bookmyshow.com/t'))
