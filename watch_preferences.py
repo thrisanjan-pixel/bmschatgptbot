@@ -129,7 +129,10 @@ def rules(db):
         if max(cooldown,budget)>now:due=max(due,cooldown,budget)
         delivery=db.execute('SELECT count(*),coalesce(max(attempts),0) FROM outbox WHERE alert_id=? AND delivered=0',(rule['id'],)).fetchone()
         # Routine 1-minute spacing is normal; only a long budget wait is worth showing.
-        health='Source unavailable' if error else 'Waiting for request budget' if budget>now+300 else 'Checks delayed' if checked and cooldown<=now and time.time()-checked>(max(180,240*row_count) if p['row_show'] else 180) else 'Watching seats' if p['row_show'] else 'Waiting for bookings' if waiting_for_bookings else 'Watching availability' if checked else 'Waiting for listings'
+        # A sold-out reply is a normal answer from BookMyShow, not a failing source.
+        sold_out=error=='Sold out'
+        if sold_out:error=''
+        health='Sold out · watching for released seats' if sold_out else 'Source unavailable' if error else 'Waiting for request budget' if budget>now+300 else 'Checks delayed' if checked and cooldown<=now and time.time()-checked>(max(180,240*row_count) if p['row_show'] else 180) else 'Watching seats' if p['row_show'] else 'Waiting for bookings' if waiting_for_bookings else 'Watching availability' if checked else 'Waiting for listings'
         refusals=[target for target in source_rows if re.search(r'\bHTTP (403|429)\b',target['error'] or '')]
         source_refused=rule['status']=='active' and bool(refusals)
         verification_failed=source_refused and any(
