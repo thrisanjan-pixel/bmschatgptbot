@@ -152,5 +152,7 @@ def drain(db, commit=True, system_only=False):
         # The alert may have been paused or deleted (message archived) while sending.
         marked = db.execute('UPDATE outbox SET delivered=? WHERE id=? AND delivered=0', (time.time(), row['id'])).rowcount
         delivered_id=(row['alert_id'] if 'alert_id' in row.keys() else '') if marked else None
+        # A seat-photo follow-up is not the alert's own message, so it never completes a once alert.
+        if delivered_id and str(row['text'] or '').startswith('📸'):delivered_id=None
     if commit:db.commit()
     return delivered_id
