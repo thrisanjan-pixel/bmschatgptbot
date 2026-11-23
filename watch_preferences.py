@@ -113,12 +113,15 @@ def rules(db):
                     jobs.append(job)
                     if not p['dates'] or not payload.get('date') or payload['date'] in p['dates']:
                         source_rows.append(job)
-            checked=max((r['checked'] for r in jobs),default=0)
+            # Only the listings for the alert's dates count: a fresh undated listing must not
+            # hide a dated listing that keeps failing.
+            relevant=source_rows or jobs
+            checked=max((r['checked'] for r in relevant),default=0)
             # Report the latest listing check, not an old failure on any of the movie's listings.
-            ids=[r['id'] for r in jobs];latest=None
+            ids=[r['id'] for r in relevant];latest=None
             if ids and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='check_stats'").fetchone():
                 latest=db.execute(f"SELECT error FROM check_stats WHERE source='listings' AND job_key IN ({','.join('?'*len(ids))}) ORDER BY last_attempt DESC LIMIT 1",ids).fetchone()
-            error=latest[0] if latest else next((r['error'] for r in jobs if r['error']),'')
+            error=latest[0] if latest else next((r['error'] for r in relevant if r['error']),'')
             due=min((r['due'] for r in jobs),default=0)
             waiting_for_bookings = bool(jobs) and all(
                 meta(db, 'waiting_show:'+r['id']) == '1' for r in jobs
@@ -190,8 +193,11 @@ def prime_availability(db):
                 try:link=seat_layout_url(show)
                 except Exception:continue
                 if opened:found.append((show,opened,link))
+            # While an earlier message waits for delivery, try again next tick instead of
+            # recording the new filters as announced (their open seats would never be sent).
+            if found and db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone():continue
             # Nothing to say yet, but still record state so it is not rescanned every second.
-            if found and not db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone():
+            if found:
                 lines=[]
                 for show,opened,link in found[:3]:
                     lines.append(' · '.join(str(show.get(key) or '') for key in ('venue','date','time'))+'\n'+
@@ -329,12 +335,25 @@ def save(db,data,alert_id=None,create=False):
     db.execute('''INSERT INTO alerts(id,payload,created,updated) VALUES(?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated=excluded.updated,completed=0''',
         (alert_id,json.dumps(p),now,now))
+    drop_mismatched_seat_photos(db,alert_id,p)
     enabled=bool(db.execute("SELECT 1 FROM alerts WHERE json_extract(payload,'$.enabled')=1 LIMIT 1").fetchone())
     setmeta(db,'notifications_paused','0' if enabled else '1')
     setmeta(db,'notifications_mode','enabled' if enabled else 'paused')
     setmeta(db,'watch_completed','0')
     db.commit()
     return alert_id
+
+
+def drop_mismatched_seat_photos(db,alert_id,p):
+    """After an edit, drop seat-count gates and photo follow-ups for showtimes the alert no longer matches."""
+    if p.get('row_show'):return
+    photo_schema(db)
+    for r in db.execute('SELECT show_id FROM pending_seat_photos WHERE alert_id=?',(alert_id,)).fetchall():
+        row=db.execute('SELECT payload FROM sessions WHERE id=?',(r['show_id'],)).fetchone()
+        try:show=json.loads(row[0]) if row else None
+        except ValueError:show=None
+        if not show or not matches(show,p):
+            db.execute('DELETE FROM pending_seat_photos WHERE alert_id=? AND show_id=?',(alert_id,r['show_id']))
 
 
 def transition(db,alert_id,action):
@@ -439,7 +458,8 @@ def seat_photo_shows(db,now=None):
 def delivered(db,alert_id=None):
     saved=rules(db)
     rule=next((r for r in saved if r['id']==alert_id),None) if alert_id else (saved[0] if saved else None)
-    if not rule:return
+    # A paused or finished alert is not completed by a late delivery.
+    if not rule or rule['status']!='active':return
     p=rule['preferences']
     # One check can queue several messages (a cinema each, or 2800-char chunks); finish only after the last is delivered.
     if p['once'] and not db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone() and not gate_waiting(db,rule['id']):

@@ -67,8 +67,11 @@ def check(db,now=None):
   if key=='seat-rate-limit' and already_reported_seat_limit:continue
   if key not in previous:
    emit(db,'health:'+key+':'+str(now),'⚠️ Screenwatch needs attention\n\n'+message+'\n\nOpen the dashboard for current status. The last good results are retained.',alert_id='__health__')
+ watched={'source:'+(r['preferences']['row_show'] or '|'.join(sorted(prefs.normalized(m) for m in r['preferences']['movies']))) for r in prefs.active(db)}
  for key in previous.keys()-current.keys():
   if key.startswith('source:') and 'HTTP 429' in previous[key] and 'seat-rate-limit' in current:continue
+  # The alert was paused, deleted or finished: its checks did not recover, so say nothing.
+  if key.startswith('source:') and key not in watched:continue
   emit(db,'recovery:'+key+':'+str(now),'✅ Screenwatch recovered\n\nThe previously reported issue has cleared: '+previous[key],alert_id='__health__')
  setmeta(db,'health_watch_issues',json.dumps(current));setmeta(db,'health_watch_heartbeat',now);db.commit()
  return current

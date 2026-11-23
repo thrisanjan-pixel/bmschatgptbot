@@ -46,10 +46,13 @@ def ingest(db,job,data):
     preferences.drop_unbookable_gates(db,current)
     upcoming = meta(db, 'upcoming_event:'+args['event']) == '1'
     if (previous is not None or args.get('notify_first') or meta(db,'waiting_show:'+job['id'])=='1') and meta(db,'notifications_paused','0')!='1':
-        old=previous or {}
         for rule in preferences.active(db):
             prefs=rule['preferences']
             if prefs.get('row_show'):continue
+            # An alert that already sent this listing's changes while another alert waited
+            # compares against its own newer view, so it does not repeat them.
+            own=db.execute('SELECT payload FROM snapshots WHERE id=?',(key+'#'+rule['id'],)).fetchone()
+            old=json.loads(own[0]) if own else (previous or {})
             groups={}
             for identity,show in current.items():
                 if not preferences.matches(show,prefs) and not preferences.matches({**show,'movie':args['movie']},prefs):continue
@@ -80,7 +83,7 @@ def ingest(db,job,data):
                     group=groups.setdefault(show['venue_code'],{'show':show,'lines':[]})
                     group['lines'].append((change,seat_layout_url(show),show,names))
             if groups:changes[rule['id']]=(rule,groups)
-    deferred=False
+    deferred=False;waiting=set()
     if previous!=current:
         revision=int(meta(db,'revision:'+key,'0'))+1
         if changes:
@@ -120,8 +123,14 @@ def ingest(db,job,data):
                         rule['last_alert']=now
                 else:
                     # Keep the old baseline so the unsent changes are found again next poll.
-                    deferred=True;setmeta(db,'watch_skipped',int(meta(db,'watch_skipped','0'))+1)
+                    deferred=True;waiting.add(alert_id);setmeta(db,'watch_skipped',int(meta(db,'watch_skipped','0'))+1)
         if not deferred:setmeta(db,'revision:'+key,revision)
+    if deferred:
+        # The shared baseline stays old for the waiting alerts; every other alert moves on.
+        for rule in preferences.active(db):
+            if rule['id'] not in waiting and not rule['preferences'].get('row_show'):
+                db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',(key+'#'+rule['id'],json.dumps(current)))
+    else:db.execute('DELETE FROM snapshots WHERE id>=? AND id<?',(key+'#',key+'$'))
     # Once any show of the event is bookable the event is no longer "upcoming". A deferred pass
     # keeps the flag so its retry still says "Booking open".
     if upcoming and not deferred and any(c['status'] in ('1','2','3') for show in current.values() for c in show['categories'].values()):
@@ -252,9 +261,23 @@ def listing_order(db, now):
 
 
 def record_listing_failure(db, job, error, started, now):
+    if isinstance(error, WrongDateError) and error.unlisted:
+        # BookMyShow does not list this date for this version: a successful check that found no
+        # shows. Its showtimes stop matching alerts, and an empty baseline makes them count as
+        # new if BookMyShow lists the date again.
+        args=json.loads(job['payload'])
+        for old in db.execute('SELECT id,payload FROM sessions WHERE active=1').fetchall():
+            show=json.loads(old['payload'])
+            if show.get('event')==args.get('event') and show.get('date')==args.get('date'):
+                db.execute('UPDATE sessions SET active=0 WHERE id=?',(old['id'],))
+        key='api:'+str(args.get('event'))+':'+str(args.get('date'))
+        db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',(key,'{}'))
+        db.execute('DELETE FROM snapshots WHERE id>=? AND id<?',(key+'#',key+'$'))
+        db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(now,now+error.retry,job['id']))
+        record_check(db,'listings',job['id'],started,now=now)
+        return 'Date not listed by BookMyShow; no shows'
     if isinstance(error, WrongDateError):
-        # BookMyShow answers a date it no longer lists for this version with another date (usually today).
-        message='BookMyShow is not listing this date for this version right now'
+        message='BookMyShow answered for another event or an invalid date'
         db.execute('UPDATE jobs SET due=?,error=? WHERE id=?',(now+error.retry,message,job['id']))
         record_check(db,'listings',job['id'],started,message,now=now)
         return message
