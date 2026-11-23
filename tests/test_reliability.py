@@ -39,6 +39,16 @@ class ReliabilityTests(unittest.TestCase):
    self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'movie','https://example.test/'+name,json.dumps({'movie':movie}),due))
   self.db.commit();self.assertEqual(api_watch.next_job(self.db,1000)['id'],'active')
   self.db.execute("UPDATE jobs SET due=600 WHERE id='background'");self.db.commit();self.assertEqual(api_watch.next_job(self.db,1000)['id'],'background')
+ def test_background_listings_switch_keeps_every_turn_for_alerts(self):
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Watched'],'enabled':True})
+  for name,movie,due in [('background','Other',600),('active','Watched',5000)]:
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'movie','https://example.test/'+name,json.dumps({'movie':movie}),due))
+  self.db.commit()
+  self.assertEqual(api_watch.next_job(self.db,1000)['id'],'background')
+  with patch.dict(os.environ,{'BMS_BACKGROUND_LISTINGS':'0'}):
+   self.assertIsNone(api_watch.next_job(self.db,1000))
+   self.db.execute("UPDATE jobs SET due=990 WHERE id='active'");self.db.commit()
+   self.assertEqual(api_watch.next_job(self.db,1000)['id'],'active')
  def test_dates_no_alert_asks_for_do_not_crowd_out_other_alerts(self):
   prefs.save(self.db,{**prefs.defaults(),'movies':['Watched'],'dates':[D1],'enabled':True},create=True)
   prefs.save(self.db,{**prefs.defaults(),'movies':['Second'],'enabled':True},create=True)
