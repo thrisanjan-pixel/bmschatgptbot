@@ -339,3 +339,29 @@ class SeatGapTests(unittest.TestCase):
                 http_source.reserve(db, url, now=1020)
         finally:
             db.close();tmp.cleanup()
+
+
+class NightAndShowDayTests(unittest.TestCase):
+    # 2026-11-24 03:00 IST and 12:00 IST
+    NIGHT = 1795469400
+    DAY = 1795501800
+
+    def test_night_hours_halve_showtime_and_seat_speed(self):
+        with patch.dict(os.environ, {'BMS_NIGHT_HOURS': '1-7', 'BMS_SEAT_GAP': '30'}):
+            self.assertEqual(source.policy('services-in.bookmyshow.com', self.NIGHT), (60, 60))
+            self.assertEqual(source.policy('in.bookmyshow.com', self.NIGHT), (30, 120))
+            self.assertEqual(source.policy('in-cdn.bmscdn.com', self.NIGHT), (6, 600))
+            self.assertEqual(source.policy('services-in.bookmyshow.com', self.DAY), (120, 30))
+        with patch.dict(os.environ, {'BMS_NIGHT_HOURS': '', 'BMS_SEAT_GAP': '30'}):
+            self.assertEqual(source.policy('services-in.bookmyshow.com', self.NIGHT), (120, 30))
+        with patch.dict(os.environ, {'BMS_NIGHT_HOURS': '23-2'}):
+            self.assertTrue(source.night(self.NIGHT - 3 * 3600))  # 00:00 IST
+            self.assertFalse(source.night(self.NIGHT))  # 03:00 IST
+
+    def test_show_day_window_rechecks_sold_out_shows_faster(self):
+        with patch.dict(os.environ, {'BMS_SEAT_GAP': '30', 'BMS_SOLD_OUT_RECHECK': '180', 'BMS_SHOWDAY_RECHECK': '60'}):
+            self.assertEqual(row_watch.sold_out_recheck({'cutoff': 1000 + 3600}, 1000), 60)
+            self.assertEqual(row_watch.sold_out_recheck({'cutoff': 1000 + 86400}, 1000), 180)
+            self.assertEqual(row_watch.sold_out_recheck(None, 1000), 180)
+        with patch.dict(os.environ, {'BMS_SEAT_GAP': '30', 'BMS_SHOWDAY_RECHECK': '5'}):
+            self.assertEqual(row_watch.sold_out_recheck({'cutoff': 1000 + 60}, 1000), 30)

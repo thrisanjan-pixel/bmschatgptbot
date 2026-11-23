@@ -171,7 +171,9 @@ class UrgentTests(Base):
   now=time.time()
   for sid,age in (('su',50),('sn',100)):self.db.execute("INSERT INTO row_layouts(show_id,payload,checked,due) VALUES(?,'{}',?,?)",(sid,now-900,now-age))
   self.db.commit()
-  self.assertEqual(row_watch.next_job(self.db,now)['show_id'],'su')  # 50 s overdue counts as 150 s; the other is below 2 minutes
+  # Both test shows start within 3 hours; turn the show-day boost off to test the urgent flag alone.
+  with patch.dict(os.environ,{'BMS_SHOWDAY_WINDOW':'0'}):
+   self.assertEqual(row_watch.next_job(self.db,now)['show_id'],'su')  # 50 s overdue counts as 150 s; the other is below 2 minutes
 
 class PresetTests(Base):
  def test_save_replace_limit_delete(self):

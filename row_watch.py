@@ -20,8 +20,21 @@ def schema(db):
 OPEN_STATUSES=('1','2','3')
 
 
-def sold_out_recheck():
-    """Seconds between seat reads of a show the listing still reports as sold out."""
+def show_day(show,now=None):
+    """True when the show starts (booking closes) within BMS_SHOWDAY_WINDOW seconds (default 3 h):
+    held seats are most often released in the last hours before a show."""
+    now=time.time() if now is None else now
+    try:window=float(os.environ.get('BMS_SHOWDAY_WINDOW','10800'))
+    except ValueError:window=10800
+    return bool(show) and window>0 and 0<float(show.get('cutoff') or 0)-now<=window
+
+
+def sold_out_recheck(show=None,now=None):
+    """Seconds between seat reads of a show the listing still reports as sold out.
+    Shows inside the show-day window use BMS_SHOWDAY_RECHECK (default 60 s) instead."""
+    if show_day(show,now):
+        from http_source import seat_gap
+        return max(seat_gap(),float(os.environ.get('BMS_SHOWDAY_RECHECK','60')))
     return max(120,float(os.environ.get('BMS_SOLD_OUT_RECHECK','900')))
 
 
@@ -44,7 +57,7 @@ def probe_skips(db,show,job,now):
     backstop interval. Shows with seats are never gated by the listing, which can lag."""
     confirmed=float(job['sold_out_at'] or 0)
     if not confirmed or os.environ.get('BMS_LISTING_PROBE','1')!='1' or listing_state(show)!='sold_out':return False
-    return now-confirmed<sold_out_recheck()
+    return now-confirmed<sold_out_recheck(show,now)
 
 
 def mark_sold_out(db,show_id,now,confirmed):
@@ -294,14 +307,21 @@ def poll_policy(db,now,cloud=True):
     # Recovery starts after the source wait ends, including waits longer than 15 minutes.
     recovering=bool((until and 0<=now-until<900) or
                     (last_limit and 0<=now-last_limit<900))
-    from http_source import seat_gap
-    gap=seat_gap()
+    from http_source import SEAT_HOST,policy
+    gap=policy(SEAT_HOST,now)[1]
     return (max(120,2*gap),gap) if cloud and recovering else (gap,gap) if cloud else (60,0)
 
 
 def queue_order(db,now):
     """ORDER BY clause and its parameters for the seat-read queue."""
-    active,urgent=targets(db,now);urgent=sorted(urgent);rush=prefs.seat_photo_shows(db,now)
+    active,urgent=targets(db,now);rush=prefs.seat_photo_shows(db,now)
+    # Showtimes inside the show-day window jump the queue like an urgent alert's.
+    try:window=float(os.environ.get('BMS_SHOWDAY_WINDOW','10800'))
+    except ValueError:window=10800
+    if window>0 and active:
+        clock=time.time() if now is None else now
+        urgent|={r[0] for r in db.execute('SELECT id FROM sessions WHERE cutoff>? AND cutoff<=?',(clock,clock+window)) if r[0] in set(active)}
+    urgent=sorted(urgent)
     slots=','.join('?' for _ in active) or "''";hot=','.join('?' for _ in urgent) or "''";first=','.join('?' for _ in rush) or "''"
     # An alert showtime overdue by 2 minutes goes first, so browsing cannot starve it.
     # Then a showtime nobody has seen yet (someone is waiting on the page);
@@ -397,7 +417,7 @@ def take_job(db,now,cloud=True):
     if not manual and job['show_id'] in queue_order(db,now)[2] and probe_skips(db,show,job,now):
         # The listing says sold out and the last layout read is recent: spend no seat request.
         mark_sold_out(db,job['show_id'],now,False)
-        db.execute('UPDATE row_layouts SET due=?,manual=0 WHERE show_id=?',(now+sold_out_recheck(),job['show_id']))
+        db.execute('UPDATE row_layouts SET due=?,manual=0 WHERE show_id=?',(now+sold_out_recheck(show,now),job['show_id']))
         record_check(db,'rows',show['id'],now);db.commit();return None
     return job,manual,show
 
@@ -416,7 +436,7 @@ def record_failure(db,show_id,show,e,started,manual=False):
         # Sold out is a normal answer, not a source error. Re-check on the slow backstop;
         # the listing probe brings the read forward as soon as seats reappear.
         mark_sold_out(db,show_id,time.time(),True)
-        retry_at=time.time()+sold_out_recheck() if show_id in queue_order(db,time.time())[2] else 0
+        retry_at=time.time()+sold_out_recheck(show) if show_id in queue_order(db,time.time())[2] else 0
         db.execute('UPDATE row_layouts SET due=?,manual=0 WHERE show_id=?',(retry_at,show_id))
         record_check(db,'rows',show['id'],started);db.commit();return
     message=(str(e).partition(chr(10))[0] or type(e).__name__)[:200]
