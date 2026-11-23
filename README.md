@@ -56,6 +56,61 @@ Seat-map reading opens the quantity/map screen and filters accessibility categor
 
 HTTP 403, 429 and 5xx responses pause source requests with persisted cooldown and Retry-After handling. Errors preserve prior good observations. Chromium uses normal TLS verification. The user approved access to this environment's supplied proxy CA in its existing certificate store; restricted-shell certificate-store access may require the supported escalation tool. Do not disable certificate verification, install unrelated roots or bypass source challenges.
 
+## BookMyShow request policy (rate limits and cooldowns)
+
+The bot stays inside BookMyShow's limits and slows down when told to. It never uses proxies, IP rotation or any other way around BookMyShow or Cloudflare.
+
+Every request to BookMyShow goes through `http_source.open_request`, which keeps a per-host budget in SQLite (`source_requests`, `source_hosts`, `source_health`). That state survives restarts and redeploys. A restarted worker cannot send a burst, and a cooldown started before the restart is still in force after it.
+
+**Spacing and caps.** `services-in.bookmyshow.com` (seat layouts) and `in.bookmyshow.com` (showtimes) each allow at most 60 requests in any rolling hour. Consecutive requests to one host are at least 60 seconds apart. Alert checks add 0 to `BMS_REQUEST_JITTER` seconds of random extra spacing, so requests never land on a fixed beat. `in-cdn.bmscdn.com` (catalogue) allows 6 per hour, 600 seconds apart. Manual "Load seat rows" and seat-metadata lookups have their own small hourly budgets, but they still respect the 60-second host spacing. The request timeout (25 s) is shorter than that spacing, so at most one request per host is in flight at a time. There is no burst or rate-test mode.
+
+**HTTP 429.** A 429 rests the whole host (every lane, including manual reads) until its `Retry-After` time, with a minimum of 5 minutes. The deadline is stored in `source_hosts.not_before` (and `meta.seat_cooldown_until` for seat layouts), so it survives restarts. "Retry now" on the dashboard never clears a 429 deadline.
+
+**HTTP 403.** A 403 served by Cloudflare (`Server: cloudflare`, a `CF-Ray` or a `CF-Mitigated` header) is recorded as `cloudflare_block`; any other 403 is `forbidden`. Either one rests the host with exponential backoff: `BMS_403_BACKOFF_BASE` seconds after the first, then double after each repeat, up to `BMS_BACKOFF_MAX`. One successful response resets the streak.
+
+**Circuit breaker.** Network failures and 5xx replies count toward a streak. After `BMS_BREAKER_THRESHOLD` failures in a row the host rests for `BMS_BREAKER_COOLDOWN` seconds, doubling on each further failure up to `BMS_BACKOFF_MAX`.
+
+**Operator alert.** When a host is rate-limited, blocked (`BMS_BLOCK_ALERT_AFTER` 403s in a row) or the breaker opens, one Telegram message goes out for that episode. It names the host, the reason and roughly how long the bot will pause.
+
+**Sold out is not an error.** BookMyShow answers a seat read for a sold-out show with HTTP 200 and `intException` 3306 (`... sold out ... (#159)`). The bot stores that show as **Sold out**, records the read as successful, and forgets which seats were open, so any released seat alerts again. The show is then re-read only every `BMS_SOLD_OUT_RECHECK` seconds. In between, the bot uses the showtime listing it already fetches every minute as a free probe. As soon as the listing reports any category with seats, the full layout is read at once. The probe only gates shows the seat source itself confirmed sold out. A show with open seats is never skipped because of the listing, since the listing can lag behind the layout.
+
+### Environment variables
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `BMS_REQUEST_JITTER` | `15` | Maximum random extra seconds between alert checks to one host. `0` turns jitter off. |
+| `BMS_403_BACKOFF_BASE` | `180` | First rest after a 403, in seconds. It doubles on each repeat. |
+| `BMS_BREAKER_THRESHOLD` | `3` | Consecutive network or 5xx failures that open the circuit breaker. |
+| `BMS_BREAKER_COOLDOWN` | `600` | First breaker rest, in seconds. It doubles on each further failure. |
+| `BMS_BACKOFF_MAX` | `21600` | Longest 403 or breaker rest (6 hours). A 429 `Retry-After` is never shortened. |
+| `BMS_BLOCK_ALERT_AFTER` | `2` | Consecutive 403s before the operator alert. A 429 alerts at once. |
+| `BMS_SOLD_OUT_RECHECK` | `900` | Seconds between seat reads of a confirmed sold-out show (minimum 120). |
+| `BMS_LISTING_PROBE` | `1` | `0` turns off the listing probe; sold-out shows are then re-read only on the backstop. |
+| `BMS_SEAT_SOURCE` | `server` | `worker` hands seat-layout reads to the home seat worker. |
+| `BMS_WORKER_TOKEN` | (unset) | Shared secret for the worker API, 32 characters or more. Set the same value on the server and the PC. |
+| `BMS_WORKER_STALE` | `180` | Seconds without contact before the worker counts as offline. |
+| `BMS_WORKER_FALLBACK` | `none` | `server` lets the server read seat layouts itself while the worker is offline. |
+
+State is kept in SQLite on the Railway volume. Redis was not added: one container owns the database, and SQLite already persists every budget, cooldown and streak.
+
+### Split setup: home seat worker
+
+Seat layouts can be read from a home connection while the server keeps the listings, alerts, dashboard and Telegram.
+
+1. Generate a long random token (for example `python -c "import secrets;print(secrets.token_urlsafe(32))"`).
+2. On Railway, set `BMS_SEAT_SOURCE=worker` and `BMS_WORKER_TOKEN=<token>`. Optionally set `BMS_WORKER_FALLBACK=server`.
+3. On the home PC, install `requirements-cloud.txt`, then run:
+
+   ```
+   set SCREENWATCH_URL=https://<your-app>.up.railway.app
+   set BMS_WORKER_TOKEN=<token>
+   python home_worker.py
+   ```
+
+The worker calls `POST /api/worker/claim` (bearer token) for the next due seat read. It reads the layout from the PC through the same request budget, backoff and breaker, using its own `home_worker.sqlite3`. Then it posts the layout, the sold-out answer or the error to `POST /api/worker/result`. A handed-out read is leased for 120 seconds. If the worker dies mid-read, the read is handed out again.
+
+If the worker stops calling for `BMS_WORKER_STALE` seconds, the server sends one Telegram message and the dashboard status shows `seat_worker_offline`. Showtime alerts keep working. Seat-row alerts wait for the worker, unless `BMS_WORKER_FALLBACK=server` is set; then the server reads layouts itself until the worker returns.
+
 ## Files and validation
 
 `city_watch.py` owns discovery and scheduling; `source.py` handles normal browser access; `parsers.py` validates public data; `seats.py` reads seat statuses; `store.py` maintains state/outbox; `telegram.py` delivers text and images; `dashboard.py` serves the local UI. `tests/` contains 21 behavioral tests. `deploy/` contains the external server installer and service definitions. The external deployment/reboot checks remain unrun until a server is available.

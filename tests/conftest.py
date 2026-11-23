@@ -34,3 +34,9 @@ def block_external_network(monkeypatch):
     monkeypatch.setattr(socket, 'getaddrinfo', guarded_lookup)
     monkeypatch.setattr(socket.socket, 'connect', guard(socket.socket.connect))
     monkeypatch.setattr(socket.socket, 'connect_ex', guard(socket.socket.connect_ex))
+
+
+@pytest.fixture(autouse=True)
+def exact_request_spacing(monkeypatch):
+    """Budget tests check exact slots; tests that cover jitter set BMS_REQUEST_JITTER themselves."""
+    monkeypatch.setenv('BMS_REQUEST_JITTER', '0')

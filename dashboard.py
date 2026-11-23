@@ -86,6 +86,9 @@ def status(path):
                 'delivery':dict(db.execute("SELECT count(*) AS pending,coalesce(max(attempts),0) AS attempts,coalesce(min(created),0) AS oldest FROM outbox WHERE delivered=0").fetchone()),
                 'storage':json.loads(meta(db,'storage_usage','{}')),'backup_error':meta(db,'backup_error',''),'last_backup':float(meta(db,'last_backup','0')),'hosting':hosting_status(),'external_monitor_configured':False},'state':state,'heartbeat':heartbeat,'cooldown_until':float(meta(db,'source_cooldown','0')),
                 'seat_cooldown_until':float(meta(db,'seat_cooldown_until','0')),
+                'seat_source':os.environ.get('BMS_SEAT_SOURCE','server'),'seat_worker_seen':float(meta(db,'seat_worker_seen','0')),
+                'seat_worker_offline':meta(db,'seat_worker_offline','0')=='1',
+                'source_health':[dict(r) for r in db.execute('SELECT h.host,h.failures,h.reason,coalesce(s.not_before,0) AS not_before FROM source_health h LEFT JOIN source_hosts s ON s.host=h.host')] if db.execute("SELECT 1 FROM sqlite_master WHERE name='source_health'").fetchone() else [],
                 'source_budget_enabled':os.environ.get('BMS_REQUEST_BUDGET')=='1',
                 'seat_budget_until':float(meta(db,'seat_budget_until','0')),
                 'listing_budget_until':float(meta(db,'listing_budget_until','0')),
@@ -110,6 +113,10 @@ def status(path):
                 'coverage':coverage(db),'catalog_last_success':float(meta(db,'catalog_last_success','0')),
                 'movies':[dict(r) for r in db.execute('SELECT title,url,seen FROM inventory ORDER BY title')]}
     finally:db.close()
+
+
+def row_worker_enabled():
+    return os.environ.get('BMS_SEAT_SOURCE','server')=='worker' and os.environ.get('BMS_ROWS_ENABLED')=='1'
 
 
 def handler(path, public=False):
@@ -177,7 +184,30 @@ def handler(path, public=False):
             self.end_headers();self.wfile.write(body)
         def local_host(self):
             return self.headers.get('Host','') in (f'localhost:{self.server.server_port}',f'127.0.0.1:{self.server.server_port}')
+        def worker_request(self):
+            """Home seat worker API: bearer BMS_WORKER_TOKEN, used instead of the website login."""
+            token=os.environ.get('BMS_WORKER_TOKEN','')
+            if len(token)<32 or not row_worker_enabled():self.reply_json({'error':'Seat worker is not enabled on this server'},404);return
+            if not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+token):self.reply_json({'error':'Unauthorized'},401);return
+            import row_watch
+            try:
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<=length<=4_000_000:raise ValueError('Request too large')
+                data=json.loads(self.rfile.read(length) or b'{}')
+                if not isinstance(data,dict):raise ValueError('Invalid request')
+                db=connect(path)
+                try:
+                    if self.path=='/api/worker/claim':self.reply_json({'job':row_watch.claim(db)});return
+                    show_id=data.get('show_id')
+                    if not isinstance(show_id,str):raise ValueError('Missing showtime')
+                    row_watch.submit(db,show_id,data.get('data'),data.get('error'))
+                finally:db.close()
+            except sqlite3.Error:self.reply_json({'error':'Database busy'},503);return
+            except (ValueError,TypeError,KeyError) as e:self.reply_json({'error':str(e)[:200]},400);return
+            self.reply_json({'ok':True})
         def do_POST(self):
+            if self.path in ('/api/worker/claim','/api/worker/result'):
+                self.worker_request();return
             if passwordless and self.path=='/login':
                 self.send_response(303);self.send_header('Location','/');self.end_headers();return
             if public and self.path=='/login':
