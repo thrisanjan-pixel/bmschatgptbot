@@ -294,7 +294,9 @@ def poll_policy(db,now,cloud=True):
     # Recovery starts after the source wait ends, including waits longer than 15 minutes.
     recovering=bool((until and 0<=now-until<900) or
                     (last_limit and 0<=now-last_limit<900))
-    return (120,60) if cloud and recovering else (60,60) if cloud else (60,0)
+    from http_source import seat_gap
+    gap=seat_gap()
+    return (max(120,2*gap),gap) if cloud and recovering else (gap,gap) if cloud else (60,0)
 
 
 def queue_order(db,now):

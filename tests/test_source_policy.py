@@ -312,3 +312,30 @@ class HealthFlapTests(ProbeTests):
         setmeta(self.db, 'seat_budget_until', now + 40);self.db.commit()
         self.assertEqual(health_watch.problems(self.db, now).keys(), first.keys())
         self.assertTrue(any(k.startswith('source:') for k in first))
+
+
+class SeatGapTests(unittest.TestCase):
+    def test_seat_gap_setting_sets_spacing_and_hourly_limit(self):
+        import http_source
+        with patch.dict(os.environ, {'BMS_SEAT_GAP': '20'}):
+            self.assertEqual(http_source.policy('services-in.bookmyshow.com'), (180, 20))
+            self.assertEqual(http_source.policy('in.bookmyshow.com'), (60, 60))
+        with patch.dict(os.environ, {'BMS_SEAT_GAP': '5'}):
+            self.assertEqual(http_source.policy('services-in.bookmyshow.com'), (180, 20))
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('BMS_SEAT_GAP', None)
+            self.assertEqual(http_source.policy('services-in.bookmyshow.com'), (60, 60))
+
+    def test_reserve_spaces_seat_requests_by_the_gap(self):
+        import http_source
+        from store import connect
+        tmp = tempfile.TemporaryDirectory();db = connect(str(Path(tmp.name) / 's.db'))
+        try:
+            url = 'https://services-in.bookmyshow.com/doTrans.aspx'
+            with patch.dict(os.environ, {'BMS_SEAT_GAP': '20', 'BMS_REQUEST_JITTER': '0'}):
+                http_source.reserve(db, url, now=1000)
+                with self.assertRaises(http_source.SourceWait) as wait:http_source.reserve(db, url, now=1010)
+                self.assertEqual(wait.exception.until, 1020)
+                http_source.reserve(db, url, now=1020)
+        finally:
+            db.close();tmp.cleanup()

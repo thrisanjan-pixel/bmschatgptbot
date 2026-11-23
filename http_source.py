@@ -24,6 +24,24 @@ def env_seconds(name,default):
     return value if math.isfinite(value) and value>=0 else float(default)
 
 
+SEAT_HOST='services-in.bookmyshow.com'
+# Fastest seat-layout gap measured safe: a one-hour test at 20 s (180 requests) got no 429,
+# while 10 s drew a 429 with Retry-After 86400 within four requests. Never go below it.
+SEAT_GAP_FLOOR=20
+
+
+def seat_gap():
+    """Seconds between seat-layout requests (BMS_SEAT_GAP, default 60, never below 20)."""
+    return max(SEAT_GAP_FLOOR,env_seconds('BMS_SEAT_GAP',60))
+
+
+def policy(host):
+    """(hourly limit, minimum gap) for alert checks to this host."""
+    if host==SEAT_HOST:
+        gap=seat_gap();return (int(3600//gap),gap)
+    return POLICIES[host]
+
+
 def jitter(seed):
     """Extra spacing of 0..BMS_REQUEST_JITTER seconds (default 15), fixed per previous request
     so every worker computes the same next slot, and requests never land on a fixed beat."""
@@ -97,11 +115,11 @@ def reserve(db,url,now=None,manual=False,metadata=False):
     try:
         manual=bool(manual and parts.netloc in MANUAL)
         lane=1 if manual else 2 if metadata and parts.netloc in METADATA else 0
-        limit,gap=(policies,MANUAL,METADATA)[lane][parts.netloc]
+        limit,gap=policy(parts.netloc) if lane==0 else (MANUAL,METADATA)[lane-1][parts.netloc]
         row=db.execute('SELECT not_before FROM source_hosts WHERE host=?',(parts.netloc,)).fetchone()
         count,oldest=db.execute('SELECT count(*),min(at) FROM source_requests WHERE host=? AND at>? AND manual=?',(parts.netloc,now-3600,lane)).fetchone()
         # Every lane honors the host spacing, including manual and metadata reads.
-        gap=max(gap,policies[parts.netloc][1])
+        gap=max(gap,policy(parts.netloc)[1])
         last,last_id=db.execute('SELECT at,id FROM source_requests WHERE host=? AND at>? ORDER BY at DESC LIMIT 1',(parts.netloc,now-3600)).fetchone() or (None,None)
         # Alert checks get random extra spacing; manual and metadata reads keep their short gap.
         spacing=gap+(jitter(last_id) if lane==0 else 0)
