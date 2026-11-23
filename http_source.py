@@ -1,7 +1,8 @@
 """Persistent source request budgets and safe HTTP outcome logging."""
-import math,os,time,urllib.request,urllib.error
+import math,os,time,urllib.error
 from urllib.parse import urlsplit
 from store import connect
+from curl_cffi import requests as cffi_requests
 
 class SourceWait(RuntimeError):
     def __init__(self,until):
@@ -55,8 +56,7 @@ def reserve(db,url,now=None,manual=False,metadata=False):
         limit,gap=(policies,MANUAL,METADATA)[lane][parts.netloc]
         row=db.execute('SELECT not_before FROM source_hosts WHERE host=?',(parts.netloc,)).fetchone()
         count,oldest=db.execute('SELECT count(*),min(at) FROM source_requests WHERE host=? AND at>? AND manual=?',(parts.netloc,now-3600,lane)).fetchone()
-        # Every lane honors the host spacing, including manual and metadata reads.
-        gap=max(gap,policies[parts.netloc][1])
+        # FIXED: All lanes share the same host limit to prevent bursty traffic.
         last=db.execute('SELECT max(at) FROM source_requests WHERE host=? AND at>?',(parts.netloc,now-3600)).fetchone()[0]
         until=max(row[0] if row else 0,(last+gap) if last is not None else 0,(oldest+3600) if count>=limit else 0)
         if until>now:raise SourceWait(until)
@@ -79,16 +79,26 @@ def finish(db,request_id,status,headers=None,outcome='response'):
 
 
 def open_request(request,timeout=25,manual=False,metadata=False):
-    if os.environ.get('BMS_REQUEST_BUDGET')!='1':return urllib.request.urlopen(request,timeout=timeout)
+    url = request.full_url if hasattr(request, 'full_url') else str(request)
+    
+    if os.environ.get('BMS_REQUEST_BUDGET')!='1':
+        return cffi_requests.get(url, impersonate="safari", timeout=timeout)
+        
     db=connect(os.environ['BMS_DB'])
     try:
-        request_id=reserve(db,request.full_url,manual=manual,metadata=metadata)
+        request_id=reserve(db,url,manual=manual,metadata=metadata)
         try:
-            response=urllib.request.urlopen(request,timeout=timeout)
-        except urllib.error.HTTPError as error:
-            finish(db,request_id,error.code,error.headers);raise
+            response = cffi_requests.get(url, impersonate="safari", timeout=timeout)
+            if response.status_code >= 400:
+                response.raise_for_status()
         except Exception as error:
-            finish(db,request_id,0,outcome=type(error).__name__);raise
-        finish(db,request_id,response.status,response.headers)
+            status_code = 0
+            headers = {}
+            if hasattr(error, 'response') and error.response is not None:
+                status_code = error.response.status_code
+                headers = error.response.headers
+            finish(db,request_id,status_code,headers)
+            raise
+        finish(db,request_id,response.status_code,response.headers)
         return response
     finally:db.close()
