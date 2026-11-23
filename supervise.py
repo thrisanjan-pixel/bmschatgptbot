@@ -48,6 +48,12 @@ def main():
         try:print(f'Carried over source deadlines: {carry_over(state,os.environ["BMS_SOURCE_NOT_BEFORE"])}',flush=True)
         except ValueError as error:print(f'Ignoring malformed BMS_SOURCE_NOT_BEFORE: {error}',flush=True)  # a bad value must not crash-loop the service
         finally:state.close()
+    from store import connect
+    import role
+    state=connect(str(db))
+    # Primary starts active, standby starts standby; a stored promotion survives restarts.
+    try:print(f'Screenwatch role: BOT_ROLE={role.configured_role()}, runtime role={role.initialize(state)}',flush=True)
+    finally:state.close()
     stop=threading.Event()
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:stop.set())
     processes={}

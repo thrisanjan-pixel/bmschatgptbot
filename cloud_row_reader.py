@@ -1,6 +1,7 @@
 """Read a public BookMyShow showtime's live seat layout without a browser."""
 import base64
 import json
+import logging
 import re
 import secrets
 import time
@@ -198,7 +199,10 @@ def read(show,timeout=20,manual=False):
     try:
         result=json.loads(raw)['BookMyShow']
         if result.get('blnSuccess')!='true':
-            if refusal_kind(result)=='sold_out':raise SoldOut()
+            if refusal_kind(result)=='sold_out':
+                # A normal answer, not a source error: INFO, never a warning or a health alert.
+                logging.info('Seat layout %s: sold out (intException 3306)',show.get('id',''))
+                raise SoldOut()
             raise ValueError('Seat source refused layout')
         # The layout includes category names. Prefer a unique name match to
         # the verified showtime categories, avoiding a second endpoint that

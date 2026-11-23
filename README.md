@@ -116,6 +116,243 @@ The worker calls `POST /api/worker/claim` (bearer token) for the next due seat r
 
 If the worker stops calling for `BMS_WORKER_STALE` seconds, the server sends one Telegram message and the dashboard status shows `seat_worker_offline`. Showtime alerts keep working. Seat-row alerts wait for the worker, unless `BMS_WORKER_FALLBACK=server` is set; then the server reads layouts itself until the worker returns.
 
+## Hot-standby failover
+
+Two copies of the bot run at the same time. Both poll BookMyShow and both detect releases, but only the **active** one sends Telegram messages. A small Cloudflare Worker (the watchdog) pings both every minute. If the primary stops answering for longer than `GRACE_SECONDS`, the watchdog promotes the standby, and the standby starts sending within about a second.
+
+Nothing here turns on by itself. With none of the new variables set, the bot behaves exactly as before: it is a primary, it is active, and the Docker image starts it without Litestream.
+
+### Architecture
+
+```
+                      Cloudflare Worker "screenwatch-watchdog"
+                      Durable Object, alarm() every 60 s
+                      POST /heartbeat to both; POST /promote on failover
+                         |                         |
+               Bearer HEARTBEAT_SECRET    Bearer HEARTBEAT_SECRET
+                         v                         v
+   +-------------------------------+     +-------------------------------+
+   | PRIMARY (Railway)             |     | STANDBY (Oracle VM)           |
+   | BOT_ROLE=primary              |     | BOT_ROLE=standby              |
+   | runtime role: active          |     | runtime role: standby         |
+   | polls BMS at full rate        |     | polls BMS at 50% rate         |
+   | outbox -> Telegram sender ON  |     | outbox -> sender OFF          |
+   | /data/state.sqlite3           |     | /data/state.sqlite3           |
+   +---------------+---------------+     +---------------+---------------+
+                   | litestream replicate                | litestream replicate
+                   v                                     v
+        +-----------------------------------------------------------+
+        | Cloudflare R2 bucket    primary/...        standby/...    |
+        +-----------------------------------------------------------+
+                   ^                                     |
+                   |  standby: litestream restore primary/ every 5 min
+                   +-------------------------------------+  (alert config sync)
+                                                          and once more on /promote
+                                                          (outbox merge)
+
+   Both instances: Healthchecks.io ping after a successful BMS check (max 1/min).
+   Watchdog and dead letters: ntfy.sh push to your phone.
+```
+
+### Role model
+
+- `BOT_ROLE` is what an instance was deployed as: `primary` (default) or `standby`.
+- The **runtime role** is `active` or `standby`. Only an active instance sends Telegram messages. A primary starts active, a standby starts standby.
+- The runtime role is stored in the database (`meta.runtime_role`), so a restart keeps a promotion. The supervisor logs it on start: `Screenwatch role: BOT_ROLE=standby, runtime role=standby`.
+- Polling runs in both roles. A standby keeps finding releases and queueing them in its outbox, so it is ready the moment it is promoted. While standby it uses `STANDBY_RATE_FACTOR` (default 0.5) of the normal BookMyShow request rate.
+- A standby copies the primary's alerts (the `alerts` table and the alert switches) from the primary's R2 replica every `STANDBY_SYNC_SECONDS`. Alerts are created and edited on the primary's dashboard only.
+- `/readyz`, `/heartbeat` and the dashboard's **Failover** panel show the role.
+
+### Endpoints
+
+All three take `Authorization: Bearer $HEARTBEAT_SECRET` (compared in constant time). An unset secret, or one shorter than 32 characters, refuses every call with 401.
+
+| Endpoint | What it does |
+| --- | --- |
+| `POST /heartbeat` | Records the watchdog's ping and its view of both instances. Answers with role, last successful BMS check, outbox depth, last Telegram success, last failed send and dead-letter count. |
+| `POST /promote` | Restores the primary's newest replica from R2 into a temp file, merges its undelivered outbox, drops stale rows, sets the role to active and so starts the sender. Answers 200 with the role. A second call while active changes nothing. A failed restore never blocks promotion. |
+| `POST /demote` | Sets the role to standby and stops the sender (manual failback). Idempotent. Queued rows stay. |
+| `GET /readyz` | Public. Now JSON: ready flag, role, outbox depth, last Telegram success, last failed send, last BMS success. Still 200 when ready, 503 when not. |
+
+### Outbox guarantees
+
+- **Detect, then write, then send.** A detection writes its outbox row in the same SQLite transaction as the snapshot or seat-state change (`api_watch.ingest`, `row_watch.ingest`). Telegram is called later, by the sender, outside any transaction. A crash before the commit loses both the state change and the message, so the next poll finds the release again. A crash after it keeps the message.
+- **Crash mid-send.** The sender claims a row for 120 s before calling Telegram. If the process dies during the call, the row is sent again after the claim expires.
+- **Dedupe key.** Every alert carries a stable tag in its text, `[SHOWID:ROWSET:RELEASE_TS]`, for example `[ET00506990-20261125-AMBH:F-7,8:1795412345]`. The key is stored with the row. Two rows for the same alert and the same `SHOWID:ROWSET` within 10 minutes count as one release. The sender never sends a row whose release has already gone out, and the promotion merge never adds one.
+- **Ambiguous timeout.** When a send times out after the request left (a read timeout, not a refused connection), Telegram may have shown it. With `OUTBOX_AMBIGUOUS_POLICY=assume_sent` (default) the row is counted as delivered, so it can never arrive twice. `retry` sends it again instead, which may duplicate.
+- **Bounded retries and dead letters.** After `OUTBOX_MAX_ATTEMPTS` failed sends (flood waits from HTTP 429 do not count), the row moves to `suppressed_outbox` and one ntfy alert goes out. The dashboard shows the dead-letter count.
+- **Telemetry.** `last_telegram_success_at`, `outbox_depth` and `last_failed_send_at` are in `/readyz`, `/heartbeat` and the Failover panel.
+
+### Failover runbook
+
+What happens on its own:
+
+1. The primary misses heartbeats for more than `GRACE_SECONDS` (default 180 s).
+2. The watchdog calls `POST /promote` on the standby. It retries every minute until the standby reports active.
+3. The standby restores `s3://$LITESTREAM_BUCKET/primary/`, merges the primary's undelivered alerts newer than `PROMOTE_FRESH_SECONDS` (default 900 s), archives its own older ones, and becomes active.
+4. ntfy: **"Primary lost; standby promoted."** If promotion fails: **"Primary lost; promoting the standby FAILED."**
+5. If both instances stop answering: **"Both instances down."** The watchdog never fails back on its own.
+
+What you do:
+
+1. Open the standby dashboard. Check the Failover panel: role **active**, outbox depth falling, a recent Telegram success.
+2. Find out why the primary died (Railway logs, billing, volume).
+3. Do not restart the primary until you are ready to fail back (below). A restarted primary comes back **active**, and the watchdog warns **"Both instances report active"** because alerts may then be sent twice.
+
+### Failback
+
+1. Fix the primary and let it start. It is active (its stored role never changed).
+2. At once, demote the standby so only one instance sends:
+
+   ```bash
+   curl -fsS -X POST -H "Authorization: Bearer $HEARTBEAT_SECRET" https://STANDBY_HOST/demote
+   ```
+
+3. Check both `/readyz`: primary `"role": "active"`, standby `"role": "standby"`.
+4. Alerts edited on the standby while it was active are not copied back. Re-create them on the primary, or restore a backup from the standby's dashboard.
+
+To make the primary standby instead (keep the standby in charge), call `/demote` on the primary.
+
+### How to test failover
+
+Run these against a test pair, never while you need alerts.
+
+1. Both up: `curl https://PRIMARY/readyz` shows `active`; `curl https://STANDBY/readyz` shows `standby`.
+2. Heartbeat by hand:
+
+   ```bash
+   curl -fsS -X POST -H "Authorization: Bearer $HEARTBEAT_SECRET" https://STANDBY_HOST/heartbeat
+   ```
+
+3. Stop the primary (Railway: remove the domain or stop the service on a test project). Within `GRACE_SECONDS` + 60 s the ntfy push arrives and the standby `/readyz` shows `active`.
+4. Call `/promote` again: the answer is `{"role": "active", "changed": false}`.
+5. Start the primary, then fail back as above. The watchdog's both-active warning goes away after `/demote`.
+6. Watchdog state: `curl -H "Authorization: Bearer $HEARTBEAT_SECRET" https://screenwatch-watchdog.YOUR.workers.dev/status`.
+
+Automated tests: `python -m pytest tests/test_failover.py` (Python side) and `cd watchdog && npm test` (decision function).
+
+### Failover environment variables
+
+| Variable | Where | Default | Meaning |
+| --- | --- | --- | --- |
+| `BOT_ROLE` | bot | `primary` | `primary` starts active, `standby` starts standby. |
+| `HEARTBEAT_SECRET` | bot + Worker | (unset) | Shared secret for `/heartbeat`, `/promote`, `/demote`. 32 characters or more, or the endpoints stay closed. |
+| `STANDBY_RATE_FACTOR` | bot | `0.5` | Share of the normal BookMyShow rate a standby uses (0.1 to 1). Fewer requests per hour, longer gaps. Set `1` for the full rate. |
+| `STANDBY_SYNC_SECONDS` | bot | `300` | How often a standby copies the primary's alerts from R2 (minimum 60). |
+| `PROMOTE_FROM_PREFIX` | bot | `primary` | R2 prefix a promoted standby restores from. |
+| `PROMOTE_FRESH_SECONDS` | bot | `900` | Undelivered alerts older than this are archived at promotion instead of sent. |
+| `OUTBOX_MAX_ATTEMPTS` | bot | `20` | Failed sends before a message is dead-lettered (429 waits do not count). |
+| `OUTBOX_AMBIGUOUS_POLICY` | bot | `assume_sent` | `assume_sent` or `retry` for a send that timed out after leaving. |
+| `NTFY_TOPIC_URL` | bot | (unset) | `https://ntfy.sh/your-topic` for dead-letter and stale-data pushes. |
+| `NTFY_TOKEN` | bot | (unset) | Bearer token if your ntfy topic needs one. |
+| `HEALTHCHECKS_URL` | bot | (unset) | Healthchecks.io ping URL. Pinged after a successful BMS check, at most once a minute. Use a different check per instance. |
+| `BMS_STALE_REFRESH_SECONDS` | bot | `1200` | Expected refresh of a show-day seat layout. Unchanged for `BMS_STALE_FACTOR` times this, it is flagged as suspect stale. `0` turns it off. |
+| `BMS_STALE_FACTOR` | bot | `3` | Multiplier for the staleness check (minimum 2). |
+| `LITESTREAM_BUCKET` | bot | (unset) | R2 bucket name. With the three below, the image runs the bot under Litestream. |
+| `LITESTREAM_ENDPOINT` | bot | (unset) | `https://ACCOUNT_ID.r2.cloudflarestorage.com` |
+| `LITESTREAM_ACCESS_KEY_ID` | bot | (unset) | R2 API token access key id. |
+| `LITESTREAM_SECRET_ACCESS_KEY` | bot | (unset) | R2 API token secret. |
+| `LITESTREAM_REPLICA_PATH` | bot | `$BOT_ROLE` | R2 prefix this instance writes to. |
+| `PRIMARY_URL`, `STANDBY_URL` | Worker | placeholders | Base HTTPS URLs of the two instances. |
+| `GRACE_SECONDS` | Worker | `180` | How long the primary may miss heartbeats before promotion. |
+| `INTERVAL_SECONDS` | Worker | `60` | Heartbeat interval (minimum 30). |
+| `NTFY_TOPIC`, `NTFY_URL` | Worker | (unset), `https://ntfy.sh` | Topic for watchdog pushes. |
+
+### Manual setup
+
+Do these steps in this order. None of them is automated, and the bot keeps working as a single primary until the last step.
+
+**1. ntfy topic**
+
+1. Install the ntfy app on your phone.
+2. Pick a long random topic name, for example `screenwatch-` plus 20 random letters. Anyone who knows it can read and post, so keep it private.
+3. In the app, subscribe to that topic on `ntfy.sh`.
+4. Test: `curl -d "test" https://ntfy.sh/YOUR_TOPIC`.
+
+**2. Healthchecks.io checks**
+
+1. Sign up at healthchecks.io and create two checks: `screenwatch-primary` and `screenwatch-standby`.
+2. Period 5 minutes, grace 5 minutes.
+3. Add the ntfy integration (or email) under Integrations.
+4. Copy each check's ping URL. It goes into `HEALTHCHECKS_URL` on the matching instance.
+
+**3. Cloudflare R2 bucket and token**
+
+1. Cloudflare dashboard, then R2, then Create bucket: `screenwatch-db`. Location automatic.
+2. R2, then Manage R2 API Tokens, then Create API token. Permission **Object Read & Write**, limited to bucket `screenwatch-db`. No expiry, or a long one you will remember.
+3. Copy the **Access Key ID**, the **Secret Access Key** and the S3 endpoint `https://ACCOUNT_ID.r2.cloudflarestorage.com`. The secret is shown once.
+
+**4. Oracle Cloud VM (standby)**
+
+1. Oracle Cloud Free Tier, then Compute, then Create instance. Image Ubuntu 22.04. Shape VM.Standard.A1.Flex (Ampere, 1 OCPU, 6 GB is enough). Add your SSH key.
+2. Networking: in the VCN's security list, add ingress rules for TCP 80 and 443 from 0.0.0.0/0.
+3. SSH in and open the same ports in the VM firewall (Oracle's Ubuntu image blocks them):
+
+   ```bash
+   sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
+   ```
+
+   ```bash
+   sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+   ```
+
+   ```bash
+   sudo netfilter-persistent save
+   ```
+
+4. Install Docker and Caddy:
+
+   ```bash
+   sudo apt-get update && sudo apt-get install -y docker.io caddy git
+   ```
+
+5. Point a DNS name at the VM's public IP (for example `standby.example.com`, or a free DuckDNS name).
+6. Get the code and build the image (Docker picks the arm64 Litestream package):
+
+   ```bash
+   git clone https://github.com/thrisanjan-pixel/bmschatgptbot.git && cd bmschatgptbot && sudo docker build -t screenwatch .
+   ```
+
+7. Create `/opt/screenwatch/standby.env`, readable only by root (`sudo chmod 600`), with one `NAME=value` per line: `BOT_ROLE=standby`, `HEARTBEAT_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, the four `LITESTREAM_*` values, `HEALTHCHECKS_URL` (standby check), `NTFY_TOPIC_URL`, the same `BMS_*` speed settings as the primary, and `SCREENWATCH_PASSWORDLESS=0` with a `DASHBOARD_PASSWORD` of 16+ characters. The image defaults to a passwordless dashboard, which must not be public on the VM.
+8. Run it:
+
+   ```bash
+   sudo docker run -d --name screenwatch --restart always -p 127.0.0.1:8000:8000 -v screenwatch-data:/data --env-file /opt/screenwatch/standby.env screenwatch
+   ```
+
+9. HTTPS: put `standby.example.com { reverse_proxy 127.0.0.1:8000 }` in `/etc/caddy/Caddyfile`, then `sudo systemctl reload caddy`.
+10. Check: `curl https://standby.example.com/readyz` shows `"role": "standby"`.
+
+Caution: memory from earlier trials says BookMyShow refused 50 to 81% of requests from the old Railway datacenter IP while the home PC got 0 of 30 refused. An Oracle VM is also a datacenter IP. Watch the standby's source requests for 403s in its first day before relying on it.
+
+**5. Primary (Railway)**
+
+Set on the Railway service: `BOT_ROLE=primary`, `HEARTBEAT_SECRET`, the four `LITESTREAM_*` values, `HEALTHCHECKS_URL` (primary check), `NTFY_TOPIC_URL`. The next deploy runs the bot under Litestream and starts writing `primary/` in R2. Check the logs for `Screenwatch role: BOT_ROLE=primary, runtime role=active` and Litestream's `replicating to` line.
+
+**6. Watchdog Worker**
+
+1. Install Node 20 or newer, then in `watchdog/`: `npm install`.
+2. Log in: `npx wrangler login`.
+3. Edit `watchdog/wrangler.toml`: `PRIMARY_URL` (the Railway HTTPS URL) and `STANDBY_URL` (`https://standby.example.com`).
+4. Secrets:
+
+   ```bash
+   npx wrangler secret put HEARTBEAT_SECRET
+   ```
+
+   ```bash
+   npx wrangler secret put NTFY_TOPIC
+   ```
+
+5. Deploy: `npx wrangler deploy`.
+6. Arm it once (the Cron trigger also re-arms it within 5 minutes):
+
+   ```bash
+   curl -H "Authorization: Bearer $HEARTBEAT_SECRET" https://screenwatch-watchdog.YOUR.workers.dev/arm
+   ```
+
+7. After two minutes, both dashboards' Failover panels show a recent "Watchdog last ping".
+
 ## Files and validation
 
 `city_watch.py` owns discovery and scheduling; `source.py` handles normal browser access; `parsers.py` validates public data; `seats.py` reads seat statuses; `store.py` maintains state/outbox; `telegram.py` delivers text and images; `dashboard.py` serves the local UI. `tests/` contains 21 behavioral tests. `deploy/` contains the external server installer and service definitions. The external deployment/reboot checks remain unrun until a server is available.

@@ -77,7 +77,8 @@ def status(path):
         from health_watch import hosting_status
         health_issues=json.loads(meta(db,'health_watch_issues','{}'))
         alert_health=[rule['health'] for rule in preferences.rules(db) if rule['status']=='active']
-        return {'reliability':{'requests':[dict(r) for r in db.execute('SELECT at,host,endpoint,status,retry_after,cf_ray,outcome FROM source_requests ORDER BY at DESC LIMIT 12')] if db.execute("SELECT 1 FROM sqlite_master WHERE name='source_requests'").fetchone() else [],'checks':[dict(r) for r in db.execute('SELECT * FROM check_stats ORDER BY last_attempt DESC LIMIT 100')],
+        import failover
+        return {'failover':failover.snapshot(db),'reliability':{'requests':[dict(r) for r in db.execute('SELECT at,host,endpoint,status,retry_after,cf_ray,outcome FROM source_requests ORDER BY at DESC LIMIT 12')] if db.execute("SELECT 1 FROM sqlite_master WHERE name='source_requests'").fetchone() else [],'checks':[dict(r) for r in db.execute('SELECT * FROM check_stats ORDER BY last_attempt DESC LIMIT 100')],
                 'listing_queue':listing_queue(db),
                 'refused_alerts':sum(h['source_refused'] for h in alert_health),
                 'verification_failed_alerts':sum(h['verification_failed'] for h in alert_health),
@@ -205,7 +206,28 @@ def handler(path, public=False):
             except sqlite3.Error:self.reply_json({'error':'Database busy'},503);return
             except (ValueError,TypeError,KeyError) as e:self.reply_json({'error':str(e)[:200]},400);return
             self.reply_json({'ok':True})
+        def failover_request(self):
+            """Watchdog API: /heartbeat, /promote, /demote with 'Authorization: Bearer HEARTBEAT_SECRET'."""
+            import failover
+            if not failover.secret_ok(self.headers.get('Authorization','')):self.reply_json({'error':'Unauthorized'},401);return
+            try:
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<=length<=65536:raise ValueError('Request too large')
+                body=json.loads(self.rfile.read(length) or b'{}') if length else {}
+                if not isinstance(body,dict):raise ValueError('Invalid request')
+                reason=str(body.get('reason') or ('watchdog' if self.path=='/promote' else 'manual failback'))[:100]
+                if self.path=='/heartbeat':
+                    db=connect(path)
+                    try:result=failover.heartbeat(db,body)
+                    finally:db.close()
+                elif self.path=='/promote':result=failover.promote(path,reason=reason)
+                else:result=failover.demote(path,reason=reason)
+            except sqlite3.Error:self.reply_json({'error':'Database busy'},503);return
+            except (ValueError,TypeError) as e:self.reply_json({'error':str(e)[:200]},400);return
+            self.reply_json(result)
         def do_POST(self):
+            if self.path in ('/heartbeat','/promote','/demote'):
+                self.failover_request();return
             if self.path in ('/api/worker/claim','/api/worker/result'):
                 self.worker_request();return
             if passwordless and self.path=='/login':
@@ -427,7 +449,12 @@ def handler(path, public=False):
             if self.path=='/readyz':
                 data=status(path);r=data['reliability'];now=time.time()
                 ok=now-data['heartbeat']<90 and now-r['health_heartbeat']<90 and not r['issues']
-                self.reply('ready' if ok else 'monitor needs attention',200 if ok else 503);return
+                f=data['failover']
+                # Public on purpose (uptime monitors): role and counters only, no message text or secrets.
+                self.reply_json({'ready':ok,'status':'ready' if ok else 'monitor needs attention','role':f['role'],
+                    'configured_role':f['configured_role'],'last_bms_success':f['last_bms_success'],
+                    'outbox_depth':f['outbox_depth'],'last_telegram_success_at':f['last_telegram_success_at'],
+                    'last_failed_send_at':f['last_failed_send_at'],'dead_letters':f['dead_letters']},200 if ok else 503);return
             if self.path=='/healthz':
                 self.reply('ok');return
             asset=PWA_FILES.get(urlsplit(self.path).path)

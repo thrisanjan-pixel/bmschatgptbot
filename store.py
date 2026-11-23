@@ -32,6 +32,14 @@ def connect(path):
         try:db.execute("ALTER TABLE outbox ADD COLUMN alert_id TEXT DEFAULT ''")
         except sqlite3.OperationalError as error:
             if 'duplicate column name' not in str(error):raise
+    # dedupe: 'SHOWID:ROWSET' of an alert; release_ts: when the release was seen. Together they
+    # find the same alert queued twice (primary and standby, or a retried detection).
+    columns={row[1] for row in db.execute('PRAGMA table_info(outbox)')}
+    for name,kind in (('dedupe',"TEXT DEFAULT ''"),('release_ts','REAL DEFAULT 0')):
+        if name not in columns:
+            try:db.execute(f'ALTER TABLE outbox ADD COLUMN {name} {kind}')
+            except sqlite3.OperationalError as error:
+                if 'duplicate column name' not in str(error):raise
     return db
 
 
@@ -51,10 +59,43 @@ def enqueue(db, kind, url, payload, expires=0):
                (key, kind, url, json.dumps(payload), expires))
 
 
-def emit(db, event, text, photo=None, alert_id=''):
+DEDUPE_WINDOW = 600  # seconds: the same SHOWID:ROWSET seen this close together is one release
+
+
+def dedupe_tag(show_id, rowset, release_ts):
+    """Stable dedupe key shown in the message text: [SHOWID:ROWSET:RELEASE_TS]."""
+    def clean(value):
+        text = ''.join(ch for ch in str(value) if ch.isalnum() or ch in '-_.,+') or '-'
+        # Long seat lists become a short hash so the tag stays one readable line.
+        return text if len(text) <= 40 else 'h' + hashlib.sha1(text.encode()).hexdigest()[:12]
+    return f'[{clean(show_id)}:{clean(rowset)}:{int(release_ts)}]'
+
+
+def duplicate_of(db, alert_id, dedupe, release_ts, exclude_id='', delivered_only=False):
+    """Id of another outbox row for the same alert and SHOWID:ROWSET within DEDUPE_WINDOW, or None."""
+    if not dedupe:
+        return None
+    row = db.execute('SELECT id FROM outbox WHERE alert_id=? AND dedupe=? AND id<>? AND abs(release_ts-?)<=?'
+                     + (' AND delivered>0' if delivered_only else '') + ' ORDER BY delivered DESC LIMIT 1',
+                     (alert_id, dedupe, exclude_id, release_ts, DEDUPE_WINDOW)).fetchone()
+    return row[0] if row else None
+
+
+def emit(db, event, text, photo=None, alert_id='', dedupe=None):
+    """Queue one message. dedupe=(show_id, rowset, release_ts) stores the dedupe key; the
+    caller puts dedupe_tag(*dedupe) in the text where it reads best. The sender and the
+    failover merge use the key to send one release only once."""
     key = hashlib.sha256(event.encode()).hexdigest()
+    now = time.time()
+    if dedupe:
+        show_id, rowset, release_ts = dedupe
+        dedupe_key = dedupe_tag(show_id, rowset, release_ts)[1:].rsplit(':', 1)[0]
+        db.execute('INSERT OR IGNORE INTO outbox(id,text,photo,created,alert_id,dedupe,release_ts) VALUES(?,?,?,?,?,?,?)',
+                   (key, text, photo, now, alert_id, dedupe_key, release_ts))
+        return key
     db.execute('INSERT OR IGNORE INTO outbox(id,text,photo,created,alert_id) VALUES(?,?,?,?,?)',
-               (key, text, photo, time.time(), alert_id))
+               (key, text, photo, now, alert_id))
+    return key
 
 
 def snapshot(db, key, current, message, photo=None, baseline=False):

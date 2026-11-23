@@ -2,7 +2,7 @@
 import argparse,json,os,re,signal,subprocess,sys,time
 from datetime import datetime
 from pathlib import Path
-from store import connect,meta,setmeta,emit,record_check
+from store import connect,meta,setmeta,emit,record_check,dedupe_tag
 import watch_preferences as prefs
 from http_source import SourceWait
 
@@ -257,20 +257,41 @@ def ingest(db,show,result):
                 message=f"🎟 {len(added)} seat{'s' if len(added)>1 else ''} now available · Row{'s' if len(opened_rows)>1 else ''} {', '.join(opened_rows)}\n\n🎬 {show['movie']}\n📍 {show['venue']}\n📅 {show_date(show)} · {show['time']}\n\n"
                 if block:message+=f"⭐ Best {party} together: {block['row_id']} · seats {seat_span(block['seats'])}\n\n"
                 message+='\n'.join(lines)
-                # Shorten the seat list, never the exact booking link at the end.
-                link=f"\n\n{result['url']}";limit=950-len(link)
+                # Dedupe key: the showtime and exactly which seats opened, so primary and standby
+                # copies of one release are sent once. It sits just above the booking link.
+                rowset='+'.join(r+'-'+','.join(sorted((s['seat'] for s in added if s['row_id']==r),key=seat_order)) for r in opened_rows)
+                dedupe=(show['id'],rowset,now)
+                # Shorten the seat list, never the dedupe tag or the exact booking link at the end.
+                link=f"\n{dedupe_tag(*dedupe)}\n\n{result['url']}";limit=950-len(link)
                 if len(message)>limit:message=message[:limit-1].rstrip()+'…'
                 message+=link
                 try:
                     from seat_map import render
                     photo=render(show,result,opened_rows,{(block['row_id'],s) for s in block['seats']} if block else ())
                 except Exception:photo=None  # The text alert still carries every detail.
-                emit(db,'row:'+rule['id']+':'+show['id']+':'+str(time.time_ns()),message,photo,alert_id=rule['id'])
+                emit(db,'row:'+rule['id']+':'+show['id']+':'+str(time.time_ns()),message,photo,alert_id=rule['id'],dedupe=dedupe)
                 db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(now,rule['id']))
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
                     (key,signature,json.dumps(sorted(current))))
     process_seat_photos(db,show,result)
     db.execute('UPDATE row_layouts SET payload=?,checked=?,error=?,due=0,manual=0,sold_out_at=0 WHERE show_id=?',(json.dumps(result),time.time(),'',show['id']));db.commit()
+    after_success(db,show,result)
+
+
+def after_success(db,show,result):
+    """Healthchecks ping and the stale-payload check after a good seat read. Never fails the read."""
+    try:
+        import failover
+        failover.ping_healthchecks(db)
+        # Seats move often on show day; a layout frozen for 3x the expected refresh is suspect.
+        if show_day(show):
+            failover.observe_payload(db,'seats',show['id'],sorted((s['row_id'],s['seat']) for s in result.get('available',[])),
+                                     failover.env_number('BMS_STALE_REFRESH_SECONDS',1200))
+        db.commit()
+    except Exception as error:
+        db.rollback()
+        import logging
+        logging.warning('post-read checks skipped: %s',type(error).__name__)
 
 def targets(db,now=None):
     """(sorted showtime ids read for active row alerts or waiting seat photos, the subset an urgent alert reads)."""

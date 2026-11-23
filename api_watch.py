@@ -13,7 +13,7 @@ import time
 from api_source import CATALOG,ReadError,WrongDateError,end_day,get_json,movies,no_regional_shows,parse,seat_layout_url,show_url,today
 from http_source import SourceWait
 from local_credentials import load
-from store import connect,coverage,emit,enqueue,meta,setmeta,record_check
+from store import connect,coverage,dedupe_tag,emit,enqueue,meta,setmeta,record_check
 from telegram import drain,send
 import watch_preferences as preferences
 
@@ -100,9 +100,13 @@ def ingest(db,job,data):
                         if len(chunks[-1])+len(block)>2800:chunks.append('')
                         chunks[-1]+=block
                     for index,chunk in enumerate(chunks):
-                        text=heading+chunk;messages.append((f'{alert_id}:{key}:{revision}:{venue}:{index}:'+hashlib.sha1(text.encode()).hexdigest()[:8],text))
+                        # Dedupe key: the listing and cinema, plus a hash of exactly what changed. Its tag
+                        # goes under the heading, so the message still ends with its booking link.
+                        dedupe=(f"{args['event']}-{result['day']}-{venue}",hashlib.sha1(chunk.encode()).hexdigest()[:10],int(time.time()))
+                        text=heading+chunk;messages.append((f'{alert_id}:{key}:{revision}:{venue}:{index}:'+hashlib.sha1(text.encode()).hexdigest()[:8],
+                            heading+dedupe_tag(*dedupe)+'\n'+chunk,dedupe))
                 # Already queued by an earlier deferred pass of this same baseline.
-                if all(db.execute('SELECT 1 FROM outbox WHERE id=?',(hashlib.sha256(event.encode()).hexdigest(),)).fetchone() for event,_ in messages):continue
+                if all(db.execute('SELECT 1 FROM outbox WHERE id=?',(hashlib.sha256(event.encode()).hexdigest(),)).fetchone() for event,_,_ in messages):continue
                 now=time.time()
                 pending=db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(alert_id,)).fetchone()
                 # The interval spaces separate ingests; one ingest's changes go out together.
@@ -114,7 +118,7 @@ def ingest(db,job,data):
                             for line,url,show,names in group['lines']:
                                 preferences.queue_seat_photo(db,alert_id,show['id'],names,'gate',heading_for(show)+line+'\n'+url+'\n',now)
                     else:
-                        for event,text in messages:emit(db,event,text+('\n(seat count unavailable)' if minimum else ''),alert_id=alert_id)
+                        for event,text,dedupe in messages:emit(db,event,text+('\n(seat count unavailable)' if minimum else ''),alert_id=alert_id,dedupe=dedupe)
                         if rows:
                             # The text goes out at once; the seat-map photo follows after the next seat read.
                             for group in groups.values():
@@ -380,6 +384,12 @@ class Monitor:
             db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(time.time(),time.time()+poll_interval(db,job),job['id']))
             record_check(db,'listings',job['id'],started)
             db.commit();logging.info('%s checked',job['kind'])
+            try:
+                # Healthchecks.io hears only about successful BookMyShow checks, at most once a minute.
+                import failover
+                failover.ping_healthchecks(db);db.commit()
+            except Exception as error:
+                db.rollback();logging.warning('Healthchecks ping skipped: %s',type(error).__name__)
         except Exception as error:
             db.rollback()
             if isinstance(error,SourceWait):

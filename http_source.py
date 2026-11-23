@@ -1,5 +1,5 @@
 """Persistent source request budgets and safe HTTP outcome logging."""
-import io,math,os,random,time,urllib.request,urllib.error
+import io,logging,math,os,random,time,urllib.request,urllib.error
 from urllib.parse import urlsplit
 from store import connect
 
@@ -130,6 +130,11 @@ def reserve(db,url,now=None,manual=False,metadata=False):
         manual=bool(manual and parts.netloc in MANUAL)
         lane=1 if manual else 2 if metadata and parts.netloc in METADATA else 0
         limit,gap=policy(parts.netloc,now) if lane==0 else (MANUAL,METADATA)[lane-1][parts.netloc]
+        if lane==0:
+            # A hot standby polls too; STANDBY_RATE_FACTOR keeps its extra BookMyShow traffic small.
+            from role import standby_scale
+            scale=standby_scale(db)
+            if scale<1:limit,gap=max(1,int(limit*scale)),gap/scale
         row=db.execute('SELECT not_before FROM source_hosts WHERE host=?',(parts.netloc,)).fetchone()
         count,oldest=db.execute('SELECT count(*),min(at) FROM source_requests WHERE host=? AND at>? AND manual=?',(parts.netloc,now-3600,lane)).fetchone()
         # Every lane honors the host spacing, including manual and metadata reads.
@@ -168,6 +173,11 @@ def record_outcome(db,host,status,headers=None,now=None):
     db.execute('INSERT OR IGNORE INTO source_health(host) VALUES(?)',(host,))
     if kind=='ok':
         db.execute("UPDATE source_health SET failures=0,reason='',alerted=0 WHERE host=?",(host,));return kind
+    if kind in ('cloudflare_block','forbidden'):
+        # The CF-Ray id lets BookMyShow or Cloudflare find this exact refusal.
+        logging.warning('BookMyShow %s refused with HTTP 403 (%s), CF-Ray %s',host,kind,str(headers.get('CF-Ray','') or 'none')[:80])
+    elif kind=='rate_limited':
+        logging.warning('BookMyShow %s rate-limited us (HTTP 429), Retry-After %s',host,str(headers.get('Retry-After','') or 'none')[:40])
     db.execute('UPDATE source_health SET failures=failures+1,reason=? WHERE host=?',(kind,host))
     failures=db.execute('SELECT failures FROM source_health WHERE host=?',(host,)).fetchone()[0]
     rest=retry_delay(status,str(headers.get('Retry-After','')) or None) if kind=='rate_limited' else backoff(kind,failures)

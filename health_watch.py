@@ -90,6 +90,12 @@ def main():
    except Exception:setmeta(db,'backup_error','Automatic backup failed; download a backup and check storage.');db.commit()
    if load():
     db.execute('BEGIN IMMEDIATE');drain(db,commit=False,system_only=True);db.commit()
+   # A standby mirrors the primary's alerts from its Litestream replica every few minutes.
+   try:
+    import failover
+    failover.maybe_sync_config(db)
+   except Exception as error:
+    db.rollback();__import__('logging').warning('standby alert sync failed: %s',str(error)[:200])
   except Exception:
    db.rollback()
   time.sleep(15)

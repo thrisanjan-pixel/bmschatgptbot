@@ -1,0 +1,21 @@
+# Litestream continuous replication of the bot database to Cloudflare R2.
+# Every value comes from the environment at start-up (Litestream expands ${VAR});
+# no credential is stored in this file or the image.
+#   primary  -> s3://$LITESTREAM_BUCKET/primary/
+#   standby  -> s3://$LITESTREAM_BUCKET/standby/
+# LITESTREAM_REPLICA_PATH is set from BOT_ROLE by deploy/railway-entrypoint.sh.
+addr: "127.0.0.1:9090"   # local /metrics for the dashboard's Failover panel only
+dbs:
+  - path: ${BMS_DB}
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: ${LITESTREAM_REPLICA_PATH}
+        endpoint: ${LITESTREAM_ENDPOINT}
+        region: auto
+        force-path-style: true
+        access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+        sync-interval: 1s
+        snapshot-interval: 6h
+        retention: 72h

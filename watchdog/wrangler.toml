@@ -1,0 +1,28 @@
+# Screenwatch failover watchdog. Deploy: see watchdog/README.md.
+name = "screenwatch-watchdog"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Backup only: re-arms the Durable Object alarm if it was ever lost. The alarm does the work.
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[durable_objects.bindings]]
+name = "WATCHDOG"
+class_name = "Watchdog"
+
+# SQLite-backed Durable Objects are available on the Workers free plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Watchdog"]
+
+[vars]
+PRIMARY_URL = "https://REPLACE-primary.example.com"
+STANDBY_URL = "https://REPLACE-standby.example.com"
+GRACE_SECONDS = "180"
+INTERVAL_SECONDS = "60"
+NTFY_URL = "https://ntfy.sh"
+
+# Secrets (never in this file):
+#   npx wrangler secret put HEARTBEAT_SECRET   (same value as HEARTBEAT_SECRET on both bot instances)
+#   npx wrangler secret put NTFY_TOPIC         (your private ntfy topic name)
