@@ -25,6 +25,26 @@ class CategoryMappingError(ValueError):
     pass
 
 
+# BookMyShow answers a seat-layout request for a sold-out show with HTTP 200 and
+# {"blnSuccess":"false","intException":"3306",...,"strException":"... sold out ... (#159)"}.
+SOLD_OUT_EXCEPTION='3306'
+
+
+class SoldOut(ValueError):
+    """The show has no seats left. This is a normal state, not a source error."""
+    sold_out=True
+    def __init__(self):
+        super().__init__('Sold out')
+
+
+def refusal_kind(result):
+    """'sold_out' for BookMyShow's sold-out reply, otherwise 'refused'."""
+    code=str(result.get('intException','')).strip()
+    text=str(result.get('strException',''))
+    if code==SOLD_OUT_EXCEPTION or '(#159)' in text:return 'sold_out'
+    return 'refused'
+
+
 class SeatHTTPError(ValueError):
     def __init__(self, source, error):
         super().__init__(f'{source} HTTP {error.code}')
@@ -177,7 +197,9 @@ def read(show,timeout=20,manual=False):
         raise ValueError('Seat source could not be reached') from error
     try:
         result=json.loads(raw)['BookMyShow']
-        if result.get('blnSuccess')!='true':raise ValueError('Seat source refused layout')
+        if result.get('blnSuccess')!='true':
+            if refusal_kind(result)=='sold_out':raise SoldOut()
+            raise ValueError('Seat source refused layout')
         # The layout includes category names. Prefer a unique name match to
         # the verified showtime categories, avoiding a second endpoint that
         # may be blocked even while the live layout endpoint works.

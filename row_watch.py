@@ -13,6 +13,50 @@ def schema(db):
     # manual=1: someone pressed Load seat rows; it runs at once on the manual budget.
     if 'manual' not in {r[1] for r in db.execute('PRAGMA table_info(row_layouts)')}:
         db.execute('ALTER TABLE row_layouts ADD COLUMN manual INTEGER DEFAULT 0')
+    # sold_out_at: when the seat source last said this show is sold out (intException 3306).
+    if 'sold_out_at' not in {r[1] for r in db.execute('PRAGMA table_info(row_layouts)')}:
+        db.execute('ALTER TABLE row_layouts ADD COLUMN sold_out_at REAL DEFAULT 0')
+
+OPEN_STATUSES=('1','2','3')
+
+
+def sold_out_recheck():
+    """Seconds between seat reads of a show the listing still reports as sold out."""
+    return max(120,float(os.environ.get('BMS_SOLD_OUT_RECHECK','900')))
+
+
+def listing_state(show):
+    """What the showtime listing (already fetched every minute) says about seats.
+
+    'open' when any category has seats, 'sold_out' when every category is sold out,
+    None when the listing carries no category status. This costs no extra request."""
+    statuses=[str(c.get('status','')) for c in (show.get('categories') or {}).values() if isinstance(c,dict)]
+    if not statuses:return None
+    if any(status in OPEN_STATUSES for status in statuses):return 'open'
+    return 'sold_out' if all(status=='0' for status in statuses) else None
+
+
+def probe_skips(db,show,job,now):
+    """True when the full seat layout read can be skipped.
+
+    Only for a show the seat source itself confirmed sold out (intException 3306): while the
+    listing still says every category is sold out, the layout is read again only after the
+    backstop interval. Shows with seats are never gated by the listing, which can lag."""
+    confirmed=float(job['sold_out_at'] or 0)
+    if not confirmed or os.environ.get('BMS_LISTING_PROBE','1')!='1' or listing_state(show)!='sold_out':return False
+    return now-confirmed<sold_out_recheck()
+
+
+def mark_sold_out(db,show_id,now,confirmed):
+    """Store the sold-out state: no seat is open, so any later release counts as new."""
+    row=db.execute('SELECT payload FROM row_layouts WHERE show_id=?',(show_id,)).fetchone()
+    try:data=json.loads(row[0]) if row and row[0] else {}
+    except ValueError:data={}
+    data['available']=[];data['seats']=[{**seat,'available':False} for seat in data.get('seats',[])];data['sold_out']=True
+    # Forget seats remembered as open for this showtime, so released seats alert again.
+    db.execute("UPDATE row_alert_state SET available='[]' WHERE signature LIKE ?",(json.dumps([show_id])[:-1]+',%',))
+    db.execute('UPDATE row_layouts SET payload=?,error=?,sold_out_at=CASE WHEN ? THEN ? ELSE sold_out_at END WHERE show_id=?',
+        (json.dumps(data),'Sold out',int(confirmed),now,show_id))
 
 def request(db,show_id):
     schema(db)
@@ -212,7 +256,7 @@ def ingest(db,show,result):
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
                     (key,signature,json.dumps(sorted(current))))
     process_seat_photos(db,show,result)
-    db.execute('UPDATE row_layouts SET payload=?,checked=?,error=?,due=0,manual=0 WHERE show_id=?',(json.dumps(result),time.time(),'',show['id']));db.commit()
+    db.execute('UPDATE row_layouts SET payload=?,checked=?,error=?,due=0,manual=0,sold_out_at=0 WHERE show_id=?',(json.dumps(result),time.time(),'',show['id']));db.commit()
 
 def targets(db,now=None):
     """(sorted showtime ids read for active row alerts or waiting seat photos, the subset an urgent alert reads)."""
@@ -236,6 +280,11 @@ def schedule_active(db,now,interval=30):
         # A '*' alert finds new showtimes on its own, so their rows may not exist yet.
         db.execute("INSERT OR IGNORE INTO row_layouts(show_id,payload) VALUES(?,'{}')",(show_id,))
         db.execute('UPDATE row_layouts SET due=? WHERE show_id=? AND due=0 AND checked<?',(now,show_id,now-interval))
+    # A sold-out show waits for its backstop re-check, unless the listing shows seats again.
+    for row in db.execute("SELECT r.show_id,s.payload FROM row_layouts r JOIN sessions s ON s.id=r.show_id WHERE r.error='Sold out' AND r.due>?",(now,)).fetchall():
+        try:show=json.loads(row['payload'])
+        except ValueError:continue
+        if listing_state(show)=='open':db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(now,row['show_id']))
     db.commit()
 
 def poll_policy(db,now,cloud=True):
@@ -309,19 +358,150 @@ def main():
             time.sleep(5)
     db.close()
 
+def worker_mode():
+    """'worker' when seat layouts are read by the home seat worker (BMS_SEAT_SOURCE=worker)."""
+    return os.environ.get('BMS_SEAT_SOURCE','server')=='worker'
+
+
+def worker_online(db,now):
+    stale=max(30,float(os.environ.get('BMS_WORKER_STALE','180')))
+    return now-float(meta(db,'seat_worker_seen','0'))<stale
+
+
+def note_worker_state(db,now):
+    """Record whether the home seat worker is reachable; tell the operator once when it drops."""
+    online=worker_online(db,now)
+    was=meta(db,'seat_worker_offline','0')=='1'
+    if online and was:setmeta(db,'seat_worker_offline',0)
+    elif not online and not was:
+        setmeta(db,'seat_worker_offline',1)
+        fallback=os.environ.get('BMS_WORKER_FALLBACK','none')=='server'
+        emit(db,f'seat-worker-offline:{int(now)}','⚠️ The home seat worker is offline. '+
+            ('The server reads seat layouts itself until it is back.' if fallback else
+             'Seat-row alerts pause until it is back; showtime alerts keep working.'),alert_id='__health__')
+    return online
+
+
+def take_job(db,now,cloud=True):
+    """Next seat read to run: (job row, manual flag, show) or None. Expired showtimes are closed here."""
+    job=manual_job(db,now) if cloud else None;manual=bool(job)
+    job=job or next_job(db,now)
+    if not job:return None
+    row=db.execute('SELECT payload FROM sessions WHERE id=? AND cutoff>?',(job['show_id'],now)).fetchone()
+    if not row:
+        db.execute("UPDATE row_layouts SET due=0,manual=0,error='Showtime has expired' WHERE show_id=?",(job['show_id'],));db.commit();return None
+    show=json.loads(row[0])
+    if not manual and job['show_id'] in queue_order(db,now)[2] and probe_skips(db,show,job,now):
+        # The listing says sold out and the last layout read is recent: spend no seat request.
+        mark_sold_out(db,job['show_id'],now,False)
+        db.execute('UPDATE row_layouts SET due=?,manual=0 WHERE show_id=?',(now+sold_out_recheck(),job['show_id']))
+        record_check(db,'rows',show['id'],now);db.commit();return None
+    return job,manual,show
+
+
+def record_failure(db,show_id,show,e,started,manual=False):
+    """Store a failed seat read (or a sold-out answer) and schedule the retry."""
+    if isinstance(e,SourceWait):
+        # A short manual wait (10 s gap) retries soon; a used-up manual budget joins the normal queue.
+        if manual:
+            if e.until-time.time()<=60:db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(e.until,show_id))
+            else:db.execute('UPDATE row_layouts SET manual=0 WHERE show_id=?',(show_id,))
+            db.commit();return
+        # Leave the job's due alone so it keeps its place in the queue; only the budget waits.
+        setmeta(db,'seat_budget_until',e.until);db.commit();return
+    if getattr(e,'sold_out',False):
+        # Sold out is a normal answer, not a source error. Re-check on the slow backstop;
+        # the listing probe brings the read forward as soon as seats reappear.
+        mark_sold_out(db,show_id,time.time(),True)
+        retry_at=time.time()+sold_out_recheck() if show_id in queue_order(db,time.time())[2] else 0
+        db.execute('UPDATE row_layouts SET due=?,manual=0 WHERE show_id=?',(retry_at,show_id))
+        record_check(db,'rows',show['id'],started);db.commit();return
+    message=(str(e).partition(chr(10))[0] or type(e).__name__)[:200]
+    if getattr(e,'diagnostic',None):
+        setmeta(db,'seat_last_refusal',json.dumps({**e.diagnostic,'at':time.time()}))
+    retry_at=time.time()+max(300,getattr(e,'retry',0) or 0)
+    if getattr(e,'status',0)==429:
+        retry_at=time.time()+max(300,e.retry)
+        setmeta(db,'seat_cooldown_until',retry_at)
+        setmeta(db,'seat_last_rate_limit',time.time())
+    record_check(db,'rows',show['id'],started,message)
+    # A show no alert watches (only "Load seat rows" was pressed) is not retried: the page shows the error.
+    if show_id not in queue_order(db,time.time())[2]:retry_at=0
+    db.execute('UPDATE row_layouts SET error=?,due=?,manual=0 WHERE show_id=?',(message,retry_at,show_id))
+    db.commit()
+
+
+WORKER_LEASE=120  # Seconds a handed-out seat read stays reserved for the home worker.
+
+
+def claim(db,now=None):
+    """Hand the home seat worker its next seat read, or None. Leases it so it is not handed out twice."""
+    schema(db);now=time.time() if now is None else now
+    setmeta(db,'seat_worker_seen',now);db.commit()
+    taken=take_job(db,now)
+    if not taken:return None
+    job,manual,show=taken
+    db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(now+WORKER_LEASE,job['show_id']))
+    setmeta(db,'seat_worker_lease:'+job['show_id'],json.dumps({'at':now,'manual':manual}));db.commit()
+    return {'show_id':job['show_id'],'manual':manual,'show':show}
+
+
+class WorkerFailure(ValueError):
+    """A failure the home worker reported, carrying the same fields as a local one."""
+    def __init__(self,error):
+        super().__init__(str(error.get('message') or 'Seat read failed')[:200])
+        self.status=int(error.get('status') or 0)
+        self.retry=max(0,float(error.get('retry') or 0))
+        self.sold_out=bool(error.get('sold_out'))
+
+
+def submit(db,show_id,data=None,error=None,now=None):
+    """Store what the home seat worker read for a leased showtime."""
+    schema(db);now=time.time() if now is None else now
+    setmeta(db,'seat_worker_seen',now)
+    lease=meta(db,'seat_worker_lease:'+str(show_id),'')
+    if not lease:raise ValueError('This seat read was not handed out')
+    lease=json.loads(lease);db.execute('DELETE FROM meta WHERE key=?',('seat_worker_lease:'+show_id,))
+    row=db.execute('SELECT payload FROM sessions WHERE id=?',(show_id,)).fetchone()
+    if not row:db.commit();raise ValueError('Unknown showtime')
+    show=json.loads(row[0])
+    if error is not None:
+        if not isinstance(error,dict):raise ValueError('Invalid error')
+        if error.get('wait_until'):
+            # The worker's own budget said wait: put the read back at that time, keeping its place.
+            db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(min(float(error['wait_until']),now+3600),show_id));db.commit();return
+        record_failure(db,show_id,show,WorkerFailure(error),lease['at'],lease.get('manual',False));return
+    if not isinstance(data,dict) or not all(isinstance(data.get(k),list) for k in ('rows','available')):
+        raise ValueError('Invalid seat layout')
+    try:
+        ingest(db,show,data);record_check(db,'rows',show_id,lease['at']);db.commit()
+    except Exception as e:
+        db.rollback();record_failure(db,show_id,show,e,lease['at'],lease.get('manual',False))
+
+
+def release_expired_leases(db,now):
+    """A worker that died mid-read leaves a lease; after it lapses the read is due again by itself."""
+    for key, value in db.execute("SELECT key,value FROM meta WHERE key LIKE 'seat_worker_lease:%'").fetchall():
+        try:at=json.loads(value)['at']
+        except (ValueError,KeyError,TypeError):at=0
+        if now-at>WORKER_LEASE:db.execute('DELETE FROM meta WHERE key=?',(key,))
+
+
 def step(db):
     now=time.time()
     cloud = os.environ.get('BMS_PUBLIC')=='1'
     interval,spacing=poll_policy(db,now,cloud)
     schedule_active(db,now,interval)
     setmeta(db,'row_reader_heartbeat',now);db.commit()
-    job=manual_job(db,now) if cloud else None;manual=bool(job)
-    job=job or next_job(db,now)
-    if not job:time.sleep(1);return
-    row=db.execute('SELECT payload FROM sessions WHERE id=? AND cutoff>?',(job['show_id'],now)).fetchone()
-    if not row:
-        db.execute("UPDATE row_layouts SET due=0,manual=0,error='Showtime has expired' WHERE show_id=?",(job['show_id'],));db.commit();return
-    show=json.loads(row[0])
+    if worker_mode():
+        release_expired_leases(db,now)
+        online=note_worker_state(db,now);db.commit()
+        # The home worker claims reads through the dashboard. Without it, the server reads
+        # only when BMS_WORKER_FALLBACK=server; otherwise seat reads wait for the worker.
+        if online or os.environ.get('BMS_WORKER_FALLBACK','none')!='server':time.sleep(1);return
+    taken=take_job(db,now,cloud)
+    if not taken:time.sleep(1);return
+    job,manual,show=taken
     try:
         if cloud:
             # Persist request spacing so restarting cannot release a burst.
@@ -339,25 +519,5 @@ def step(db):
     except Exception as e:
         # Discard any partial alert state from a failed ingest before recording the failure.
         db.rollback()
-        if isinstance(e,SourceWait):
-            # A short manual wait (10 s gap) retries soon; a used-up manual budget joins the normal queue.
-            if manual:
-                if e.until-time.time()<=60:db.execute('UPDATE row_layouts SET due=? WHERE show_id=?',(e.until,job['show_id']))
-                else:db.execute('UPDATE row_layouts SET manual=0 WHERE show_id=?',(job['show_id'],))
-                db.commit();return
-            # Leave the job's due alone so it keeps its place in the queue; only the budget waits.
-            setmeta(db,'seat_budget_until',e.until);db.commit();return
-        message=(str(e).partition(chr(10))[0] or type(e).__name__)[:200]
-        if getattr(e,'diagnostic',None):
-            setmeta(db,'seat_last_refusal',json.dumps({**e.diagnostic,'at':time.time()}))
-        retry_at=time.time()+max(300,getattr(e,'retry',0) or 0)
-        if getattr(e,'status',0)==429:
-            retry_at=time.time()+max(300,e.retry)
-            setmeta(db,'seat_cooldown_until',retry_at)
-            setmeta(db,'seat_last_rate_limit',time.time())
-        record_check(db,'rows',show['id'],now,message)
-        # A show no alert watches (only "Load seat rows" was pressed) is not retried: the page shows the error.
-        if job['show_id'] not in queue_order(db,time.time())[2]:retry_at=0
-        db.execute('UPDATE row_layouts SET error=?,due=?,manual=0 WHERE show_id=?',(message,retry_at,job['show_id']))
-        db.commit()
+        record_failure(db,job['show_id'],show,e,now,manual)
 if __name__=='__main__':main()
