@@ -5,8 +5,8 @@ import json
 import re
 import urllib.error
 import urllib.parse
+import urllib.request
 from http_source import open_request
-from curl_cffi import requests as cffi_requests
 from zoneinfo import ZoneInfo
 
 IST=ZoneInfo('Asia/Kolkata')
@@ -24,13 +24,11 @@ class WrongDateError(ReadError):
 
 def today():return dt.datetime.now(IST).strftime('%Y%m%d')
 def end_day(day):return (dt.datetime.strptime(day,'%Y%m%d').replace(tzinfo=IST)+dt.timedelta(days=1)).timestamp()
-
 def seat_layout_url(show):
     event=str(show.get('event',''));venue=str(show.get('venue_code',''));session=str(show.get('session',''));day=str(show.get('date',''))
     if not re.fullmatch(r'ET[A-Z0-9]{6,}',event) or not re.fullmatch(r'[A-Z0-9]+',venue) or not re.fullmatch(r'[A-Za-z0-9]+',session) or not re.fullmatch(r'\d{8}',day):
         raise ReadError('Invalid showtime link identity')
     return f'{BASE}/movies/hyderabad/seat-layout/{event}/{venue}/{session}/{day}'
-
 def nodes(value):
     if isinstance(value,dict):
         yield value
@@ -39,52 +37,42 @@ def nodes(value):
         for child in value:yield from nodes(child)
 
 def refusal_details(error):
+    # Never persist cookies, authorization headers or response bodies.
     allowed=('Retry-After','Server','Content-Type','CF-Mitigated')
-    headers={}
-    if hasattr(error, 'response') and error.response:
-        headers={key: str(error.response.headers.get(key))[:160] for key in allowed if error.response.headers.get(key) is not None}
-    return {'status':error.response.status_code if hasattr(error,'response') and error.response else 0,'headers':headers}
+    headers={key: str(error.headers.get(key))[:160] for key in allowed
+             if error.headers and error.headers.get(key) is not None}
+    return {'status':error.code,'headers':headers}
+
 
 def retry_delay(status, header=None):
     minimum = {403: 180}.get(status, 60 if 500 <= status <= 599 else 300)
     if not header:
-        return min(900, minimum)  # Cap default delay at 15 minutes
-    
-    header = header.strip()
+        return minimum
+    header=header.strip()
+    if header.isdigit():
+        return max(minimum, int(header))
     try:
-        if header.isdigit():
-            return min(900, max(minimum, int(header)))  # Cap max delay at 15 minutes
         retry_at = parsedate_to_datetime(header)
-        return min(900, max(minimum, int((retry_at - dt.datetime.now(dt.timezone.utc)).total_seconds()) + 1))
+        return max(minimum, int((retry_at - dt.datetime.now(dt.timezone.utc)).total_seconds()) + 1)
     except (TypeError, ValueError, OverflowError):
-        return min(900, minimum)
+        return minimum
+
 
 def get_json(url):
     p=urllib.parse.urlparse(url)
     if p.scheme!='https' or p.netloc not in ('in.bookmyshow.com','in-cdn.bmscdn.com'):raise ReadError('Invalid source host')
+    req=urllib.request.Request(url,headers={'User-Agent':'BMSLocalNotifier/0.1','Accept':'application/json',
+        'x-app-code':'WEB','x-region-code':'HYD','x-region-slug':'hyderabad','x-platform-code':'DESKTOP-WEB','x-location-selection':'manual'})
     try:
-        # Use curl_cffi with Safari fingerprint
-        with cffi_requests.get(url, impersonate="safari", timeout=25) as response:
-            if response.status_code >= 400:
-                from http_source import SourceWait
-                retry = retry_delay(response.status_code, response.headers.get('Retry-After'))
-                raise ReadError(f'Source HTTP {response.status_code}', response.status_code, retry)
-            return response.json()
-    except Exception as error:
-        from http_source import SourceWait
-        if isinstance(error, (ReadError, SourceWait)):
-            raise
-        
-        status = 0
-        headers = {}
-        if hasattr(error, 'response') and error.response is not None:
-            status = error.response.status_code
-            headers = error.response.headers
-        
-        retry = retry_delay(status, headers.get('Retry-After'))
-        failure = ReadError(f'Source HTTP {status}' if status else 'Source connection or JSON error', status, retry)
-        failure.diagnostic = refusal_details(error)
+        with open_request(req,timeout=25) as response:return json.load(response)
+    except urllib.error.HTTPError as error:
+        status=error.code
+        retry=retry_delay(status,error.headers.get('Retry-After') if error.headers else None)
+        failure=ReadError(f'Source HTTP {status}',status,retry)
+        failure.diagnostic=refusal_details(error)
+        error.close()
         raise failure from None
+    except (OSError,ValueError,urllib.error.URLError):raise ReadError('Source connection or JSON error') from None
 
 def movies(data):
     if not isinstance(data.get('listings'),list):raise ReadError('Catalogue schema changed')
@@ -117,6 +105,7 @@ def no_regional_shows(data):
         and body.get('additionalData') == {}
         and not body.get('showtimeWidgets')
     )
+
 
 def parse(data,event,requested_day='',now=None):
     now=dt.datetime.now(IST).timestamp() if now is None else now
@@ -178,6 +167,7 @@ def parse(data,event,requested_day='',now=None):
                         if not key:raise ReadError('Unknown seat category')
                         categories[key]={'name':str(c.get('priceDesc') or key),'status':status,'price':str(c.get('curPrice') or '')}
                     key=f'{code}:{day}:{session}:{event}'
+                    # Upstream nulls become text so alerts and filters never fail on a missing label.
                     shows[key]={'id':key,'event':event,'session':session,'venue_code':code,'venue':str(venue.get('venueName') or code),
                         'date':day,'movie':film,'language':language,'format':str(raw.get('screenAttr') or item.get('attributes') or ''),
                         'time':str(raw.get('title') or item.get('showTime') or ''),'cutoff':cutoff,'categories':categories,

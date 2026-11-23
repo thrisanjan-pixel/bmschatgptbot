@@ -1,8 +1,7 @@
 """Persistent source request budgets and safe HTTP outcome logging."""
-import math,os,time,urllib.error
+import io,math,os,time,urllib.request,urllib.error
 from urllib.parse import urlsplit
 from store import connect
-from curl_cffi import requests as cffi_requests
 
 class SourceWait(RuntimeError):
     def __init__(self,until):
@@ -11,7 +10,11 @@ class SourceWait(RuntimeError):
 
 
 POLICIES={'services-in.bookmyshow.com':(60,60),'in.bookmyshow.com':(60,60),'in-cdn.bmscdn.com':(6,600)}
+# Seat loads someone asked for on the page: a small separate budget, so they run at once
+# without taking slots from alert checks. Source cooldowns (429) still apply.
 MANUAL={'services-in.bookmyshow.com':(10,10),'in.bookmyshow.com':(10,10)}
+# Seat-category lookups for alert seat reads. Listing checks use every in.bookmyshow.com
+# slot, so these need their own small lane or alert seat reads never finish.
 METADATA={'in.bookmyshow.com':(20,10)}
 
 
@@ -52,7 +55,8 @@ def reserve(db,url,now=None,manual=False,metadata=False):
         limit,gap=(policies,MANUAL,METADATA)[lane][parts.netloc]
         row=db.execute('SELECT not_before FROM source_hosts WHERE host=?',(parts.netloc,)).fetchone()
         count,oldest=db.execute('SELECT count(*),min(at) FROM source_requests WHERE host=? AND at>? AND manual=?',(parts.netloc,now-3600,lane)).fetchone()
-        # FIXED: All lanes share the same host limit to prevent bursty traffic.
+        # Every lane honors the host spacing, including manual and metadata reads.
+        gap=max(gap,policies[parts.netloc][1])
         last=db.execute('SELECT max(at) FROM source_requests WHERE host=? AND at>?',(parts.netloc,now-3600)).fetchone()[0]
         until=max(row[0] if row else 0,(last+gap) if last is not None else 0,(oldest+3600) if count>=limit else 0)
         if until>now:raise SourceWait(until)
@@ -69,33 +73,51 @@ def finish(db,request_id,status,headers=None,outcome='response'):
     if status==429:
         from api_source import retry_delay
         host=db.execute('SELECT host FROM source_requests WHERE id=?',(request_id,)).fetchone()[0]
-        # retry_delay now caps the maximum wait at 15 minutes (900s)
         until=time.time()+retry_delay(status,retry)
         db.execute('INSERT INTO source_hosts VALUES(?,?) ON CONFLICT(host) DO UPDATE SET not_before=max(not_before,excluded.not_before)',(host,until))
     db.commit()
 
 
+IMPERSONATE='safari'
+
+
+class _Response(io.BytesIO):
+    """The urllib response surface the readers use: read(), status, headers, with-block."""
+    def __init__(self,url,status,headers,body):
+        super().__init__(body);self.url=url;self.status=self.code=status;self.headers=headers
+    def geturl(self):return self.url
+
+
+def urlopen(request,timeout=25):
+    """Send a urllib Request through curl_cffi so the TLS handshake matches a real browser.
+
+    Keeps urllib's contract: returns a readable response, raises HTTPError for
+    4xx/5xx (with headers, for Retry-After) and URLError when unreachable.
+    """
+    from curl_cffi import requests as cffi_requests
+    # The impersonated browser supplies its own matching User-Agent.
+    headers={k:v for k,v in request.header_items() if k.lower()!='user-agent'}
+    try:
+        response=cffi_requests.request(request.get_method(),request.full_url,data=request.data,headers=headers,
+            timeout=timeout,impersonate=IMPERSONATE,allow_redirects=True)
+    except Exception as error:
+        raise urllib.error.URLError(f'{type(error).__name__}: {error}') from None
+    if response.status_code>=400:
+        raise urllib.error.HTTPError(request.full_url,response.status_code,response.reason or '',response.headers,io.BytesIO(response.content))
+    return _Response(response.url,response.status_code,response.headers,response.content)
+
+
 def open_request(request,timeout=25,manual=False,metadata=False):
-    url = request.full_url if hasattr(request, 'full_url') else str(request)
-    
-    if os.environ.get('BMS_REQUEST_BUDGET')!='1':
-        return cffi_requests.get(url, impersonate="safari", timeout=timeout)
-        
+    if os.environ.get('BMS_REQUEST_BUDGET')!='1':return urlopen(request,timeout=timeout)
     db=connect(os.environ['BMS_DB'])
     try:
-        request_id=reserve(db,url,manual=manual,metadata=metadata)
+        request_id=reserve(db,request.full_url,manual=manual,metadata=metadata)
         try:
-            response = cffi_requests.get(url, impersonate="safari", timeout=timeout)
-            if response.status_code >= 400:
-                response.raise_for_status()
+            response=urlopen(request,timeout=timeout)
+        except urllib.error.HTTPError as error:
+            finish(db,request_id,error.code,error.headers);raise
         except Exception as error:
-            status_code = 0
-            headers = {}
-            if hasattr(error, 'response') and error.response is not None:
-                status_code = error.response.status_code
-                headers = error.response.headers
-            finish(db,request_id,status_code,headers)
-            raise
-        finish(db,request_id,response.status_code,response.headers)
+            finish(db,request_id,0,outcome=type(error).__name__);raise
+        finish(db,request_id,response.status,response.headers)
         return response
     finally:db.close()
