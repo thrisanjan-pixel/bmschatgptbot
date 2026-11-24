@@ -35,7 +35,9 @@ def sold_out_recheck(show=None,now=None):
     if show_day(show,now):
         from http_source import seat_gap
         return max(seat_gap(),float(os.environ.get('BMS_SHOWDAY_RECHECK','60')))
-    return max(120,float(os.environ.get('BMS_SOLD_OUT_RECHECK','900')))
+    # 0 turns the backstop off: sold-out shows take their turn in the normal rotation.
+    value=float(os.environ.get('BMS_SOLD_OUT_RECHECK','900'))
+    return 0 if value<=0 else max(120,value)
 
 
 def listing_state(show):
@@ -450,7 +452,9 @@ def record_failure(db,show_id,show,e,started,manual=False):
         # Sold out is a normal answer, not a source error. Re-check on the slow backstop;
         # the listing probe brings the read forward as soon as seats reappear.
         mark_sold_out(db,show_id,time.time(),True)
-        retry_at=time.time()+sold_out_recheck(show) if show_id in queue_order(db,time.time())[2] else 0
+        recheck=sold_out_recheck(show)
+        # With no backstop (0) the show is re-queued by schedule_active like any successful read.
+        retry_at=time.time()+recheck if recheck and show_id in queue_order(db,time.time())[2] else 0
         db.execute('UPDATE row_layouts SET due=?,manual=0 WHERE show_id=?',(retry_at,show_id))
         record_check(db,'rows',show['id'],started);db.commit();return
     message=(str(e).partition(chr(10))[0] or type(e).__name__)[:200]
