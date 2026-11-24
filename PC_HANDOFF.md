@@ -2,6 +2,12 @@
 
 This document transfers project context from a cloud Codex conversation. It is a handoff summary, not a full chat transcript. Read it, README.md and deploy/RAILWAY.md before continuing. The user wants the assistant to perform the work, with minimal repeated questions.
 
+## Update (24 Nov 2026, ~22:45 IST, Claude Code)
+- Live is now Railway deployment `3d9fbf5f-9428-49ff-afe9-6b7301f9aab3` = branch `fix/drop-paused-seat-reads` (PR #17), built on main `2e668cc` (PR #16 merged; main had matched live `5e1ad237`).
+- Fix: pausing, editing or finishing an alert used to leave its queued seat reads in the queue, so each ran once more (seen with the paused AMB Gachibowli 17 Dec alert). `row_watch.schedule_active` now stores the showtimes it queued for alerts in meta `seat_alert_targets` and clears the queued read (`due=0`, only when `manual=0`) of any showtime no alert watches any more. "Load seat rows" presses are not touched.
+- After deploy: healthz and readyz 200, BookMyShow requests 200. No alert is active right now (Ameerpet alert completed, AMB and ALUC 17 Dec paused), so the check queue is empty apart from the running 175-check inventory refresh.
+- Still open: the showtime interval is 30 s (120/h); the verified-safe rate is 60 s. Set it back in Activity.
+
 ## Latest state (24 Nov 2026, 21:55 IST, Claude Code) — read this first
 
 This section supersedes everything below where they conflict. Keep it current after every change to the bot.
