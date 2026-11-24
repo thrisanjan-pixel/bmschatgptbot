@@ -91,6 +91,18 @@ class AnyShowTests(Base):
   rows={r['show_id']:r['due'] for r in self.db.execute('SELECT show_id,due FROM row_layouts')}
   self.assertEqual(rows['s1'],0);self.assertEqual(rows['s2'],0);self.assertEqual(rows['s9'],now+500)
   self.assertEqual({q['show_id'] for q in row_watch.queue(self.db,now+1)},{'s9'})
+ def test_sold_out_shows_rotate_with_no_backstop(self):
+  self.add(*[show(i) for i in range(3)]);self.alert();now=time.time();picked=[]
+  class SoldOut(Exception):sold_out=True
+  with patch.dict(os.environ,{'BMS_SOLD_OUT_RECHECK':'0'}):
+   self.assertEqual(row_watch.sold_out_recheck(),0)
+   for _ in range(9):
+    row_watch.schedule_active(self.db,now,interval=20);job=row_watch.next_job(self.db,now)
+    if job:
+     picked.append(job['show_id']);row_watch.record_failure(self.db,job['show_id'],{'id':job['show_id']},SoldOut(),now)
+     self.assertEqual(self.db.execute('SELECT due FROM row_layouts WHERE show_id=?',(job['show_id'],)).fetchone()[0],0)
+    now+=20
+  self.assertEqual(sorted(picked[:3]),['s0','s1','s2']);self.assertEqual(picked[:3],picked[3:6])
  def test_queue_rotates_fairly_over_targets(self):
   self.add(*[show(i) for i in range(5)]);self.alert();now=time.time();picked=[]
   for _ in range(15):
