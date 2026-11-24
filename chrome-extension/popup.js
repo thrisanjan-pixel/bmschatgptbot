@@ -15,7 +15,7 @@ async function render() {
   if (!c.armed.length) { const li = document.createElement('li'); li.className = 'muted'; li.textContent = 'None. Arm "Open on PC" on an alert in the dashboard.'; list.append(li); }
   for (const alert of c.armed) {
     const li = document.createElement('li'), text = document.createElement('span'), button = document.createElement('button');
-    text.textContent = (alert.movie || 'Alert') + (alert.until ? ' · until ' + clock(alert.until) : '');
+    text.textContent = (alert.movie || 'Alert') + (alert.since ? ' · since ' + clock(alert.since) : '');
     button.textContent = 'Cancel'; button.className = 'plain';
     button.onclick = async () => {
       button.disabled = true;

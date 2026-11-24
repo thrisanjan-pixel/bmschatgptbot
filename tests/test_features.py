@@ -306,30 +306,32 @@ class OpenOnPcTests(Base):
   prefs.set_open_on_pc(self.db,row['id'],True);self.assertEqual(self.call(url+'/api/watch',{'action':'pc_cancel','alert':row['id']})[0],403)
   self.assertEqual(self.call(url+'/api/watch',{'action':'pc_cancel','alert':'nope'},csrf)[0],400)
   self.assertEqual(self.call(url+'/api/watch',{'action':'pc_cancel','alert':row['id']},csrf),(200,{'ok':True}))
-  watch=self.call(url+'/api/watch')[1];self.assertEqual(watch['alerts'][0]['preferences']['open_on_pc_until'],0);self.assertEqual(watch['alerts'][0]['open_on_pc_until'],0)
+  watch=self.call(url+'/api/watch')[1];self.assertEqual(watch['alerts'][0]['preferences']['open_on_pc_since'],0);self.assertEqual(watch['alerts'][0]['open_on_pc_since'],0)
   self.assertEqual(set(watch['pc_clients']),{'extension'});self.assertLess(watch['pc_clients']['extension'],60)
   data=self.call(url+'/api/pc-alerts?since=0&client=helper')[1];self.assertTrue(data['extension']);self.assertEqual(data['armed_alerts'],[])
   self.assertEqual(meta(self.db,'pc_helper_seen'),'')  # only the extension counts as a PC client
 
 class PcExtensionServerTests(Base):
- def test_arm_expiry(self):
+ def test_arm_has_no_time_limit(self):
   self.client();self.add(show(1));row=self.alert(open_on_pc=True);t=time.time()
-  until=row['preferences']['open_on_pc_until'];self.assertAlmostEqual(until,t+3*3600,delta=5)
-  # an ordinary edit keeps the expiry; turning off clears it and works with no client
+  since=row['preferences']['open_on_pc_since'];self.assertAlmostEqual(since,t,delta=5);self.assertNotIn('open_on_pc_until',row['preferences'])
+  # an ordinary edit keeps the arm time; turning off clears it and works with no client
   self.db.execute("UPDATE meta SET value='0' WHERE key LIKE 'pc_%_seen'");self.db.commit()
-  prefs.save(self.db,{**row['preferences'],'urgent':True},alert_id=row['id']);self.assertEqual(prefs.rules(self.db)[0]['preferences']['open_on_pc_until'],until)
-  p=row['preferences'];prefs.save(self.db,{**p,'open_on_pc':False},alert_id=row['id']);self.assertEqual(prefs.rules(self.db)[0]['preferences']['open_on_pc_until'],0)
-  # an expired arm reads as off everywhere and is cleared in storage
+  prefs.save(self.db,{**row['preferences'],'urgent':True},alert_id=row['id']);self.assertEqual(prefs.rules(self.db)[0]['preferences']['open_on_pc_since'],since)
+  p=row['preferences'];prefs.save(self.db,{**p,'open_on_pc':False},alert_id=row['id']);self.assertEqual(prefs.rules(self.db)[0]['preferences']['open_on_pc_since'],0)
+  # an arm stays on long after the old 3-hour limit
   self.client();prefs.set_open_on_pc(self.db,row['id'],True)
-  self.assertEqual([a['id'] for a in prefs.pc_alerts(self.db,0)['armed_alerts']],[row['id']])
   stored=lambda:json.loads(self.db.execute('SELECT payload FROM alerts WHERE id=?',(row['id'],)).fetchone()[0])
-  p=stored();p['open_on_pc_until']=time.time()-1;self.db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),row['id']));self.db.commit()
-  r=prefs.pc_alerts(self.db,0);self.assertEqual((r['armed'],r['armed_alerts']),(False,[]));self.assertEqual((stored()['open_on_pc'],stored()['open_on_pc_until']),(False,0))
-  p=stored();p.update(open_on_pc=True,open_on_pc_until=time.time()-1);self.db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),row['id']));self.db.commit()
+  p=stored();p['open_on_pc_since']=time.time()-30*3600;self.db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),row['id']));self.db.commit()
+  r=prefs.pc_alerts(self.db,0);self.assertEqual([a['id'] for a in r['armed_alerts']],[row['id']]);self.assertTrue(stored()['open_on_pc'])
+  # arms saved by older builds: a live expiry becomes an arm time, an expired or expiry-less one is off
+  p=stored();p.pop('open_on_pc_since');p.update(open_on_pc=True,open_on_pc_until=time.time()+3600);self.db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),row['id']));self.db.commit()
+  p=prefs.rules(self.db)[0]['preferences'];self.assertTrue(p['open_on_pc']);self.assertAlmostEqual(stored()['open_on_pc_since'],time.time()-2*3600,delta=5);self.assertNotIn('open_on_pc_until',stored())
+  p=stored();p.pop('open_on_pc_since');p.update(open_on_pc=True,open_on_pc_until=time.time()-1);self.db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),row['id']));self.db.commit()
   self.assertFalse(prefs.rules(self.db)[0]['preferences']['open_on_pc'])
-  p=stored();p.update(open_on_pc=True,open_on_pc_until=0);self.db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),row['id']));self.db.commit()
-  self.assertFalse(prefs.rules(self.db)[0]['preferences']['open_on_pc'])  # a legacy arm with no expiry is off
-  self.assertEqual(prefs.preset_preferences({**prefs.defaults(),'open_on_pc':True,'open_on_pc_until':99})['open_on_pc_until'],0)
+  p=stored();p.update(open_on_pc=True,open_on_pc_until=0,open_on_pc_since=0);self.db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),row['id']));self.db.commit()
+  self.assertFalse(prefs.rules(self.db)[0]['preferences']['open_on_pc'])  # a legacy arm with no start time is off
+  self.assertEqual(prefs.preset_preferences({**prefs.defaults(),'open_on_pc':True,'open_on_pc_since':99})['open_on_pc_since'],0)
  def test_arming_needs_a_live_pc_client(self):
   self.add(show(1));message='Enable the Screenwatch extension in Chrome on this PC first'
   with self.assertRaises(ValueError) as caught:self.alert(open_on_pc=True)
