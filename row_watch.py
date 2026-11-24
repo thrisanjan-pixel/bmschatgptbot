@@ -292,10 +292,18 @@ def schedule_active(db,now,interval=30):
         db.execute("INSERT OR IGNORE INTO row_layouts(show_id,payload) VALUES(?,'{}')",(show_id,))
         db.execute('UPDATE row_layouts SET due=? WHERE show_id=? AND due=0',(now,show_id))
     if meta(db,'notifications_paused','0')=='1':db.commit();return
-    for show_id in targets(db,now)[0]:
+    wanted=targets(db,now)[0]
+    for show_id in wanted:
         # A '*' alert finds new showtimes on its own, so their rows may not exist yet.
         db.execute("INSERT OR IGNORE INTO row_layouts(show_id,payload) VALUES(?,'{}')",(show_id,))
         db.execute('UPDATE row_layouts SET due=? WHERE show_id=? AND due=0 AND checked<?',(now,show_id,now-interval))
+    # A showtime an alert stopped watching (paused, edited or finished) drops its queued seat read.
+    # Only showtimes queued for an alert are dropped; a "Load seat rows" press is never in this list.
+    try:before=set(json.loads(meta(db,'seat_alert_targets','[]')))
+    except ValueError:before=set()
+    for show_id in before-set(wanted):
+        db.execute('UPDATE row_layouts SET due=0 WHERE show_id=? AND due>0 AND manual=0',(show_id,))
+    setmeta(db,'seat_alert_targets',json.dumps(wanted))
     # A sold-out show waits for its backstop re-check, unless the listing shows seats again.
     for row in db.execute("SELECT r.show_id,s.payload FROM row_layouts r JOIN sessions s ON s.id=r.show_id WHERE r.error='Sold out' AND r.due>?",(now,)).fetchall():
         try:show=json.loads(row['payload'])
