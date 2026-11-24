@@ -61,11 +61,16 @@ def check_queue(db):
         else:continue
         # Every check runs directly from the Railway server.
         recent.append({**item,'checked_via':'Railway','at':stat['last_attempt'],'ok':stat['last_success']>=stat['last_attempt'],'error':stat['error']})
-        if len(recent)>=8:break
+        if sum(1 for r in recent if r['kind']==item['kind'])>5:recent.pop()
+        if len(recent)>=10:break
     inventory=api_watch.listing_refresh(db,now,inventory=True)
     inventory['pending']=len(inventory['pending'])
     manual['pending']=len(manual['pending'])
-    return {'now':now,'upcoming':upcoming[:10],'recent':recent,'inventory_refresh':inventory,'listing_refresh':manual,
+    # Showtimes and seats run as two separate queues; keep the next 6 of each.
+    upcoming=[i for i in upcoming if i['kind']=='showtimes'][:6]+[i for i in upcoming if i['kind']=='seats'][:6]
+    upcoming.sort(key=lambda item:item['eta'])
+    from http_source import SEAT_HOST
+    return {'now':now,'upcoming':upcoming,'seat_gap':policy(SEAT_HOST,now)[1],'recent':recent,'inventory_refresh':inventory,'listing_refresh':manual,
             'listing_interval':listing_interval(db),'listing_effective_interval':gap}
 
 
