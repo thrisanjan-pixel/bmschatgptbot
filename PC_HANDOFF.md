@@ -2,6 +2,33 @@
 
 This document transfers project context from a cloud Codex conversation. It is a handoff summary, not a full chat transcript. Read it, README.md and deploy/RAILWAY.md before continuing. The user wants the assistant to perform the work, with minimal repeated questions.
 
+## Latest state (24 Nov 2026, 19:45 IST, Claude Code) — read this first
+
+This section supersedes everything below where they conflict. Keep it current after every change to the bot.
+
+**Production**
+- Railway account thrisanjan, project `0ac5e4f5-448d-4d9c-a50f-437a048f743c`, service `0a52398c-1b0c-469c-bcfd-4a9f72ff6358`, environment `eba299a0-0319-4517-9695-39813013bb3b`. URL https://bmschatgptbot-production.up.railway.app. The service has no GitHub source; every deploy is a CLI `railway up` from a clean tree.
+- Live deployment `77691b24-7a94-4b34-a691-9f1a97b0157a` = GitHub `main` at `80b2ce5`. Deploy from a clean worktree of `origin/main`, never from the PC checkout `codex/seat-helper-checkout`, which has many uncommitted, unreviewed changes.
+- Rollback point: tag `safe-2026-11-24` (main `1e66ddc`, deployment `06a6ebb7`).
+- Railway variables: `BMS_SEAT_GAP=20` (lowered from 30 on 24 Nov; the code floor is 20; 15 s and 10 s got HTTP 429 with Retry-After 86400), `BMS_REQUEST_JITTER=0`, `BMS_SOLD_OUT_RECHECK=180`, `BMS_BACKGROUND_LISTINGS=0`, `BMS_NIGHT_HOURS=1-7`. Showtime listings stay at 60 per hour.
+- Health on 24 Nov: no BookMyShow 403 or 429 since the 04:56 IST deploy. The last refusals (403 listing, 429 seat) were at 02:18 and 02:26 IST, before it.
+
+**Changes on 24 Nov 2026**
+1. PR #13 (`8e08e3e`): Open on PC has no 3-hour limit. An alert stores `open_on_pc_since` (arm time) instead of `open_on_pc_until`. The arm stays until the alert opens on the PC or is turned off. Old arms are converted on read. The extension's `isArmedEvent` accepts both forms.
+2. PR #14 (`7ef8e87`): a never-checked alert listing used to be ranked "300 s overdue", recomputed every turn, so it never aged. Six routine listings starved a new alert forever. `api_watch.listing_order` now stores that place once.
+3. The AOT alert (`a81136a0`) was set to the movie "AOT", which is BookMyShow `ET00526277`, the Tamil 2D version with no shows. It is now set to "AOT - Aakasamlo Oka Tara", the title BookMyShow gives the shows. The Telugu Dolby Cinema version is `ET00526345`; its show is ALLU Kokapet, 25 Nov, 7:50 PM. Its seat types are PLATINUM, DIRECTOR CHOICE, GOLD and "GOLD."; the alert still had "3D GOLD", and the owner was told to change it.
+
+**Known problems, not fixed yet**
+- With `BMS_BACKGROUND_LISTINGS=0`, the movie catalogue never refreshes while any alert is active (it was 79 h old). New films and versions do not appear in the picker.
+- Alerts match by movie title text. "Aakasamlo Oka Tara" (catalogue) does not match "AOT - Aakasamlo Oka Tara" (show title), so those listings counted as background and were skipped.
+- The movie picker does not show language or format, so a version with no shows (such as Tamil "AOT") looks like the right one.
+- No warning when an alert matches 0 shows for its date while BookMyShow lists shows for that film.
+
+**Owner decisions**
+- Every check runs in the cloud. No home PC checker, and no extra Railway services or IPs to add throughput (that spreads per-IP load); a second service may only be a standby.
+- Ask the owner before deploys, restarts or turning alerts off.
+- Planned, not built: showtime checks by priority (changing versions about every 2 min, sold-out or past ones rarely; dates not yet open every 2 to 5 min, not 45), and seat reads focused on the hot show (20 to 25 s, others 4 to 30 min). A slow showtimes ramp (60, 80, 100, 120 per hour, 48 h per step) needs the owner's OK. DeepSeek's answer is in `DEEPSEEK_PARALLEL_PROMPT.md`.
+
 ## Current state (5 Nov 2026, Claude Code session)
 
 This section supersedes the older sections below where they conflict. Those sections are kept as history.
