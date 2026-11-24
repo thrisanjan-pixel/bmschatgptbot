@@ -116,7 +116,7 @@ Left open on purpose:
 ## Chrome seat helper replaces the PC opener (11 Nov 2026, commit 8ffaa91, deploy 0b4f5146)
 
 - `pc_opener.py` and `start_pc_opener.bat` were removed on the owner's request. The Chrome extension in `chrome-extension/` is the only PC client. The "Open on PC" notes above describe the removed helper.
-- "Open on PC" arms an alert for 3 hours and needs the extension to have polled in the last 2 minutes. The extension opens the showtime in Chrome, highlights the two seats and selects them only when the owner presses "Select these two seats". It never presses Pay, terms or sign-in controls.
+- "Open on PC" arms an alert with no time limit (until it opens once or is turned off; changed 24 Nov 2026) and needs the extension to have polled in the last 2 minutes. The extension opens the showtime in Chrome, highlights the two seats and selects them only when the owner presses "Select these two seats". It never presses Pay, terms or sign-in controls.
 - Install: `chrome://extensions`, Developer mode, Load unpacked, choose `chrome-extension`, then switch "Enabled on this PC" on in the pop-up. See `chrome-extension/README.md`.
 - Verified on 11 Nov 2026 (deploy 070c6ba5, commit 6456865): the owner loaded the extension in their Chrome, a real Ramayana row alert opened the seat page and ringed the pair, and the owner confirmed it worked.
 - Fixed the same day: the first message of a new row selection ignores the repeat gap, and a row alert opens on PC only for its row messages (those starting with the ticket emoji).

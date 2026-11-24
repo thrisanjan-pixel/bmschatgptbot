@@ -36,7 +36,7 @@ def format_matches(actual,wanted):
     if wanted in ('imax','4dx'):return wanted in actual
     return actual==wanted
 def defaults():
-    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'notify_existing':True,'interval_minutes':10,'row_show':'','rows':[],'party_size':0,'request_state':'','urgent':False,'open_on_pc':False,'open_on_pc_until':0,'min_seats':0}
+    return {**{k:[] for k in FIELDS},'time_from':'','time_to':'','new_shows':True,'availability':True,'enabled':False,'once':True,'notify_existing':True,'interval_minutes':10,'row_show':'','rows':[],'party_size':0,'request_state':'','urgent':False,'open_on_pc':False,'open_on_pc_since':0,'min_seats':0}
 
 def future_shows(db):
     """Active future showtimes as (cutoff, show), soonest first."""
@@ -80,7 +80,7 @@ def rules(db):
     # Seat reads share one budget, so the quiet period grows with every watched showtime, not every alert.
     row_count=sum(len(t) for _,p,t in parsed if p['enabled'] and p['row_show'])
     for row,p,targets in parsed:
-        rule={**dict(row),'preferences':p,'row_targets':len(targets),'open_on_pc_until':p['open_on_pc_until'] if p['open_on_pc'] else 0};state=p.get('request_state','')
+        rule={**dict(row),'preferences':p,'row_targets':len(targets),'open_on_pc_since':p['open_on_pc_since'] if p['open_on_pc'] else 0};state=p.get('request_state','')
         expired=False
         if p['dates']:
             from api_source import end_day
@@ -308,7 +308,7 @@ def save(db,data,alert_id=None,create=False):
     p=validate(data)
     saved=rules(db)
     before=next((r['preferences'] for r in saved if r['id']==alert_id),None) if alert_id and not create else None
-    p['open_on_pc_until']=arm_until(db,p['open_on_pc'],before)
+    p['open_on_pc_since']=arm_since(db,p['open_on_pc'],before);p.pop('open_on_pc_until',None)
     if create:
         alert_id=uuid.uuid4().hex
     elif alert_id:
@@ -522,7 +522,7 @@ def preset_preferences(data):
     """Validated filters for a preset: no movies or dates, never enabled, a row_show kept only as '*'."""
     if not isinstance(data,dict):raise ValueError('Invalid settings')
     any_show=data.get('row_show')==ANY_SHOW
-    clean={**data,'movies':[],'dates':[],'enabled':False,'request_state':'','open_on_pc':False,'open_on_pc_until':0}
+    clean={**data,'movies':[],'dates':[],'enabled':False,'request_state':'','open_on_pc':False,'open_on_pc_since':0}
     if not any_show:clean.update(row_show='',rows=[],party_size=0)
     return validate(clean,preset=True)
 
@@ -567,7 +567,7 @@ def history(db,limit=10):
     return result
 
 PC_WINDOW=600
-PC_ARM=3*3600  # Open on PC stays armed for 3 hours
+LEGACY_PC_ARM=3*3600  # old builds stored an expiry 3 hours after arming; used only to read those arms
 PC_SEEN=120  # a PC client counts as live for 2 minutes after its last poll
 def pc_clients(db,now=None):
     """Seconds since the Chrome extension last polled, or None: {extension}."""
@@ -575,20 +575,25 @@ def pc_clients(db,now=None):
     for name in ('extension',):
         at=float(meta(db,f'pc_{name}_seen','0') or 0);seen[name]=round(max(0,now-at),1) if at else None
     return seen
-def arm_until(db,on,before=None,now=None):
-    """Expiry for an Open on PC switch: kept while it stays on, a fresh 3 hours when it turns on (needs a live PC client), 0 when off."""
+def arm_since(db,on,before=None,now=None):
+    """When an Open on PC switch was turned on: kept while it stays on, now when it turns on (needs a live PC client), 0 when off.
+    There is no time limit: the arm stays until the alert opens on the PC or the switch is turned off."""
     now=time.time() if now is None else now
     if not on:return 0
-    if before and before.get('open_on_pc') and before.get('open_on_pc_until',0)>now:return before['open_on_pc_until']
+    if before and before.get('open_on_pc') and before.get('open_on_pc_since',0)>0:return before['open_on_pc_since']
     if not any(v is not None and v<=PC_SEEN for v in pc_clients(db,now).values()):raise ValueError('Enable the Screenwatch extension in Chrome on this PC first')
-    return now+PC_ARM
+    return now
 def expire_arms(db,now=None):
-    """An expired (or legacy, expiry-less) arm is off: clear it in storage."""
+    """Convert arms saved by older builds (with a 3-hour expiry) to the untimed form; an arm with no start time, or one already expired, is off."""
     now=time.time() if now is None else now;changed=False
     for r in db.execute("SELECT id,payload FROM alerts WHERE json_extract(payload,'$.open_on_pc')=1").fetchall():
         p=json.loads(r['payload'])
-        if p.get('open_on_pc_until',0)<=now:
-            p['open_on_pc']=False;p['open_on_pc_until']=0;db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),r['id']));changed=True
+        if p.get('open_on_pc_since',0)>0 and 'open_on_pc_until' not in p:continue
+        until=p.pop('open_on_pc_until',0) or 0
+        if p.get('open_on_pc_since',0)>0:pass
+        elif until>now:p['open_on_pc_since']=until-LEGACY_PC_ARM
+        else:p['open_on_pc']=False;p['open_on_pc_since']=0
+        db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),r['id']));changed=True
     if changed:db.commit()
 
 def pc_show(db,url):
@@ -626,7 +631,7 @@ def pc_alerts(db,since,now=None,client=''):
     for r in db.execute('SELECT id,payload FROM alerts'):
         try:p=json.loads(r['payload'])
         except ValueError:continue
-        if p.get('open_on_pc'):on[r['id']]=bool(p.get('row_show'));armed=armed or bool(p.get('enabled'));listed.append({'id':r['id'],'movie':', '.join(p.get('movies',[])),'until':p.get('open_on_pc_until',0)})
+        if p.get('open_on_pc'):on[r['id']]=bool(p.get('row_show'));armed=armed or bool(p.get('enabled'));listed.append({'id':r['id'],'movie':', '.join(p.get('movies',[])),'since':p.get('open_on_pc_since',0)})
     events=[]
     if on:
         for r in db.execute(f"SELECT id,alert_id,created,text FROM outbox WHERE created>? AND created>? AND text NOT LIKE '{PHOTO_MARK}%' AND alert_id IN ({','.join('?'*len(on))}) ORDER BY created",(since,now-PC_WINDOW,*on)):
@@ -648,5 +653,5 @@ def set_open_on_pc(db,alert_id,value=False):
     """Flip only open_on_pc on a stored alert; nothing else is re-validated or changed."""
     row=db.execute('SELECT payload FROM alerts WHERE id=?',(alert_id,)).fetchone() if isinstance(alert_id,str) else None
     if not row:raise ValueError('Alert no longer exists')
-    p=json.loads(row[0]);p['open_on_pc_until']=arm_until(db,bool(value),p);p['open_on_pc']=bool(value)
+    p=json.loads(row[0]);p['open_on_pc_since']=arm_since(db,bool(value),p);p.pop('open_on_pc_until',None);p['open_on_pc']=bool(value)
     db.execute('UPDATE alerts SET payload=? WHERE id=?',(json.dumps(p),alert_id));db.commit()

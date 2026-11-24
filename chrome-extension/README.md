@@ -14,7 +14,7 @@ The dashboard address is in the pop-up. Changing it to another https address mak
 
 ## Use
 
-1. In the dashboard, switch **Open on PC** on for an alert. It stays armed for 3 hours (the alert card shows "Opens on PC · until 9:40 pm"). Arming only works while the extension is running on this PC.
+1. In the dashboard, switch **Open on PC** on for an alert. It stays armed until the alert opens on this PC or you turn it off; there is no time limit. Arming only works while the extension is running on this PC.
 2. For an exact pair, the alert must be a row alert with **Seats together = 2**. The alert message then names the pair ("Best 2 together"), and the banner shows the section, row and seat numbers. Without a pair the banner says "This alert names no exact pair. Pick seats yourself." and has no button.
 3. When the alert fires, a tab opens and Chrome comes to the front with a notification and a spoken "Seats open. Check Chrome."
 4. Check the banner at the top and the two pink rings on the seats. The button enables only while both seats are verified free. Press **Select these two seats**. The banner then says whether it worked. Review the seats and press Pay yourself.
@@ -22,7 +22,7 @@ The dashboard address is in the pop-up. Changing it to another https address mak
 
 ## Cancel
 
-Press **Cancel** next to the alert in the extension pop-up, or turn the switch off on the dashboard card. Arming also expires by itself after 3 hours.
+Press **Cancel** next to the alert in the extension pop-up, or turn the switch off on the dashboard card.
 
 ## What it never does
 
