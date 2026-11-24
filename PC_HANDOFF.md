@@ -2,6 +2,12 @@
 
 This document transfers project context from a cloud Codex conversation. It is a handoff summary, not a full chat transcript. Read it, README.md and deploy/RAILWAY.md before continuing. The user wants the assistant to perform the work, with minimal repeated questions.
 
+## Update (24 Nov 2026, ~23:30 IST, Claude Code)
+- Live is now Railway deployment `41ba3064-6a02-43d2-8465-5743654c3342` = branch `fix/seat-queue-eta` commit `6e0e50a` (PR #19, open), on top of main `6938ca4` (PR #18 merged).
+- Change: the check queue shows two lanes side by side, Showtimes (listing interval) and Seats (seat gap). `/api/check-queue` returns up to 6 upcoming and 5 recent per kind, plus `seat_gap`. Seat ETAs use the real seat gap (`policy(SEAT_HOST)`), not a fixed 60 s. Panel width 300 to 520 px.
+- Note: seat requests really go out every 20-21 s. The queue only lists reads already scheduled, and "Just checked" keeps one row per showtime (`check_stats`), so a hot showtime that is re-read every ~40 s fills the gaps without showing every read.
+- After deploy: healthz and readyz 200, seat_gap 20 on the live API.
+
 ## Update (24 Nov 2026, ~23:00 IST, Claude Code)
 - Live is now Railway deployment `b614afa4-a043-47e9-b075-19e442cf52da` = branch `feat/listing-interval-20` commit `26a58f5` (PR #18, open), on top of main `c61c462` (PR #17 merged).
 - Change: the Activity "Showtime check interval" now also offers 20 seconds (`LISTING_INTERVALS = (20, 30, 60, 120)` in `http_source.py`). Default stays 60 s. 20 s is 180 showtime requests per hour, three times the verified-safe 60 s; use it only for short bursts.

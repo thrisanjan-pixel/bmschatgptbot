@@ -330,7 +330,7 @@ body.modal-open{overflow:hidden}
 .alert-tabs[style*="--ind-w"] button.active{background:transparent}
 
 /* ---- Alerts layout: list + sticky check queue ---- */
-.alerts-layout{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px;align-items:start;margin-bottom:24px}
+.alerts-layout{display:grid;grid-template-columns:minmax(0,1fr) 520px;gap:16px;align-items:start;margin-bottom:24px}
 .alerts-layout .alert-grid{margin-bottom:0}
 .alert-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;align-items:start;margin-bottom:24px}
 .alert-empty{grid-column:1/-1;padding:32px 16px;border:1px dashed var(--line-2);border-radius:var(--r-lg);color:var(--text-2);font-size:var(--fs-sm);text-align:center}
@@ -435,6 +435,7 @@ body.modal-open{overflow:hidden}
 .cq-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
 .cq-head h2{margin:0}
 .cq-head small{color:var(--text-3);font-size:var(--fs-micro)}
+.cq-lanes{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:14px}.cq-lane{min-width:0}.cq-lane+.cq-lane{border-left:1px solid var(--line-2);padding-left:16px}@media (max-width:560px){.cq-lanes{grid-template-columns:1fr}.cq-lane+.cq-lane{border-left:0;padding-left:0;border-top:1px solid var(--line-2);padding-top:12px}}.cq-lane-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.cq-lane-head small{font-size:11px;color:var(--muted);font-weight:500;text-transform:none;letter-spacing:0}.cq-lane .cq-item .cq-chip{display:none}.cq-lane .cq-top{justify-content:flex-end}.cq-lane h4{margin:10px 0 6px;font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
 .check-queue h3{margin:16px 0 8px;color:var(--text-3);font-size:var(--fs-micro);font-weight:500;letter-spacing:.05em;text-transform:uppercase}
 /* Timeline: a vertical hairline with a node per row; time on the right in mono. */
 .cq-list{position:relative;display:grid;gap:0;margin:0;padding:0;list-style:none}
@@ -444,13 +445,13 @@ body.modal-open{overflow:hidden}
 .cq-item::before{content:"";position:absolute;left:0;top:11px;width:9px;height:9px;border:1.5px solid var(--text-3);border-radius:50%;background:var(--surface)}
 .cq-item.bad::before{border-color:var(--danger)}
 /* The first "up next" row is the live one. */
-#cq-next .cq-item:first-child::before{border-color:var(--action);background:var(--action);box-shadow:0 0 0 3px var(--accent-bg)}
+.cq-next .cq-item:first-child::before{border-color:var(--action);background:var(--action);box-shadow:0 0 0 3px var(--accent-bg)}
 .cq-top{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:var(--fs-micro)}
 .cq-chip{padding:0 6px;border-radius:var(--r-sm);font-size:var(--fs-micro);font-weight:500;line-height:1.6}
 .cq-chip.showtimes{background:var(--info-bg);color:var(--info)}
 .cq-chip.seats{background:var(--live-bg);color:var(--live)}
 .cq-time{color:var(--text-2);font-family:var(--mono);white-space:nowrap}
-#cq-next .cq-item:first-child .cq-time{color:var(--action)}
+.cq-next .cq-item:first-child .cq-time{color:var(--action)}
 .cq-title{margin-top:4px;font-size:var(--fs-sm);font-weight:600}
 .cq-detail{color:var(--text-2);font-size:var(--fs-micro);overflow-wrap:anywhere}
 .cq-empty{color:var(--text-2);font-size:var(--fs-sm)}
@@ -1262,9 +1263,9 @@ html.sw-hidden *,html.sw-hidden *::before,html.sw-hidden *::after{animation-play
 .check-queue h3{font-size:12px;letter-spacing:.08em}
 .cq-item{margin-left:-8px;padding:8px 10px 12px 32px;border-radius:12px;transition:transform 220ms var(--ease-out),background-color 150ms ease}
 .cq-item::before{left:8px;top:13px;background:var(--bg)}
-#cq-next .cq-item:first-child::before{border-color:var(--live);background:var(--live);box-shadow:0 0 0 3px var(--live-bg)}
-#cq-next .cq-item:first-child .cq-time{color:var(--live)}
-#cq-next .cq-item:first-child::after{content:"";position:absolute;left:32px;right:10px;bottom:3px;height:1px;background:linear-gradient(90deg,var(--live),#4ade8000);transform-origin:left;transform:scaleX(1)}
+.cq-next .cq-item:first-child::before{border-color:var(--live);background:var(--live);box-shadow:0 0 0 3px var(--live-bg)}
+.cq-next .cq-item:first-child .cq-time{color:var(--live)}
+.cq-next .cq-item:first-child::after{content:"";position:absolute;left:32px;right:10px;bottom:3px;height:1px;background:linear-gradient(90deg,var(--live),#4ade8000);transform-origin:left;transform:scaleX(1)}
 .activity-item{border-radius:12px;transition:transform 220ms var(--ease-out),background-color 150ms ease}
 .activity-item,.activity-item:last-child{border-bottom:1px solid var(--glass-line)}
 .activity-item:last-child{border-bottom:0}
@@ -1334,13 +1335,13 @@ html.sw-hidden *,html.sw-hidden *::before,html.sw-hidden *::after{animation-play
   #reliability-warning>svg{animation:sw-breathe 3s ease-in-out infinite alternate}
   .button.primary::after{animation:sw-shimmer-btn 6s ease-in-out infinite}
   .alert-card:has(.alert-status.active)::before{animation:sw-spin 6s linear infinite}
-  #cq-next .cq-item:first-child::before{animation:sw-dotbeat 2s ease-in-out infinite}
-  #cq-next .cq-item:first-child::after{animation:sw-fill 4s ease-in-out infinite}
+  .cq-next .cq-item:first-child::before{animation:sw-dotbeat 2s ease-in-out infinite}
+  .cq-next .cq-item:first-child::after{animation:sw-fill 4s ease-in-out infinite}
   .sw-stagger{--step:80ms}
-  #cq-next.sw-stagger,#cq-recent.sw-stagger,#recent-activity.sw-stagger,#all-activity.sw-stagger{--step:45ms}
+  .cq-next.sw-stagger,#cq-recent.sw-stagger,#cq-recent-seats.sw-stagger,#recent-activity.sw-stagger,#all-activity.sw-stagger{--step:45ms}
   #watch-form.sw-stagger{--step:50ms}
   .sw-stagger>*{animation:sw-card-in 600ms var(--ease-out) backwards}
-  #cq-next.sw-stagger>*,#cq-recent.sw-stagger>*,#recent-activity.sw-stagger>*,#all-activity.sw-stagger>*{animation-duration:500ms}
+  .cq-next.sw-stagger>*,#cq-recent.sw-stagger>*,#cq-recent-seats.sw-stagger>*,#recent-activity.sw-stagger>*,#all-activity.sw-stagger>*{animation-duration:500ms}
   .sw-stagger>:nth-child(2){animation-delay:calc(var(--step)*1)}
   .sw-stagger>:nth-child(3){animation-delay:calc(var(--step)*2)}
   .sw-stagger>:nth-child(4){animation-delay:calc(var(--step)*3)}
@@ -1776,7 +1777,7 @@ html.sw-hidden *,html.sw-hidden *::before,html.sw-hidden *::after{animation-play
  <div class="watch-overview"><span class="bell-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg></span><div><div class="watch-heading"><h2 id="watch-heading">Loading your alerts…</h2><span id="active-rules" class="badge">…</span></div><p id="watch-description">Checking which alerts are running.</p></div><button class="button quiet" data-tab="create">Create an alert <span aria-hidden="true">→</span></button></div>
  <div class="alerts-toolbar"><div><h2>Your requests</h2><small id="alert-count">Loading your alerts…</small></div><div class="alert-tabs" role="group" aria-label="Filter saved alerts"><button type="button" class="active" data-filter="all">All</button><button type="button" data-filter="active">Active</button><button type="button" data-filter="completed">Completed</button><button type="button" data-filter="cancelled">Cancelled</button><button type="button" data-filter="missed">Missed</button><button type="button" data-filter="paused">Drafts</button></div></div>
  </div>
- <div class="alerts-layout"><div id="alert-list" class="alert-grid" aria-live="polite"></div><aside id="check-queue" class="panel check-queue" aria-label="Check queue"><div class="cq-head"><h2>Check queue</h2><small id="cq-updated">Loading…</small></div><button class="button quiet" type="button" id="cq-refresh-listings">Refresh tracked listings</button><p id="cq-refresh-result" class="cq-note" role="status" hidden></p><div id="cq-send" hidden><div class="cq-sendhead"><h3>Alert activity</h3><button type="button" id="cq-cancel-all" class="cq-cancel">Cancel all</button></div><ol id="cq-send-list" class="cq-list"></ol></div><h3>Up next</h3><ol id="cq-next" class="cq-list"></ol><h3>Just checked</h3><ol id="cq-recent" class="cq-list"></ol><p class="cq-note"><span id="listing-cadence-summary">Showtime checks share one queue.</span> Times are estimates.</p></aside></div>
+ <div class="alerts-layout"><div id="alert-list" class="alert-grid" aria-live="polite"></div><aside id="check-queue" class="panel check-queue" aria-label="Check queue"><div class="cq-head"><h2>Check queue</h2><small id="cq-updated">Loading…</small></div><button class="button quiet" type="button" id="cq-refresh-listings">Refresh tracked listings</button><p id="cq-refresh-result" class="cq-note" role="status" hidden></p><div id="cq-send" hidden><div class="cq-sendhead"><h3>Alert activity</h3><button type="button" id="cq-cancel-all" class="cq-cancel">Cancel all</button></div><ol id="cq-send-list" class="cq-list"></ol></div><div class="cq-lanes"><section class="cq-lane"><h3 class="cq-lane-head"><span class="cq-chip showtimes">Showtimes</span><small id="cq-gap-showtimes">separate queue</small></h3><h4>Up next</h4><ol id="cq-next" class="cq-list cq-next"></ol><h4>Just checked</h4><ol id="cq-recent" class="cq-list"></ol></section><section class="cq-lane"><h3 class="cq-lane-head"><span class="cq-chip seats">Seats</span><small id="cq-gap-seats">separate queue</small></h3><h4>Up next</h4><ol id="cq-next-seats" class="cq-list cq-next"></ol><h4>Just checked</h4><ol id="cq-recent-seats" class="cq-list"></ol></section></div><p class="cq-note"><span id="listing-cadence-summary">Showtime checks share one queue.</span> Times are estimates.</p></aside></div>
  <section class="panel"><div class="panel-heading"><div><h2>Latest activity</h2><p>Recent alert deliveries and retries.</p></div><button class="refresh" data-tab="activity">View activity →</button></div><div id="recent-activity" class="activity-list"></div></section>
  <div class="foot"><span id="service-mode">Hosted monitor</span> · <span id="last-check">Waiting for first check</span>. Alerts restored from a backup start paused. Polling speed depends on source availability.</div>
 </section>
@@ -1942,7 +1943,7 @@ function sendItem(d){const wait=d.next_read&&Math.ceil(d.next_read-(checkQueue?.
 async function cancelDelivery(body,button){if(body.all&&!confirm('Cancel all pending messages and seat-map checks? Your alerts stay on.'))return;button.disabled=true;try{const response=await fetch('/api/deliveries',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':watchData.csrf},body:JSON.stringify(body)});if(!response.ok)throw Error();checkQueue={...checkQueue,deliveries:(await response.json()).deliveries||[]};renderCheckQueue()}catch{$('cq-updated').textContent='Could not cancel. Try again.'}finally{button.disabled=false}}
 let cqBuilt=null,cqTimes=[];
 function renderCheckQueue(){if(!checkQueue)return;const now=Date.now()/1000+checkQueueOffset,when=(item,isNext)=>{if(isNext){const wait=Math.round(item.eta-now);return wait<=5?'now':wait<90?'in '+wait+' s':'in '+Math.round(wait/60)+' min'}return(item.ok?'✓ ':'✗ ')+duration(Math.max(0,now-item.at))+' ago'};
- if(cqBuilt!==checkQueue){cqBuilt=checkQueue;cqTimes=[];const send=checkQueue.deliveries||[];$('cq-send').hidden=!send.length;$('cq-send-list').replaceChildren(...send.map(sendItem));$('cq-cancel-all').onclick=e=>cancelDelivery({all:true},e.currentTarget);const next=checkQueue.upcoming||[],recent=checkQueue.recent||[],make=(item,isNext)=>{const row=checkItem(item,'');cqTimes.push([row.querySelector('.cq-time'),item,isNext]);return row};$('cq-next').replaceChildren(...(next.length?next.map(i=>make(i,true)):[el('li','cq-empty','No alert checks waiting.')]));$('cq-recent').replaceChildren(...(recent.length?recent.map(i=>make(i,false)):[el('li','cq-empty','No alert checks yet.')]))}
+ if(cqBuilt!==checkQueue){cqBuilt=checkQueue;cqTimes=[];const send=checkQueue.deliveries||[];$('cq-send').hidden=!send.length;$('cq-send-list').replaceChildren(...send.map(sendItem));$('cq-cancel-all').onclick=e=>cancelDelivery({all:true},e.currentTarget);const next=checkQueue.upcoming||[],recent=checkQueue.recent||[],make=(item,isNext)=>{const row=checkItem(item,'');cqTimes.push([row.querySelector('.cq-time'),item,isNext]);return row};const fill=(id,items,isNext,empty)=>$(id).replaceChildren(...(items.length?items.map(i=>make(i,isNext)):[el('li','cq-empty',empty)]));for(const[kind,suffix]of[['showtimes',''],['seats','-seats']]){const mine=list=>list.filter(i=>i.kind===kind);fill('cq-next'+suffix,mine(next).slice(0,4),true,'Nothing waiting.');fill('cq-recent'+suffix,mine(recent).slice(0,3),false,'No checks yet.')}const gap=(n,name)=>n?'one every '+Math.round(n)+' s':'separate queue';$('cq-gap-showtimes').textContent=gap(checkQueue.listing_effective_interval);$('cq-gap-seats').textContent=gap(checkQueue.seat_gap)}
  for(const[node,item,isNext]of cqTimes)node.textContent=when(item,isNext)+(item.checked_via?' ['+item.checked_via+']':'');$('cq-updated').textContent=checkQueueStale?'Connection lost · retrying':'Live · every 10 s'}
 let staleSaving=false;let blindSaving=false;function renderBlindSetting(){const b=statusData?.blind_warning;if(!b||blindSaving||document.activeElement===$('blind-minutes'))return;$('blind-minutes').value=String(b.minutes)}
 async function saveBlindSetting(){blindSaving=true;const minutes=Number($('blind-minutes').value);$('blind-minutes').disabled=true;try{const fresh=await fetch('/api/watch?new=1',{signal:AbortSignal.timeout(20000)});if(!fresh.ok)throw Error('Refresh the page and retry.');const settings=await fresh.json();const response=await fetch('/api/blind-settings',{method:'POST',signal:AbortSignal.timeout(20000),headers:{'Content-Type':'application/json','X-CSRF-Token':settings.csrf},body:JSON.stringify({minutes})});const result=await response.json();if(!response.ok)throw Error(result.error||'Could not save');statusData.blind_warning=result;$('blind-result').textContent=result.minutes?'Saved. You will be warned after '+result.minutes+' minutes of blocked checks.':'Saved. Blocked-check warnings are off.'}catch(error){$('blind-result').textContent=error.message}finally{blindSaving=false;$('blind-minutes').disabled=false;renderBlindSetting()}}
@@ -2398,7 +2399,7 @@ loadWatch();refreshStatus();const live=fn=>()=>{if(!document.hidden)fn()};setInt
  /* l. Extra stagger: lists on their first non-empty render, the create form each time the view opens. */
  T(function(){
   function go(e){T(function(){e.classList.remove('sw-stagger');void e.offsetWidth;e.classList.add('sw-stagger');setTimeout(function(){e.classList.remove('sw-stagger')},1400)})}
-  ['cq-next','cq-recent','recent-activity','all-activity'].forEach(function(id){
+  ['cq-next','cq-recent','cq-next-seats','cq-recent-seats','recent-activity','all-activity'].forEach(function(id){
    var e=document.getElementById(id);if(!e)return;
    var filled=function(){return !!e.querySelector(':scope>*:not(.cq-empty):not(.activity-empty)')};
    if(filled()){go(e);return}
