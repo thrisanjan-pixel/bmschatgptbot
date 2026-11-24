@@ -346,9 +346,13 @@ def next_job(db,now):
     order,params,_=queue_order(db,now)
     return db.execute(f'SELECT * FROM row_layouts WHERE due>0 AND due<=? ORDER BY {order} LIMIT 1',(now,*params)).fetchone()
 
-def queue(db,now=None,spacing=60):
+def queue(db,now=None,spacing=None):
     """Queued seat reads in run order, each with an estimated start time."""
     schema(db);now=time.time() if now is None else now
+    if spacing is None:
+        # Estimate with the real seat-read gap (BMS_SEAT_GAP, doubled at night), not a fixed minute.
+        from http_source import SEAT_HOST,policy
+        spacing=policy(SEAT_HOST,now)[1]
     order,params,active=queue_order(db,now)
     rows=db.execute(f"""SELECT r.show_id,r.due,r.checked,s.payload FROM row_layouts r LEFT JOIN sessions s ON s.id=r.show_id
       WHERE r.due>0 ORDER BY CASE WHEN r.manual=1 AND r.due<=? THEN 0 WHEN r.due<=? THEN 1 ELSE 2 END,{order}""",(now,now,*params)).fetchall()
