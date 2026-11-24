@@ -47,7 +47,7 @@ def night(now=None):
     return start<=hour<end if start<end else hour>=start or hour<end
 
 
-LISTING_INTERVALS = (30, 60, 120)
+LISTING_INTERVALS = (20, 30, 60, 120)
 
 def listing_interval(db):
     return int(meta(db, 'listing_interval', '60'))
