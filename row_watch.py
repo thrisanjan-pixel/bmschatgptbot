@@ -270,6 +270,8 @@ def ingest(db,show,result):
                 db.execute('INSERT OR REPLACE INTO row_alert_state VALUES(?,?,?)',
                     (key,signature,json.dumps(sorted(current))))
     process_seat_photos(db,show,result)
+    from alert_health import rows as mark_rows
+    mark_rows(db,show)
     db.execute('UPDATE row_layouts SET payload=?,checked=?,error=?,due=0,manual=0,sold_out_at=0 WHERE show_id=?',(json.dumps(result),time.time(),'',show['id']));db.commit()
 
 def targets(db,now=None):

@@ -19,6 +19,17 @@ VENUE_SCREENS={
 }
 
 def normalized(value):return ' '.join(str(value).casefold().split())
+
+def movie_key(value):
+    # Match catalogue titles with the same title prefixed by its initials.
+    text=normalized(value)
+    match=re.fullmatch(r'([a-z0-9]{2,10})\s*[-–—:]\s*(.+)',text)
+    if match:
+        words=re.findall(r'[a-z0-9]+',match[2])
+        if len(words)>1 and match[1]==''.join(word[0] for word in words):
+            return match[2]
+    return text
+
 def price_text(show,name):
     """Listed ticket price for a seat type, e.g. '₹350', or '' when BookMyShow gives none."""
     for category in show.get('categories',{}).values():
@@ -105,11 +116,11 @@ def rules(db):
                 latest=db.execute(f"SELECT job_key FROM check_stats WHERE source='rows' AND job_key IN ({','.join('?'*len(targets))}) ORDER BY last_attempt DESC LIMIT 1",targets).fetchone()
                 error=next((l['error'] for l in layouts if latest and l['show_id']==latest[0]),'')
         elif not p['row_show']:
-            movies={normalized(movie) for movie in p['movies']}
+            movies={movie_key(movie) for movie in p['movies']}
             jobs=[]
             for job in db.execute('SELECT id,payload,checked,error,due FROM jobs'):
                 payload=json.loads(job['payload'])
-                if normalized(payload.get('movie','')) in movies:
+                if movie_key(payload.get('movie','')) in movies:
                     jobs.append(job)
                     if not p['dates'] or not payload.get('date') or payload['date'] in p['dates']:
                         source_rows.append(job)
@@ -145,7 +156,10 @@ def rules(db):
         elif source_refused and not error:health='Source refused a check'
         rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'retry_until':max(cooldown,budget) if max(cooldown,budget)>now else 0,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
         rule['health'].update(source_refused=source_refused,verification_failed=verification_failed)
-        keys=targets if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if normalized(json.loads(r['payload']).get('movie','')) in {normalized(m) for m in p['movies']}]
+        from alert_health import view as blind_view
+        rule['health']['blind']=blind_view(db,rule,now)
+        if rule['health']['blind']['blocked']:rule['health']['label']=f"BMS checks blocked for {rule['health']['blind']['threshold_seconds']//60} min, alerts may be delayed"
+        keys=targets if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if movie_key(json.loads(r['payload']).get('movie','')) in {movie_key(m) for m in p['movies']}]
         source='rows' if p['row_show'] else 'listings'
         intervals=[]
         for key in keys:
@@ -167,6 +181,7 @@ def prime_availability(db):
     db.execute('''CREATE TABLE IF NOT EXISTS alert_initial_state(
         alert_id TEXT PRIMARY KEY,signature TEXT NOT NULL)''')
     seen=set()
+    listing_revision=meta(db,'api_last_success','0')
     pending=[]
     for rule in active(db):
         p=rule['preferences']
@@ -174,7 +189,9 @@ def prime_availability(db):
         signature=json.dumps({key:p[key] for key in (*FIELDS,'time_from','time_to','availability','notify_existing')},sort_keys=True)
         state=db.execute('SELECT signature FROM alert_initial_state WHERE alert_id=?',(rule['id'],)).fetchone()
         if state and state[0]==signature:
-            seen.add(signature)
+            seen.add((signature,p['min_seats']))
+            continue
+        if state and state[0]==json.dumps([signature,listing_revision]):
             continue
         pending.append((rule,signature))
     if not pending:return
@@ -182,7 +199,7 @@ def prime_availability(db):
         'SELECT payload FROM sessions WHERE active=1 AND cutoff>?',(time.time(),))]
     for rule,signature in pending:
         p=rule['preferences']
-        if signature not in seen and p['notify_existing']:
+        if (signature,p['min_seats']) not in seen and p['notify_existing']:
             found=[]
             for show in shows:
                 if not matches(show,p):continue
@@ -196,7 +213,10 @@ def prime_availability(db):
             # While an earlier message waits for delivery, try again next tick instead of
             # recording the new filters as announced (their open seats would never be sent).
             if found and db.execute('SELECT 1 FROM outbox WHERE delivered=0 AND alert_id=? LIMIT 1',(rule['id'],)).fetchone():continue
-            # Nothing to say yet, but still record state so it is not rescanned every second.
+            if not found:
+                db.execute('INSERT OR REPLACE INTO alert_initial_state VALUES(?,?)',
+                           (rule['id'],json.dumps([signature,listing_revision])))
+                continue
             if found:
                 lines=[]
                 for show,opened,link in found[:3]:
@@ -209,11 +229,12 @@ def prime_availability(db):
                     # Hold each showtime's alert until a seat-map read shows enough open seats.
                     for (show,opened,link),line in zip(found[:3],lines):queue_seat_photo(db,rule['id'],show['id'],opened,'gate',head+line)
                 else:
-                    emit(db,'initial:'+rule['id']+':'+signature,(message+('\n\n(seat count unavailable)' if p['min_seats'] else ''))[:3900],alert_id=rule['id'])
+                    event=f"initial:{rule['id']}:{rule['updated']}:{signature}"
+                    emit(db,event,(message+('\n\n(seat count unavailable)' if p['min_seats'] else ''))[:3900],alert_id=rule['id'])
                     if rows_enabled():
                         for show,opened,link in found[:3]:queue_seat_photo(db,rule['id'],show['id'],opened,'photo')
                     db.execute('UPDATE alerts SET last_alert=? WHERE id=?',(time.time(),rule['id']))
-        seen.add(signature)
+        seen.add((signature,p['min_seats']))
         db.execute('INSERT OR REPLACE INTO alert_initial_state VALUES(?,?)',(rule['id'],signature))
 
 def read(db,alert_id=None):
@@ -269,13 +290,17 @@ def dimensions(show):
 def matches(show,p):
     language,format_=dimensions(show)
     for key,value in [('movies',show['movie']),('cinemas',show['venue_code']),('screens',str(show.get('format',''))),('dates',show['date']),('languages',language),('formats',format_)]:
+        if key=='movies':
+            if p[key] and movie_key(value) not in {movie_key(v) for v in p[key]}:return False
+            continue
         if key=='formats':
             if p[key] and not any(format_matches(value,v) for v in p[key]):return False
             continue
         if p[key] and (value not in p[key] if key in ('cinemas','dates') else normalized(value) not in {normalized(v) for v in p[key]}):return False
     if p['categories'] and not any(category_matches(c['name'],p) for c in show['categories'].values()):return False
     if p['time_from'] or p['time_to']:
-        try:clock=dt.datetime.strptime(str(show.get('time') or '').strip(),'%I:%M %p').strftime('%H:%M')
+        time_text=re.sub(r'\s*(am|pm)$',r' \1',str(show.get('time') or '').strip(),flags=re.I)
+        try:clock=dt.datetime.strptime(time_text,'%I:%M %p').strftime('%H:%M')
         except ValueError:return False
         if p['time_from'] and clock<p['time_from']:return False
         if p['time_to'] and clock>p['time_to']:return False
@@ -304,7 +329,7 @@ def archive_pending(db,alert_id=None):
         db.execute(f'INSERT INTO suppressed_outbox({fields}) SELECT id,text,photo,created,delivered,attempts,next_try,alert_id,? FROM outbox WHERE delivered=0',(time.time(),))
         db.execute('DELETE FROM outbox WHERE delivered=0')
 
-def save(db,data,alert_id=None,create=False):
+def save(db,data,alert_id=None,create=False,*,reset=False):
     p=validate(data)
     saved=rules(db)
     before=next((r['preferences'] for r in saved if r['id']==alert_id),None) if alert_id and not create else None
@@ -335,6 +360,12 @@ def save(db,data,alert_id=None,create=False):
     db.execute('''INSERT INTO alerts(id,payload,created,updated) VALUES(?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated=excluded.updated,completed=0''',
         (alert_id,json.dumps(p),now,now))
+    restarted=reset or (p['enabled'] and before is not None and not before['enabled'])
+    if restarted:
+        db.execute('UPDATE alerts SET last_alert=0 WHERE id=?',(alert_id,))
+    if restarted or (before is not None and p['min_seats']!=before['min_seats']):
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='alert_initial_state'").fetchone():
+            db.execute('DELETE FROM alert_initial_state WHERE alert_id=?',(alert_id,))
     drop_mismatched_seat_photos(db,alert_id,p)
     enabled=bool(db.execute("SELECT 1 FROM alerts WHERE json_extract(payload,'$.enabled')=1 LIMIT 1").fetchone())
     setmeta(db,'notifications_paused','0' if enabled else '1')
@@ -362,9 +393,7 @@ def transition(db,alert_id,action):
     p=rule['preferences']
     if action=='reset':
         if rule['status']=='missed':raise ValueError('Choose a future date before resetting this alert')
-        saved=save(db,{**p,'enabled':True},alert_id)
-        db.execute('UPDATE alerts SET last_alert=0 WHERE id=?',(alert_id,));db.commit()
-        return saved
+        return save(db,{**p,'enabled':True},alert_id,reset=True)
     if action not in ('cancel','booked'):raise ValueError('Unknown alert action')
     p['enabled']=False;p['request_state']='cancelled' if action=='cancel' else 'booked'
     db.execute('BEGIN IMMEDIATE');archive_pending(db,alert_id)
@@ -504,7 +533,9 @@ def options(db):
         for row in db.execute("SELECT show_id,payload FROM row_layouts WHERE checked>0"):
             try:category_rows[row[0]]=[{'category':r['category'],'row':r['row']} for r in json.loads(row[1]).get('rows',[])]
             except (ValueError,KeyError,TypeError):continue
-    return {'category_rows':category_rows,**{k:sorted(v) for k,v in result.items()},'cinemas':[{'value':k,'label':v} for k,v in sorted(cinema_names.items(),key=lambda x:x[1])],
+    today=dt.datetime.now(dt.timezone(dt.timedelta(hours=5,minutes=30))).date()
+    calendar_dates=[(today+dt.timedelta(days=offset)).strftime('%Y%m%d') for offset in range(7)]
+    return {'category_rows':category_rows,'calendar_dates':calendar_dates,**{k:sorted(v) for k,v in result.items()},'cinemas':[{'value':k,'label':v} for k,v in sorted(cinema_names.items(),key=lambda x:x[1])],
             'cinema_names':cinema_names,
             'venue_options':{code:{k:sorted(items) for k,items in value.items()} for code,value in venue_options.items()},
             'profiles':[{'movie':p[0],'cinema':p[1],'language':p[2],'format':p[3],'categories':p[4],'screen':p[5],'date':p[6],'url':p[7]} for p in sorted(profiles)],

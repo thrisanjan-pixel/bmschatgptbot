@@ -112,7 +112,7 @@ def ingest(db,job,data):
                         # Hold the alert until a seat-map read shows enough open seats (row_watch.process_seat_photos sends it).
                         for group in groups.values():
                             for line,url,show,names in group['lines']:
-                                preferences.queue_seat_photo(db,alert_id,show['id'],names,'gate',heading_for(show)+line+'\n'+url+'\n',now)
+                                if names:preferences.queue_seat_photo(db,alert_id,show['id'],names,'gate',heading_for(show)+line+'\n'+url+'\n',now)
                     else:
                         for event,text in messages:emit(db,event,text+('\n(seat count unavailable)' if minimum else ''),alert_id=alert_id)
                         if rows:
@@ -148,6 +148,8 @@ def ingest(db,job,data):
     for variant in result['variants']:schedule(db,variant,'',title,args['notify_first'])
     db.execute('DELETE FROM meta WHERE key=?',('waiting_show:'+job['id'],))
     setmeta(db,'api_last_success',time.time())
+    from alert_health import listing as mark_listing
+    mark_listing(db,args,{'day':result['day'],'shows':current})
 
 def seed(db,previous_db=None):
     enqueue(db,'catalog',CATALOG,{})
@@ -170,12 +172,12 @@ def poll_interval(db,job):
     movie=json.loads(job['payload']).get('movie','')
     if not is_watched(json.loads(job['payload']),wanted_dates(db)):
         return 120
-    # Keep a conservative target until real source access is stable.
-    return 60
+    from http_source import policy,listing_interval
+    return policy('in.bookmyshow.com',listing_gap=listing_interval(db))[1]
 
 
 def watched_movies(db):
-    return sorted({preferences.normalized(m) for rule in preferences.active(db)
+    return sorted({preferences.movie_key(m) for rule in preferences.active(db)
                    for m in rule['preferences']['movies'] if rule['preferences']['row_show'] in ('',preferences.ANY_SHOW)})
 
 
@@ -190,9 +192,10 @@ def wanted_dates(db,urgent=False):
     for rule in preferences.active(db):
         p=rule['preferences']
         if p['row_show'] not in ('',preferences.ANY_SHOW) or (urgent and not p['urgent']):continue
-        probe={**preferences.defaults(),**{k:p[k] for k in ('languages','formats','screens')}}
+        probe={**preferences.defaults(),**{k:p[k] for k in ('languages','formats') if k in p}}
+        if not p['cinemas']:probe['screens']=p['screens']
         for movie in p['movies']:
-            movies.setdefault(preferences.normalized(movie),[]).append((set(p['dates']) or None,probe))
+            movies.setdefault(preferences.movie_key(movie),[]).append((set(p['dates']) or None,probe))
     profiles={}
     for event,language,screen in db.execute("""SELECT DISTINCT json_extract(payload,'$.event'),
             json_extract(payload,'$.language'),json_extract(payload,'$.format') FROM sessions"""):
@@ -208,7 +211,7 @@ def is_watched(payload,wanted):
     # background when no alert asks for its date, or when its version (event) has
     # only ever shown in languages, formats or screens no alert asks for. Versions
     # with no showtimes seen yet, and undated listings, still count.
-    entries=wanted['movies'].get(preferences.normalized(payload.get('movie','')))
+    entries=wanted['movies'].get(preferences.movie_key(payload.get('movie','')))
     if not entries:return False
     day=payload.get('date','');event=payload.get('event');shows=wanted['profiles'].get(event)
     # An undated listing only finds new dates; once every date an alert wants has
@@ -220,6 +223,78 @@ def is_watched(payload,wanted):
     return any((dates is None or not day or day in dates) and not covered(dates) and
                (not shows or any(preferences.matches(show,probe) for show in shows))
                for dates,probe in entries)
+
+
+def listing_refresh(db, now, queue=False, inventory=False):
+    """Queue a paced refresh or report the latest results from the requested pass."""
+    key='inventory_listing_refresh' if inventory else 'manual_listing_refresh'
+    if queue and not inventory:
+        wanted=wanted_dates(db)
+        exact={rule['preferences']['row_show'] for rule in preferences.active(db)}-{'',preferences.ANY_SHOW}
+        exact_dates={(show['event'],show['date']) for _,show in preferences.future_shows(db) if show.get('id') in exact} if exact else set()
+    if queue:
+        db.execute('BEGIN IMMEDIATE')
+    batch=json.loads(meta(db,key,'{}'))
+    rows=[]
+    if batch:
+        rows=db.execute("""SELECT target.value AS id,j.expires,
+                   MAX(COALESCE(s.last_attempt,0),COALESCE(j.checked,0)) AS last_attempt,
+                   CASE WHEN j.checked>=COALESCE(s.last_attempt,0) THEN '' ELSE s.error END AS error
+            FROM json_each(?) target LEFT JOIN jobs j ON j.id=target.value
+            LEFT JOIN check_stats s ON s.job_key=j.id AND s.source='listings'""",
+            (json.dumps(batch['ids']),)).fetchall()
+    checked=[r for r in rows if (r['last_attempt'] or 0)>=batch['at']]
+    pending=[r['id'] for r in rows if (r['last_attempt'] or 0)<batch['at']
+             and r['expires'] is not None and (not r['expires'] or r['expires']>now)]
+    if queue and not pending:
+        if inventory:
+            enqueue(db,'catalog',CATALOG,{})
+            pending=inventory_jobs(db,now)
+        else:
+            pending=[r['id'] for r in db.execute("""SELECT id,payload FROM jobs
+                     WHERE kind='discovery' AND (expires=0 OR expires>?)""",(now,))
+                     if is_watched((payload:=json.loads(r['payload'])),wanted)
+                     or (payload.get('event'),payload.get('date')) in exact_dates]
+        batch={'at':now,'ids':pending}
+        setmeta(db,key,json.dumps(batch))
+        db.executemany("UPDATE jobs SET due=MIN(due,?) WHERE id=? AND error=''",
+                       [(now,job_id) for job_id in pending])
+        checked=[]
+    if queue:db.commit()
+    return {'total':len(batch.get('ids',[])),'pending':pending,'checked':sum(not r['error'] for r in checked),
+            'failed':sum(bool(r['error']) for r in checked)}
+
+
+def set_listing_interval(db, seconds):
+    from http_source import LISTING_INTERVALS,listing_interval
+    if type(seconds) is not int or seconds not in LISTING_INTERVALS:
+        raise ValueError('Choose 30, 60 or 120 seconds')
+    db.execute('BEGIN IMMEDIATE')
+    previous=listing_interval(db)
+    now=time.time()
+    if previous!=seconds:
+        wanted=wanted_dates(db)
+        for row in db.execute("SELECT id,payload,checked,due FROM jobs WHERE kind='discovery' AND checked>0 AND due>? AND error=''",(now,)).fetchall():
+            if is_watched(json.loads(row['payload']),wanted) and row['due']-row['checked']<=previous*2+1:
+                db.execute('UPDATE jobs SET due=? WHERE id=?',(max(now,row['checked']+seconds),row['id']))
+        setmeta(db,'listing_interval',seconds)
+    db.commit()
+
+
+def inventory_jobs(db,now):
+    return [r[0] for r in db.execute("""SELECT id FROM jobs WHERE kind IN ('catalog','discovery')
+                                       AND (expires=0 OR expires>?) ORDER BY id""",(now,))]
+
+
+def extend_inventory_refresh(db, job_id, now):
+    """Include movies, versions and dates discovered during the current refresh."""
+    if job_id not in listing_refresh(db,now,inventory=True)['pending']:return
+    batch=json.loads(meta(db,'inventory_listing_refresh'))
+    known=set(batch['ids'])
+    new=[job for job in inventory_jobs(db,now) if job not in known]
+    if new:
+        batch['ids'].extend(new)
+        setmeta(db,'inventory_listing_refresh',json.dumps(batch))
 
 
 def next_job(db, now):
@@ -243,14 +318,16 @@ def listing_order(db, now):
     background_recent = now-float(meta(db,'listing_background_attempt','0')) < BACKGROUND_SPACING
     # BMS_BACKGROUND_LISTINGS=0 gives every listing request to alert listings while any alert
     # watches one; movies no alert asks for wait until no alert listing is due.
-    background_paused = float(meta(db, 'background_cooldown_until', '0')) > now or (
+    inventory = listing_refresh(db, now, inventory=True)['pending']
+    inventory_cooling = float(meta(db, 'background_cooldown_until', '0')) > now
+    background_paused = inventory_cooling or (
         os.environ.get('BMS_BACKGROUND_LISTINGS','1')=='0' and bool(movies))
     rows = db.execute(f"""WITH eligible AS (
-        SELECT *, id IN ({slots}) AS watched
+        SELECT *, id IN ({slots}) AS watched, id IN (SELECT value FROM json_each(?)) AS inventory
         FROM jobs WHERE due<=? AND (expires=0 OR expires>?)
       )
-      SELECT * FROM eligible WHERE watched OR (NOT ? AND NOT ?)""",
-      (*movies, now, now, background_paused, background_recent)).fetchall()
+      SELECT * FROM eligible WHERE watched OR (inventory AND kind='catalog') OR (inventory AND NOT ? AND NOT ?) OR (NOT ? AND NOT ?)""",
+      (*movies, json.dumps(inventory), now, now, inventory_cooling or recovering, background_recent, background_paused, background_recent)).fetchall()
     # A never-checked alert listing joins the end of the overdue line (as if due 300 s ago).
     # Store that place once, so it ages like the others; a place recomputed every turn
     # never got older and lost to routine listings forever.
@@ -269,6 +346,8 @@ def listing_order(db, now):
         # long-overdue ones; an unwatched one keeps waiting its turn.
         due=effective(row)
         rank=0 if not (recovering or background_recent) and (base(row)>0 or row['watched']) and due<now-300 else 1 if row['watched'] else 2
+        if row['inventory'] and row['kind']=='catalog':rank=-1
+        elif row['inventory'] and not row['watched']:rank=0
         return (rank, due or (now-300 if row['watched'] else now), row['checked'])
     return sorted(rows, key=order)
 
@@ -319,7 +398,7 @@ def record_listing_failure(db, job, error, started, now):
         )
         background_refusals = 0
         for row in refused_jobs:
-            movie = preferences.normalized(json.loads(row['payload']).get('movie',''))
+            movie = preferences.movie_key(json.loads(row['payload']).get('movie',''))
             if movie not in active_movies:
                 background_refusals += 1
         if background_refusals >= 3:
@@ -384,7 +463,14 @@ class Monitor:
                 # Only the undated listing says the event has no shows yet; a dated one may just be an empty day.
                 if not json.loads(job['payload']).get('date'):setmeta(db,'upcoming_event:'+json.loads(job['payload'])['event'],'1')
                 setmeta(db,'api_last_success',time.time())
+                # BMS answered "no shows yet": a usable check for alerts waiting on this movie, not a blind one.
+                # Only the undated listing proves it; an empty dated listing is not a verified check.
+                payload=json.loads(job['payload'])
+                if not payload.get('date'):
+                    from alert_health import listing as mark_listing
+                    mark_listing(db,payload,{'day':'','shows':{},'all_dates':True})
             else:ingest(db,job,data)
+            extend_inventory_refresh(db,job['id'],time.time())
             streak_key='listing_success_streak:'+job['id']
             setmeta(db,streak_key,min(5,int(meta(db,streak_key,'0'))+1))
             db.execute("UPDATE jobs SET checked=?,due=?,error='' WHERE id=?",(time.time(),time.time()+poll_interval(db,job),job['id']))
@@ -435,7 +521,7 @@ class Monitor:
             totals=coverage(db)
             db.execute('INSERT INTO metric_history VALUES(?,?,?,?)',(bucket,totals['movies'],totals['venues'],totals['sessions']))
         db.commit()
-        if ready:
+        if ready or (not muted and not self.dry_run):
             # Serialize sending with preference saves: after a pause is saved,
             # no new delivery can begin using an earlier settings read.
             db.execute('BEGIN IMMEDIATE')
@@ -447,7 +533,7 @@ class Monitor:
                 except Exception as error:
                     db.execute('ROLLBACK TO prime');logging.warning('initial availability check: %s',type(error).__name__)
                 db.execute('RELEASE prime')
-            if (running and meta(db,'notifications_paused','0')!='1') or followup:
+            if ready and ((running and meta(db,'notifications_paused','0')!='1') or followup):
                 delivered_id=drain(db,commit=False)
                 if delivered_id:preferences.delivered(db,delivered_id)
             db.commit()

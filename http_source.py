@@ -1,7 +1,7 @@
 """Persistent source request budgets and safe HTTP outcome logging."""
 import io,math,os,random,time,urllib.request,urllib.error
 from urllib.parse import urlsplit
-from store import connect
+from store import connect,meta
 
 class SourceWait(RuntimeError):
     def __init__(self,until):
@@ -47,10 +47,17 @@ def night(now=None):
     return start<=hour<end if start<end else hour>=start or hour<end
 
 
-def policy(host,now=None):
+LISTING_INTERVALS = (30, 60, 120)
+
+def listing_interval(db):
+    return int(meta(db, 'listing_interval', '60'))
+
+
+def policy(host,now=None,listing_gap=60):
     """(hourly limit, minimum gap) for alert checks to this host. At night (BMS_NIGHT_HOURS)
     the showtime and seat hosts run at half speed: fewer requests while few people book."""
     limit,gap=(int(3600//seat_gap()),seat_gap()) if host==SEAT_HOST else POLICIES[host]
+    if host=='in.bookmyshow.com':limit,gap=3600//listing_gap,listing_gap
     if host in (SEAT_HOST,'in.bookmyshow.com') and night(now):
         return (max(1,limit//2),gap*2)
     return (limit,gap)
@@ -129,11 +136,12 @@ def reserve(db,url,now=None,manual=False,metadata=False):
     try:
         manual=bool(manual and parts.netloc in MANUAL)
         lane=1 if manual else 2 if metadata and parts.netloc in METADATA else 0
-        limit,gap=policy(parts.netloc,now) if lane==0 else (MANUAL,METADATA)[lane-1][parts.netloc]
+        source_policy=policy(parts.netloc,now,listing_interval(db))
+        limit,gap=source_policy if lane==0 else (MANUAL,METADATA)[lane-1][parts.netloc]
         row=db.execute('SELECT not_before FROM source_hosts WHERE host=?',(parts.netloc,)).fetchone()
         count,oldest=db.execute('SELECT count(*),min(at) FROM source_requests WHERE host=? AND at>? AND manual=?',(parts.netloc,now-3600,lane)).fetchone()
         # Every lane honors the host spacing, including manual and metadata reads.
-        gap=max(gap,policy(parts.netloc,now)[1])
+        gap=max(gap,source_policy[1])
         last,last_id=db.execute('SELECT at,id FROM source_requests WHERE host=? AND at>? ORDER BY at DESC LIMIT 1',(parts.netloc,now-3600)).fetchone() or (None,None)
         # Alert checks get random extra spacing; manual and metadata reads keep their short gap.
         spacing=gap+(jitter(last_id) if lane==0 else 0)
