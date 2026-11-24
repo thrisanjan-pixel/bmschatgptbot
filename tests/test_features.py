@@ -151,6 +151,19 @@ class UrgentTests(Base):
    self.db.execute('INSERT INTO jobs(id,kind,url,payload,due) VALUES(?,?,?,?,?)',(name,'discovery','https://x/'+name,json.dumps({'movie':name,'event':'E'+name,'date':''}),due))
   self.db.commit();self.alert(row_show='',rows=[],movies=['u'],urgent=True,categories=[]);prefs.save(self.db,{**prefs.defaults(),'movies':['a'],'enabled':True},create=True)
   self.assertEqual([r['id'] for r in api_watch.listing_order(self.db,now)],['a','u'])
+ def test_new_listing_is_not_starved_by_a_steady_rotation(self):
+  # Six routine listings that each come back 60 s after a check: one is always a bit over 300 s overdue.
+  prefs.save(self.db,{**prefs.defaults(),'movies':['Old'],'dates':['20261217'],'enabled':True},create=True)
+  now=10000.0
+  for i in range(6):
+   self.db.execute('INSERT INTO jobs(id,kind,url,payload,due,checked) VALUES(?,?,?,?,?,?)',('old'+str(i),'discovery','https://x/o'+str(i),json.dumps({'movie':'Old','event':'EO'+str(i),'date':'20261217'}),now-305+60*i,now-365+60*i))
+  self.db.commit();prefs.save(self.db,{**prefs.defaults(),'movies':['New'],'enabled':True},create=True)
+  self.db.execute("INSERT INTO jobs(id,kind,url,payload,due) VALUES('new','discovery','https://x/n',?,0)",(json.dumps({'movie':'New','event':'EN','date':''}),));self.db.commit()
+  picks=[]
+  for turn in range(3):
+   job=api_watch.next_job(self.db,now);picks.append(job['id'])
+   self.db.execute('UPDATE jobs SET due=?,checked=? WHERE id=?',(now+300,now,job['id']));self.db.commit();now+=60
+  self.assertIn('new',picks)
  def test_urgent_seat_reads_get_about_half_the_turns(self):
   self.add(*[show(i) for i in range(3)])
   prefs.save(self.db,any_prefs(movies=['Movie'],urgent=True,cinemas=['U'],rows=['Gold / B']),create=True)

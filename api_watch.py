@@ -251,14 +251,24 @@ def listing_order(db, now):
       )
       SELECT * FROM eligible WHERE watched OR (NOT ? AND NOT ?)""",
       (*movies, now, now, background_paused, background_recent)).fetchall()
+    # A never-checked alert listing joins the end of the overdue line (as if due 300 s ago).
+    # Store that place once, so it ages like the others; a place recomputed every turn
+    # never got older and lost to routine listings forever.
+    fresh = [row['id'] for row in rows if row['watched'] and not row['due']]
+    if fresh:
+        db.executemany('UPDATE jobs SET due=? WHERE id=? AND due=0', [(now-300, i) for i in fresh]);db.commit()
+    pinned = set(fresh)
+    def base(row):
+        return now-300 if row['id'] in pinned else row['due']
     def effective(row):
-        return now-(now-row['due'])*3 if row['id'] in hot and row['due'] else row['due']
+        # The urgent boost counts from the first stored place, not the one pinned this turn.
+        return now-(now-row['due'])*3 if row['id'] in hot and row['due'] else base(row)
     def order(row):
         # Alert listings take turns by how overdue they are. A never-checked listing
         # joins the end of the overdue line (as if due 300 s ago) instead of jumping ahead of
         # long-overdue ones; an unwatched one keeps waiting its turn.
         due=effective(row)
-        rank=0 if not (recovering or background_recent) and (row['due']>0 or row['watched']) and due<now-300 else 1 if row['watched'] else 2
+        rank=0 if not (recovering or background_recent) and (base(row)>0 or row['watched']) and due<now-300 else 1 if row['watched'] else 2
         return (rank, due or (now-300 if row['watched'] else now), row['checked'])
     return sorted(rows, key=order)
 
