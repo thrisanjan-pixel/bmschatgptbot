@@ -1760,6 +1760,25 @@ html.sw-hidden *,html.sw-hidden *::before,html.sw-hidden *::after{animation-play
 #listing-cadence select{padding:8px;border-radius:8px;background:var(--surface,#171a20);color:inherit}
 #listing-cadence-result{flex-basis:100%;margin:0}
 </style>
+<style id="sw-layout-v2">
+/* Overview layout: use the screen width, one compact status row, alerts beside a wider check queue. */
+@media (min-width:1100px){
+ .wrap{max-width:1560px}
+ #overview .page-title{margin-bottom:20px;align-items:flex-end}
+ #inventory-refresh-result{margin:-8px 0 14px;text-align:right}
+ .sw-deck{grid-template-columns:minmax(0,1.2fr) minmax(0,3fr);gap:14px;margin-bottom:14px}
+ .sw-deck #statusline{min-height:0;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:flex-start;gap:6px 20px;padding:22px 26px}
+ .sw-deck #statusline .dot{width:40px;height:40px;margin:0 4px;flex:none}
+ .sw-deck #statusline .status-copy{flex:1;width:auto;min-width:0}
+ .sw-deck #statusline b{font-size:24px}
+ .sw-deck #cooldown-progress{flex-basis:100%}
+ .cards .metric{padding:18px 20px}
+ .sw-reqbar{margin:18px 0 14px}
+ .alerts-layout{grid-template-columns:minmax(0,1fr) clamp(440px,32vw,560px);gap:18px}
+ .alert-grid{grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
+}
+</style>
+
 </head>
 <body>
 <div class="sw-ambient" aria-hidden="true"><i></i><i></i><i></i></div>
@@ -2153,7 +2172,7 @@ function renderAlerts(force){
  const alerts=watchData.alerts||[],running=alerts.filter(a=>alertStatus(a)==='active').length;
  $('alert-count').textContent=alerts.length+' saved · '+running+' active';
  document.querySelectorAll('[data-filter]').forEach(button=>{const count=button.dataset.filter==='all'?alerts.length:alerts.filter(a=>alertStatus(a)===button.dataset.filter).length;button.classList.toggle('active',button.dataset.filter===alertFilter);button.textContent=({all:'All',active:'Active',completed:'Completed',cancelled:'Cancelled',missed:'Missed',paused:'Drafts'}[button.dataset.filter])+' ('+count+')'});
- const shown=alerts.filter(a=>alertFilter==='all'||alertStatus(a)===alertFilter);
+ const rank={active:0,paused:1,missed:2,completed:3,cancelled:4},shown=alerts.filter(a=>alertFilter==='all'||alertStatus(a)===alertFilter).map((a,i)=>[a,i]).sort((x,y)=>((rank[alertStatus(x[0])]??5)-(rank[alertStatus(y[0])]??5))||x[1]-y[1]).map(x=>x[0]);
  if(!shown.length){root.append(el('div','alert-empty',alerts.length?'No requests in this section.':'No requests yet. Create an alert to get started.'));return}
  for(const rule of shown){const p=rule.preferences,status=alertStatus(rule),card=el('article','alert-card'),title=el('h3','',summary('movies',p.movies)),tags=el('div','request-tags'),badge=el('span','alert-status '+status,status==='active'?'Active':status==='paused'?'Draft':status[0].toUpperCase()+status.slice(1)),details=el('dl','alert-details'),actions=el('div','alert-card-actions');tags.append(badge);if(p.urgent)tags.append(el('span','alert-status urgent','Urgent'));if(p.min_seats||p.party_size)tags.append(el('span','alert-status','Min '+(p.min_seats||p.party_size)+' seats'));if(p.open_on_pc)tags.append(el('span','alert-status pc','Opens on PC'));tags.append(el('span','provider-tag','BMS'));{const days=p.row_show&&p.row_show!=='*'?[p.row_show.split(':')[1]||'']:p.dates;if(days.length&&days.every(d=>/^\d{8}$/.test(d)&&d<today))tags.append(el('span','alert-status past','Past'))}
  const exact=watchData.options.showtimes?.find(s=>s.id===p.row_show),day=p.row_show&&/^[^:]*:\d{8}:/.test(p.row_show)?prettyDate(p.row_show.split(':')[1]):p.dates.length?summary('dates',p.dates):'All future dates',time=p.row_show==='*'?'Any showtime'+(rule.row_targets!=null?' · '+rule.row_targets+' being watched':''):p.row_show?(exact?exact.time:'Exact showtime'):p.time_from||p.time_to?(p.time_from||'00:00')+' – '+(p.time_to||'23:59'):'Any time';detail(details,'When',day+' · '+time);detail(details,'Theatre',p.cinemas.length?summary('cinemas',p.cinemas):'All theatres');detail(details,'Seat type',p.categories.length?summary('categories',p.categories):'All');
