@@ -16,7 +16,7 @@ from urllib.parse import parse_qs,urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 DEFAULT_DB='/workspace/booking-tracker/state.sqlite3'
-PWA_FILES={'/manifest.json':('manifest.json','application/manifest+json'),'/static/icon-180.png':('icon-180.png','image/png'),'/static/icon-192.png':('icon-192.png','image/png'),'/static/icon-512.png':('icon-512.png','image/png')}
+PWA_FILES={'/manifest.json':('manifest.json','application/manifest+json'),'/static/icon-180.png':('icon-180.png','image/png'),'/static/icon-192.png':('icon-192.png','image/png'),'/static/icon-512.png':('icon-512.png','image/png'),'/static/geist.woff2':('geist.woff2','font/woff2'),'/static/geist-mono.woff2':('geist-mono.woff2','font/woff2')}
 from store import connect, coverage, meta, setmeta
 import watch_preferences as preferences
 
@@ -37,9 +37,10 @@ def check_queue(db):
     later=sorted((r for r in db.execute('SELECT * FROM jobs WHERE due>? AND (expires=0 OR expires>?)',(now,now)) if api_watch.is_watched(json.loads(r['payload']),wanted)),key=lambda r:r['due'])
     has_requests=db.execute("SELECT 1 FROM sqlite_master WHERE name='source_requests'").fetchone()
     last=(db.execute("SELECT max(at) FROM source_requests WHERE host='in.bookmyshow.com'").fetchone()[0] if has_requests else 0) or 0
-    # One listing request a minute; background work takes about one turn in five.
-    step=75 if len(order)>len(alert_rows) else 60
-    at=max(now,float(meta(db,'listing_budget_until','0')),last+60);upcoming=[]
+    from http_source import listing_interval,policy
+    gap=policy('in.bookmyshow.com',now,listing_interval(db))[1]
+    step=gap*1.25 if len(order)>len(alert_rows) else gap
+    at=max(now,float(meta(db,'listing_budget_until','0')),last+gap);upcoming=[]
     for row in alert_rows+later:
         at=max(at,row['due']);upcoming.append({**listing(row),'eta':at});at+=step
     for item in row_watch.queue(db,now):
@@ -57,7 +58,10 @@ def check_queue(db):
         else:continue
         recent.append({**item,'at':stat['last_attempt'],'ok':stat['last_success']>=stat['last_attempt'],'error':stat['error']})
         if len(recent)>=8:break
-    return {'now':now,'upcoming':upcoming[:10],'recent':recent}
+    inventory=api_watch.listing_refresh(db,now,inventory=True)
+    inventory['pending']=len(inventory['pending'])
+    return {'now':now,'upcoming':upcoming[:10],'recent':recent,'inventory_refresh':inventory,
+            'listing_interval':listing_interval(db),'listing_effective_interval':gap}
 
 
 def listing_queue(db):
@@ -346,6 +350,17 @@ def handler(path, public=False):
                     db=connect(path)
                     requested=data.pop('alert_id',None)
                     action=data.pop('action','')
+                    if action=='refresh_inventory':
+                        if data or requested is not None:raise ValueError('Invalid inventory refresh')
+                        from api_watch import listing_refresh
+                        refresh=listing_refresh(db,time.time(),queue=True,inventory=True)
+                        refresh['pending']=len(refresh['pending'])
+                        self.reply(json.dumps(refresh));return
+                    if action=='set_listing_interval':
+                        if requested is not None or set(data)!={'seconds'}:raise ValueError('Invalid cadence request')
+                        from api_watch import set_listing_interval
+                        set_listing_interval(db,data['seconds'])
+                        self.reply(json.dumps({'seconds':data['seconds']}));return
                     if action=='register_movie':
                         if set(data)!={'url'} or not isinstance(data['url'],str):raise ValueError('Provide a BookMyShow movie link')
                         from api_watch import register_movie

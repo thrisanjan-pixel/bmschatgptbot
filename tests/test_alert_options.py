@@ -1,5 +1,6 @@
 """Each alert option alerts the right showtime and ignores the wrong one."""
-import copy,json,time,unittest
+import copy,json,os,time,unittest
+from unittest.mock import patch
 from api_watch import ingest
 from store import setmeta
 import row_watch
@@ -17,6 +18,16 @@ def count(db,alert=None):
     return db.execute('SELECT count(*) FROM outbox'+(' WHERE alert_id=?' if alert else ''),(alert,) if alert else ()).fetchone()[0]
 
 class MatchTests(unittest.TestCase):
+    def test_aot_catalogue_name_and_listing_title_use_the_same_filters(self):
+        s=show(movie='AOT - Aakasamlo Oka Tara',venue_code='ALUC',
+               language='Telugu • DOLBY CINEMA 2D',format='DOLBY CINEMA',time='07:50PM')
+        alert=pref(movies=['Aakasamlo Oka Tara'],cinemas=['ALUC'],screens=['DOLBY CINEMA'],
+                   languages=['Telugu'],formats=['2D'],dates=[DAY],categories=['Gold'],
+                   time_from='19:50',time_to='19:50')
+        self.assertTrue(prefs.matches(s,alert))
+        for key,value in [('movies',['AOT']),('screens',['IMAX']),('languages',['Tamil']),
+                          ('formats',['3D']),('categories',['GOLD.']),('time_from','19:51')]:
+            self.assertFalse(prefs.matches(s,{**alert,key:value}),key)
     def test_each_filter_accepts_right_show_and_rejects_wrong_one(self):
         s=show()
         for key,good,bad in [('movies',['  test   MOVIE '],['Other']),('cinemas',['OTHER','TEST'],['OTHER']),('screens',['pcx screen'],['IMAX']),
@@ -41,6 +52,33 @@ class IngestOptionTests(unittest.TestCase):
     def setUp(self):
         fixtures.ApiTests.setUp(self);setmeta(self.db,"watch_preferences","{}");self.db.commit()  # no fixture legacy alert
     def alert(self,**v):return prefs.save(self.db,pref(enabled=True,once=False,interval_minutes=10,**v),create=True)
+    def test_catalogue_title_schedules_and_primes_prefixed_listing(self):
+        from api_watch import is_watched,wanted_dates
+        data=response(status='3')
+        ingest(self.db,self.job,data);self.db.commit()
+        raw=self.db.execute('SELECT id,payload FROM sessions').fetchone()
+        details=json.loads(raw['payload'])
+        details.update(movie='AOT - Aakasamlo Oka Tara',language='Telugu • DOLBY CINEMA 2D',format='DOLBY CINEMA')
+        self.db.execute('UPDATE sessions SET payload=? WHERE id=?',(json.dumps(details),raw['id']))
+        self.db.commit()
+        alert=self.alert(movies=['Aakasamlo Oka Tara'],cinemas=['TEST'],screens=['DOLBY CINEMA'],
+                         languages=['Telugu'],formats=['2D'],dates=[DAY],categories=['Gold'])
+        payload={'movie':'AOT - Aakasamlo Oka Tara','event':EVENT,'date':DAY}
+        self.assertTrue(is_watched(payload,wanted_dates(self.db)))
+        payload['date']='20000101'
+        self.assertFalse(is_watched(payload,wanted_dates(self.db)))
+        prefs.prime_availability(self.db)
+        self.assertEqual(count(self.db,alert),1)
+
+    def test_matching_filters_with_different_minimums_each_queue_verification(self):
+        ingest(self.db,self.job,response(status='3'));self.db.commit()
+        first=self.alert(min_seats=6)
+        second=self.alert(min_seats=12)
+        with patch.dict(os.environ,{'BMS_ROWS_ENABLED':'1'}):
+            prefs.prime_availability(self.db)
+            self.assertTrue(prefs.gate_waiting(self.db,first))
+            self.assertTrue(prefs.gate_waiting(self.db,second))
+
     def test_screen_cinema_and_category_only_alert_the_matching_show(self):
         good=self.alert(cinemas=['TEST'],categories=['Gold'],dates=[DAY]);bad=self.alert(cinemas=['NOPE']);other=self.alert(categories=['Platinum'])
         ingest(self.db,self.job,response());ingest(self.db,self.job,response('2'))
@@ -93,6 +131,38 @@ class IngestOptionTests(unittest.TestCase):
         ingest(self.db,self.job,response(status='3'));self.db.commit()
         a=self.alert(new_shows=False);b=self.alert(new_shows=False);prefs.prime_availability(self.db)
         self.assertEqual(count(self.db,a)+count(self.db,b),1)
+    def test_initial_availability_retries_after_listing_inventory_arrives(self):
+        alert=self.alert(new_shows=False,notify_existing=True)
+        prefs.prime_availability(self.db)
+        self.assertEqual(count(self.db,alert),0)
+        ingest(self.db,self.job,response(status='3'))
+        prefs.prime_availability(self.db)
+        prefs.prime_availability(self.db)
+        self.assertEqual(count(self.db,alert),1)
+    def test_reset_queues_a_new_notification_for_seats_that_are_still_open(self):
+        ingest(self.db,self.job,response(status='3'));self.db.commit()
+        alert=prefs.save(self.db,pref(enabled=True,new_shows=False,notify_existing=True,once=True),create=True)
+        prefs.prime_availability(self.db)
+        self.db.execute('UPDATE outbox SET delivered=1 WHERE alert_id=?',(alert,))
+        prefs.delivered(self.db,alert)
+        self.db.commit()
+        prefs.transition(self.db,alert,'reset')
+        prefs.prime_availability(self.db)
+        prefs.prime_availability(self.db)
+        self.assertEqual(count(self.db,alert),2)
+    def test_reset_requeues_minimum_seat_verification(self):
+        ingest(self.db,self.job,response(status='3'));self.db.commit()
+        alert=prefs.save(self.db,pref(enabled=True,new_shows=False,notify_existing=True,once=True,min_seats=6),create=True)
+        with patch.dict(os.environ,{'BMS_ROWS_ENABLED':'1'}):
+            prefs.prime_availability(self.db)
+            self.assertTrue(prefs.gate_waiting(self.db,alert))
+            self.db.execute('DELETE FROM pending_seat_photos WHERE alert_id=?',(alert,))
+            self.db.commit()
+            prefs.transition(self.db,alert,'reset')
+            prefs.prime_availability(self.db)
+            prefs.prime_availability(self.db)
+            self.assertTrue(prefs.gate_waiting(self.db,alert))
+            self.assertEqual(self.db.execute('SELECT count(*) FROM pending_seat_photos WHERE alert_id=?',(alert,)).fetchone()[0],1)
     def test_disappeared_show_is_deactivated_and_silent(self):
         a=self.alert(availability=False)
         ingest(self.db,self.job,response());ingest(self.db,self.job,response('2'));self.assertEqual(count(self.db,a),1)
