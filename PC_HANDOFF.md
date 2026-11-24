@@ -2,6 +2,12 @@
 
 This document transfers project context from a cloud Codex conversation. It is a handoff summary, not a full chat transcript. Read it, README.md and deploy/RAILWAY.md before continuing. The user wants the assistant to perform the work, with minimal repeated questions.
 
+## Update (25 Nov 2026, ~00:20 IST, Claude Code)
+- Live is Railway deployment `75f814d6-ff77-4969-a77d-e7c9a463fdc6` = branch `feat/sold-out-rotation` (PR #22, open), on top of main `2310b8d`.
+- Railway variable `BMS_SOLD_OUT_RECHECK` is now `0` (was 180). With the new code, 0 turns the sold-out backstop off: a sold-out answer counts as a normal read, and every 20 s seat slot rotates through all watched showtimes in turn with no idle wait. With 4 watched AMB showtimes each is read about every 80 s. Old code would treat 0 as 120 s, so do not roll back the code without resetting this variable to 180.
+- After deploy: healthz and readyz 200, seat requests 20-21 s apart, all HTTP 200.
+- The user asked for every seat alert every 20 s. That is not possible per show: the seat host allows one read per 20 s in total (15 s and 10 s gaps got 21-hour 429 blocks), so the gap per show is 20 s times the number of watched showtimes.
+
 ## Update (24 Nov 2026, ~23:55 IST, Claude Code)
 - Live is Railway deployment `97c7e0d3-3b7a-46e4-8cc2-42886a418e40`, built from `feat/overview-layout`. PR #19 (split queue) and PR #20 (overview layout) are both merged; main `a5d5ad2` matches live code. Deploy from main.
 - Change: Overview is full width (`.wrap` max 1560 px), monitor status and the three counts sit in one compact row, alert cards use a two-column grid beside a wider check queue (440-560 px), and active alerts are listed before drafts, missed, completed and cancelled. CSS is in the `<style id="sw-layout-v2">` block and applies from 1100 px; the phone layout is unchanged.
