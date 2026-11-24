@@ -56,9 +56,18 @@ def problems(db,now):
 
 def check(db,now=None):
  now=time.time() if now is None else now
+ # Per-alert "BMS checks blocked for N min" warning and its recovery message.
+ from alert_health import check as check_blind
+ rules=prefs.active(db)
+ check_blind(db,rules,now)
+ # The per-alert blocked-check warning replaces the duplicate listing-staleness
+ # warning for listing alerts. Seat-row warnings stay as they are.
+ listing_keys={'source:'+'|'.join(sorted(prefs.normalized(m) for m in r['preferences']['movies'])) for r in rules if not r['preferences']['row_show']}
  if not meta(db,'health_watch_started'):setmeta(db,'health_watch_started',now)
- current=problems(db,now)
- previous=json.loads(meta(db,'health_watch_issues','{}'))
+ current={k:v for k,v in problems(db,now).items() if k not in listing_keys}
+ previous={k:v for k,v in json.loads(meta(db,'health_watch_issues','{}')).items() if k not in listing_keys}
+ from alert_health import view,blind_text,blind_minutes
+ setmeta(db,'blind_watch_issues',json.dumps({'blind:'+r['id']:blind_text(blind_minutes(db))+' — '+', '.join(r['preferences']['movies']) for r in rules if view(db,r,now)['blocked']}))
  already_reported_seat_limit = any(
   key.startswith('source:') and 'Seat ' in message and 'HTTP 429' in message
   for key,message in previous.items()

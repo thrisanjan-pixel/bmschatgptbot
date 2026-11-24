@@ -26,15 +26,18 @@ def check_queue(db):
     import api_watch,row_watch
     import watch_preferences as prefs
     now=time.time();wanted=api_watch.wanted_dates(db)
+    manual=api_watch.listing_refresh(db,now)
+    manual_ids=set(manual['pending'])
     def version(payload):
         shows=wanted['profiles'].get(payload.get('event')) or []
         return shows[0]['language'].replace('•','·') if shows else ''
     def listing(row):
         payload=json.loads(row['payload'])
-        return {'kind':'showtimes','movie':payload.get('movie',''),'date':payload.get('date',''),'detail':version(payload) or 'All versions','checked':row['checked'],'error':row['error']}
+        label=version(payload)
+        return {'kind':'showtimes','movie':payload.get('movie',''),'date':payload.get('date',''),'detail':'Listing version · '+label if label else 'BookMyShow listing','checked':row['checked'],'error':row['error']}
     order=api_watch.listing_order(db,now)
     alert_rows=[r for r in order if r['watched']]
-    later=sorted((r for r in db.execute('SELECT * FROM jobs WHERE due>? AND (expires=0 OR expires>?)',(now,now)) if api_watch.is_watched(json.loads(r['payload']),wanted)),key=lambda r:r['due'])
+    later=sorted((r for r in db.execute('SELECT * FROM jobs WHERE due>? AND (expires=0 OR expires>?)',(now,now)) if r['id'] in manual_ids or api_watch.is_watched(json.loads(r['payload']),wanted)),key=lambda r:r['due'])
     has_requests=db.execute("SELECT 1 FROM sqlite_master WHERE name='source_requests'").fetchone()
     last=(db.execute("SELECT max(at) FROM source_requests WHERE host='in.bookmyshow.com'").fetchone()[0] if has_requests else 0) or 0
     from http_source import listing_interval,policy
@@ -56,11 +59,13 @@ def check_queue(db):
             show=json.loads(show[0]) if show else {}
             item={'kind':'seats','movie':show.get('movie',''),'date':show.get('date',''),'detail':' · '.join(filter(None,[show.get('venue',''),show.get('time','')]))}
         else:continue
-        recent.append({**item,'at':stat['last_attempt'],'ok':stat['last_success']>=stat['last_attempt'],'error':stat['error']})
+        # Every check runs directly from the Railway server.
+        recent.append({**item,'checked_via':'Railway','at':stat['last_attempt'],'ok':stat['last_success']>=stat['last_attempt'],'error':stat['error']})
         if len(recent)>=8:break
     inventory=api_watch.listing_refresh(db,now,inventory=True)
     inventory['pending']=len(inventory['pending'])
-    return {'now':now,'upcoming':upcoming[:10],'recent':recent,'inventory_refresh':inventory,
+    manual['pending']=len(manual['pending'])
+    return {'now':now,'upcoming':upcoming[:10],'recent':recent,'inventory_refresh':inventory,'listing_refresh':manual,
             'listing_interval':listing_interval(db),'listing_effective_interval':gap}
 
 
@@ -105,6 +110,7 @@ def status(path):
                 'hosted':os.environ.get('BMS_PUBLIC')=='1',
                 'telegram_enabled':meta(db,'telegram_enabled','1')=='1',
                 'stale_warning':__import__('health_watch').stale_settings(db),
+                'blind_warning':{'minutes':__import__('alert_health').blind_minutes(db)},
                 'telegram_configured':telegram.configured(),
                 'mode':meta(db,'monitor_mode','browser'),
                 'last_success':float(meta(db,'api_last_success',meta(db,'catalog_last_success','0'))),
@@ -263,6 +269,21 @@ def handler(path, public=False):
                 except sqlite3.Error:self.reply('Seat reader is busy. Please retry shortly.',503);return
                 except (ValueError,TypeError) as e:self.reply(html.escape(str(e)),400);return
                 self.reply('Loading real rows for this show.',202);return
+            if self.path=='/api/blind-settings':
+                if not self.authorized():return
+                if (not public and not self.local_host()) or not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return
+                import alert_health
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<64:raise ValueError()
+                    data=json.loads(self.rfile.read(length))
+                    if not isinstance(data,dict) or set(data)!={'minutes'} or type(data['minutes']) is not int or data['minutes'] not in alert_health.BLIND_MINUTES:raise ValueError()
+                    db=connect(path)
+                    try:
+                        db.execute('BEGIN IMMEDIATE');setmeta(db,'blind_warning_minutes',str(data['minutes']));db.commit()
+                    finally:db.close()
+                except (ValueError,TypeError,sqlite3.Error):self.reply(json.dumps({'error':'Could not save the warning setting. Retry.'}),400);return
+                self.reply(json.dumps({'minutes':data['minutes']}));return
             if self.path=='/api/seat-retry':
                 if not self.authorized():return
                 if (not public and not self.local_host()) or not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):self.reply('Request rejected.',403);return
@@ -350,10 +371,10 @@ def handler(path, public=False):
                     db=connect(path)
                     requested=data.pop('alert_id',None)
                     action=data.pop('action','')
-                    if action=='refresh_inventory':
-                        if data or requested is not None:raise ValueError('Invalid inventory refresh')
+                    if action in ('refresh_listings','refresh_inventory'):
+                        if data or requested is not None:raise ValueError('Invalid refresh request')
                         from api_watch import listing_refresh
-                        refresh=listing_refresh(db,time.time(),queue=True,inventory=True)
+                        refresh=listing_refresh(db,time.time(),queue=True,inventory=action=='refresh_inventory')
                         refresh['pending']=len(refresh['pending'])
                         self.reply(json.dumps(refresh));return
                     if action=='set_listing_interval':

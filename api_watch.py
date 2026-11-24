@@ -148,6 +148,8 @@ def ingest(db,job,data):
     for variant in result['variants']:schedule(db,variant,'',title,args['notify_first'])
     db.execute('DELETE FROM meta WHERE key=?',('waiting_show:'+job['id'],))
     setmeta(db,'api_last_success',time.time())
+    from alert_health import listing as mark_listing
+    mark_listing(db,args,{'day':result['day'],'shows':current})
 
 def seed(db,previous_db=None):
     enqueue(db,'catalog',CATALOG,{})
@@ -461,6 +463,12 @@ class Monitor:
                 # Only the undated listing says the event has no shows yet; a dated one may just be an empty day.
                 if not json.loads(job['payload']).get('date'):setmeta(db,'upcoming_event:'+json.loads(job['payload'])['event'],'1')
                 setmeta(db,'api_last_success',time.time())
+                # BMS answered "no shows yet": a usable check for alerts waiting on this movie, not a blind one.
+                # Only the undated listing proves it; an empty dated listing is not a verified check.
+                payload=json.loads(job['payload'])
+                if not payload.get('date'):
+                    from alert_health import listing as mark_listing
+                    mark_listing(db,payload,{'day':'','shows':{},'all_dates':True})
             else:ingest(db,job,data)
             extend_inventory_refresh(db,job['id'],time.time())
             streak_key='listing_success_streak:'+job['id']

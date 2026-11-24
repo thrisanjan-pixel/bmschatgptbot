@@ -156,6 +156,9 @@ def rules(db):
         elif source_refused and not error:health='Source refused a check'
         rule['health']={'label':health if rule['status']=='active' else rule['status'].capitalize(),'last_success':checked,'error':error,'next_check':due,'retry_until':max(cooldown,budget) if max(cooldown,budget)>now else 0,'pending_messages':delivery[0],'delivery_attempts':delivery[1]}
         rule['health'].update(source_refused=source_refused,verification_failed=verification_failed)
+        from alert_health import view as blind_view
+        rule['health']['blind']=blind_view(db,rule,now)
+        if rule['health']['blind']['blocked']:rule['health']['label']=f"BMS checks blocked for {rule['health']['blind']['threshold_seconds']//60} min, alerts may be delayed"
         keys=targets if p['row_show'] else [r['id'] for r in db.execute('SELECT id,payload FROM jobs') if movie_key(json.loads(r['payload']).get('movie','')) in {movie_key(m) for m in p['movies']}]
         source='rows' if p['row_show'] else 'listings'
         intervals=[]
@@ -530,7 +533,9 @@ def options(db):
         for row in db.execute("SELECT show_id,payload FROM row_layouts WHERE checked>0"):
             try:category_rows[row[0]]=[{'category':r['category'],'row':r['row']} for r in json.loads(row[1]).get('rows',[])]
             except (ValueError,KeyError,TypeError):continue
-    return {'category_rows':category_rows,**{k:sorted(v) for k,v in result.items()},'cinemas':[{'value':k,'label':v} for k,v in sorted(cinema_names.items(),key=lambda x:x[1])],
+    today=dt.datetime.now(dt.timezone(dt.timedelta(hours=5,minutes=30))).date()
+    calendar_dates=[(today+dt.timedelta(days=offset)).strftime('%Y%m%d') for offset in range(7)]
+    return {'category_rows':category_rows,'calendar_dates':calendar_dates,**{k:sorted(v) for k,v in result.items()},'cinemas':[{'value':k,'label':v} for k,v in sorted(cinema_names.items(),key=lambda x:x[1])],
             'cinema_names':cinema_names,
             'venue_options':{code:{k:sorted(items) for k,items in value.items()} for code,value in venue_options.items()},
             'profiles':[{'movie':p[0],'cinema':p[1],'language':p[2],'format':p[3],'categories':p[4],'screen':p[5],'date':p[6],'url':p[7]} for p in sorted(profiles)],
