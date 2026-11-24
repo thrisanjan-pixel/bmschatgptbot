@@ -83,6 +83,14 @@ class AnyShowTests(Base):
   self.assertEqual(set(rows),{'s1','s2'});self.assertTrue(all(d==now for d in rows.values()))
   self.assertEqual(row_watch.queue_order(self.db,now)[2],{'s1','s2'})
   self.assertEqual({q['show_id'] for q in row_watch.queue(self.db,now)},{'s1','s2'})
+ def test_paused_alert_drops_its_queued_seat_reads(self):
+  self.add(show(1),show(2));self.alert();now=time.time()
+  row_watch.schedule_active(self.db,now)
+  self.db.execute("INSERT INTO row_layouts(show_id,payload,due,manual) VALUES('s9','{}',?,0)",(now+500,));self.db.commit()
+  with patch.object(prefs,'active',return_value=[]):row_watch.schedule_active(self.db,now+1)
+  rows={r['show_id']:r['due'] for r in self.db.execute('SELECT show_id,due FROM row_layouts')}
+  self.assertEqual(rows['s1'],0);self.assertEqual(rows['s2'],0);self.assertEqual(rows['s9'],now+500)
+  self.assertEqual({q['show_id'] for q in row_watch.queue(self.db,now+1)},{'s9'})
  def test_queue_rotates_fairly_over_targets(self):
   self.add(*[show(i) for i in range(5)]);self.alert();now=time.time();picked=[]
   for _ in range(15):
