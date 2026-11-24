@@ -2,6 +2,11 @@
 
 This document transfers project context from a cloud Codex conversation. It is a handoff summary, not a full chat transcript. Read it, README.md and deploy/RAILWAY.md before continuing. The user wants the assistant to perform the work, with minimal repeated questions.
 
+## Update (24 Nov 2026, ~23:55 IST, Claude Code)
+- Live is Railway deployment `97c7e0d3-3b7a-46e4-8cc2-42886a418e40`, built from `feat/overview-layout`. PR #19 (split queue) and PR #20 (overview layout) are both merged; main `a5d5ad2` matches live code. Deploy from main.
+- Change: Overview is full width (`.wrap` max 1560 px), monitor status and the three counts sit in one compact row, alert cards use a two-column grid beside a wider check queue (440-560 px), and active alerts are listed before drafts, missed, completed and cancelled. CSS is in the `<style id="sw-layout-v2">` block and applies from 1100 px; the phone layout is unchanged.
+- Local preview with live data: `D:/bms tracking bot/rr-tmp/proxy.py 8768` (launch config `layout-live`) serves the worktree page and forwards read-only `/api` GETs to production.
+
 ## Update (24 Nov 2026, ~23:30 IST, Claude Code)
 - Live is now Railway deployment `41ba3064-6a02-43d2-8465-5743654c3342` = branch `fix/seat-queue-eta` commit `6e0e50a` (PR #19, open), on top of main `6938ca4` (PR #18 merged).
 - Change: the check queue shows two lanes side by side, Showtimes (listing interval) and Seats (seat gap). `/api/check-queue` returns up to 6 upcoming and 5 recent per kind, plus `seat_gap`. Seat ETAs use the real seat gap (`policy(SEAT_HOST)`), not a fixed 60 s. Panel width 300 to 520 px.
